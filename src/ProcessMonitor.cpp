@@ -10,7 +10,6 @@
 namespace
 {
     constexpr DWORD kProgramLaunchSettleMs = 1200;
-    constexpr DWORD kMonitorSleepSliceMs = 100;
 
     std::wstring NormalizePath(const std::wstring& path)
     {
@@ -99,13 +98,19 @@ namespace
 
 ProcessMonitor::ProcessMonitor(StatusCallback callback)
     : runtimeConfiguration_(std::make_shared<RuntimeConfiguration>()),
-      statusCallback_(std::move(callback))
+      statusCallback_(std::move(callback)),
+      wakeEvent_(CreateEventW(nullptr, FALSE, FALSE, nullptr))
 {
 }
 
 ProcessMonitor::~ProcessMonitor()
 {
     Stop();
+
+    if (wakeEvent_ != nullptr)
+    {
+        CloseHandle(wakeEvent_);
+    }
 }
 
 void ProcessMonitor::UpdateConfiguration(const AppConfiguration& configuration)
@@ -113,6 +118,7 @@ void ProcessMonitor::UpdateConfiguration(const AppConfiguration& configuration)
     auto prepared = std::make_shared<RuntimeConfiguration>();
     prepared->globalPrograms = configuration.globalPrograms;
     prepared->watchedRules.reserve(configuration.watchedProcesses.size());
+    prepared->watchedProcessKeys.reserve(configuration.watchedProcesses.size());
 
     for (const auto& rule : configuration.watchedProcesses)
     {
@@ -125,16 +131,19 @@ void ProcessMonitor::UpdateConfiguration(const AppConfiguration& configuration)
         runtimeRule.processKey = NormalizeProcessKey(rule.processName);
         runtimeRule.displayName = rule.displayName.empty() ? rule.processName : rule.displayName;
         runtimeRule.programsToLaunch = rule.programsToLaunch;
+        prepared->watchedProcessKeys.insert(runtimeRule.processKey);
         prepared->watchedRules.push_back(std::move(runtimeRule));
     }
 
     std::scoped_lock lock(mutex_);
     runtimeConfiguration_ = std::move(prepared);
+    WakeWorker();
 }
 
 void ProcessMonitor::SetPollInterval(DWORD pollIntervalMs)
 {
     pollIntervalMs_.store(std::clamp<DWORD>(pollIntervalMs, 100, 60000));
+    WakeWorker();
 }
 
 void ProcessMonitor::Start()
@@ -155,6 +164,8 @@ void ProcessMonitor::Stop()
         return;
     }
 
+    WakeWorker();
+
     if (worker_.joinable())
     {
         worker_.join();
@@ -168,9 +179,15 @@ bool ProcessMonitor::IsRunning() const noexcept
     return running_.load();
 }
 
-ProcessMonitor::ProcessSnapshot ProcessMonitor::CaptureProcessSnapshot(bool includeProcessTree) const
+ProcessMonitor::ProcessSnapshot ProcessMonitor::CaptureProcessSnapshot(
+    bool includeProcessTree,
+    const std::unordered_set<std::wstring>* processKeyFilter) const
 {
     ProcessSnapshot snapshot;
+    if (processKeyFilter != nullptr)
+    {
+        snapshot.processIdsByName.reserve(processKeyFilter->size());
+    }
 
     HANDLE processSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (processSnapshot == INVALID_HANDLE_VALUE)
@@ -184,7 +201,12 @@ ProcessMonitor::ProcessSnapshot ProcessMonitor::CaptureProcessSnapshot(bool incl
     {
         do
         {
-            snapshot.processIdsByName[NormalizeProcessKey(entry.szExeFile)].push_back(entry.th32ProcessID);
+            const auto processKey = NormalizeProcessKey(entry.szExeFile);
+            if (processKeyFilter == nullptr || processKeyFilter->contains(processKey))
+            {
+                snapshot.processIdsByName[processKey].push_back(entry.th32ProcessID);
+            }
+
             if (includeProcessTree)
             {
                 snapshot.childrenByParent[entry.th32ParentProcessID].push_back(entry.th32ProcessID);
@@ -280,12 +302,20 @@ void ProcessMonitor::WorkerLoop()
     while (running_.load())
     {
         CheckRules();
-        DWORD remainingSleepMs = std::max<DWORD>(pollIntervalMs_.load(), kMonitorSleepSliceMs);
-        while (remainingSleepMs > 0 && running_.load())
+
+        if (!running_.load())
         {
-            const DWORD sleepSlice = std::min(remainingSleepMs, kMonitorSleepSliceMs);
-            Sleep(sleepSlice);
-            remainingSleepMs -= sleepSlice;
+            break;
+        }
+
+        const DWORD waitDurationMs = pollIntervalMs_.load();
+        if (wakeEvent_ != nullptr)
+        {
+            WaitForSingleObject(wakeEvent_, waitDurationMs);
+        }
+        else
+        {
+            Sleep(waitDurationMs);
         }
     }
 }
@@ -303,7 +333,7 @@ void ProcessMonitor::CheckRules()
         return;
     }
 
-    const auto snapshot = CaptureProcessSnapshot(false);
+    const auto snapshot = CaptureProcessSnapshot(false, &runtimeConfiguration->watchedProcessKeys);
 
     for (const auto& rule : runtimeConfiguration->watchedRules)
     {
@@ -410,7 +440,7 @@ void ProcessMonitor::StopProgramsForRule(const RuntimeRule& rule)
             return;
         }
 
-        records = it->second;
+        records = std::move(it->second);
         startedPrograms_.erase(it);
     }
 
@@ -438,5 +468,13 @@ void ProcessMonitor::StopProgramsForRule(const RuntimeRule& rule)
                 TryCloseProcess(pid);
             }
         }
+    }
+}
+
+void ProcessMonitor::WakeWorker() noexcept
+{
+    if (wakeEvent_ != nullptr)
+    {
+        SetEvent(wakeEvent_);
     }
 }

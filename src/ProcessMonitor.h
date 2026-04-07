@@ -38,6 +38,7 @@ private:
     {
         std::vector<LaunchProgram> globalPrograms;
         std::vector<RuntimeRule> watchedRules;
+        std::unordered_set<std::wstring> watchedProcessKeys;
     };
 
     struct LaunchedProgramRecord
@@ -58,7 +59,9 @@ private:
     void CheckRules();
     void StartProgramsForRule(const RuntimeConfiguration& runtimeConfiguration, const RuntimeRule& rule);
     void StopProgramsForRule(const RuntimeRule& rule);
-    ProcessSnapshot CaptureProcessSnapshot(bool includeProcessTree) const;
+    ProcessSnapshot CaptureProcessSnapshot(
+        bool includeProcessTree,
+        const std::unordered_set<std::wstring>* processKeyFilter = nullptr) const;
     bool IsProcessRunning(const ProcessSnapshot& snapshot, const std::wstring& processKey) const;
     std::unordered_set<DWORD> FindMatchingProcesses(const ProcessSnapshot& snapshot, const std::wstring& executablePath) const;
     std::unordered_set<DWORD> FindMatchingProcesses(
@@ -66,11 +69,13 @@ private:
         const std::wstring& executablePath,
         const std::wstring& normalizedExecutablePath) const;
     std::unordered_set<DWORD> BuildChildProcessSet(const ProcessSnapshot& snapshot, DWORD rootProcessId) const;
+    void WakeWorker() noexcept;
 
     std::shared_ptr<const RuntimeConfiguration> runtimeConfiguration_;
     StatusCallback statusCallback_;
     std::atomic<bool> running_{false};
     std::atomic<DWORD> pollIntervalMs_{2000};
+    HANDLE wakeEvent_{nullptr};
     std::thread worker_;
     std::mutex mutex_;
     std::unordered_set<std::wstring> activeRules_;

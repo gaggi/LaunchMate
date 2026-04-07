@@ -40,25 +40,14 @@ cmake --preset vs2022-x64
 cmake --build --preset build-vs2022-x64-release
 ```
 
-Optimized builds automatically enable compiler and linker optimizations. If supported by the active toolchain, LaunchMate also uses IPO/LTO for Release and RelWithDebInfo binaries.
-
-## GitHub Release
-
-This repository includes a GitHub Actions workflow at `.github/workflows/release.yml`.
-
-When you push a tag such as `v1.0.0`, GitHub Actions will:
-
-- build the Windows x64 Release binary
-- create `LaunchMate-v1.0.0-windows-x64.zip`
-- generate a SHA-256 checksum file
-- publish both files to a GitHub Release
-
-Example:
+Visual Studio 2022 x86:
 
 ```powershell
-git tag v1.0.0
-git push origin v1.0.0
+cmake --preset vs2022-x86
+cmake --build --preset build-vs2022-x86-release
 ```
+
+Optimized builds automatically enable compiler and linker optimizations. If supported by the active toolchain, LaunchMate also uses IPO/LTO for Release and RelWithDebInfo binaries.
 
 ## Configuration
 
@@ -71,19 +60,8 @@ Optional runtime flags:
 - `--poll-interval <value>` sets the polling interval in milliseconds
 - `--log` enables logging to `%APPDATA%\\LaunchMate\\launchmate.log`
 
-Examples:
-
-```powershell
-.\LaunchMate.exe --poll-interval 500
-.\LaunchMate.exe --poll-interval 1000 --log
-```
-
 ## Autostart
 
 When `Start with Windows` is enabled, LaunchMate writes an entry under:
 
 `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`
-
-## Assets
-
-The application icon is loaded from `resources/launchmate.ico`.

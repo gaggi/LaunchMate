@@ -44,6 +44,17 @@
         "value": "x64",
         "strategy": "set"
       }
+    },
+    {
+      "name": "vs2022-x86",
+      "displayName": "Visual Studio 2022 x86",
+      "description": "Configure a 32-bit multi-config build for Visual Studio 2022",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/build/vs2022-x86",
+      "architecture": {
+        "value": "Win32",
+        "strategy": "set"
+      }
     }
   ],
   "buildPresets": [
@@ -67,6 +78,18 @@
       "name": "build-vs2022-x64-release",
       "displayName": "Build Visual Studio 2022 x64 Release",
       "configurePreset": "vs2022-x64",
+      "configuration": "Release"
+    },
+    {
+      "name": "build-vs2022-x86-debug",
+      "displayName": "Build Visual Studio 2022 x86 Debug",
+      "configurePreset": "vs2022-x86",
+      "configuration": "Debug"
+    },
+    {
+      "name": "build-vs2022-x86-release",
+      "displayName": "Build Visual Studio 2022 x86 Release",
+      "configurePreset": "vs2022-x86",
       "configuration": "Release"
     }
   ]

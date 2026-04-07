@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake --preset vs2022-x64
+
+      - name: Build Release
+        run: cmake --build --preset build-vs2022-x64-release
+
+      - name: Package release assets
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $assetRoot = Join-Path $env:RUNNER_TEMP "launchmate-release"
+          $packageDir = Join-Path $assetRoot "LaunchMate"
+          $zipPath = Join-Path $env:GITHUB_WORKSPACE "LaunchMate-$tag-windows-x64.zip"
+          $hashPath = Join-Path $env:GITHUB_WORKSPACE "LaunchMate-$tag-windows-x64.sha256"
+
+          Remove-Item -Recurse -Force $assetRoot -ErrorAction SilentlyContinue
+          Remove-Item -Force $zipPath -ErrorAction SilentlyContinue
+          Remove-Item -Force $hashPath -ErrorAction SilentlyContinue
+
+          New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+
+          Copy-Item "build/vs2022-x64/Release/LaunchMate.exe" $packageDir
+          Copy-Item "README.md" $packageDir
+
+          Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath $zipPath
+
+          $hash = (Get-FileHash -Algorithm SHA256 $zipPath).Hash.ToLowerInvariant()
+          Set-Content -Path $hashPath -NoNewline -Value "$hash  $(Split-Path -Leaf $zipPath)"
+
+          "RELEASE_ZIP=$zipPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_SHA256=$hashPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Create or update GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $zipPath = $env:RELEASE_ZIP
+          $hashPath = $env:RELEASE_SHA256
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $zipPath $hashPath --clobber
+          }
+          else {
+            gh release create $tag $zipPath $hashPath --verify-tag --generate-notes
+          }

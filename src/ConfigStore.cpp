@@ -135,6 +135,7 @@ AppConfiguration ConfigStore::Load() const
         config.startWithWindows = ReadBool(object, "StartWithWindows", false);
         config.startInTray = ReadBool(object, "StartInTray", false);
         config.startMonitoringOnLaunch = ReadBool(object, "StartMonitoringOnLaunch", false);
+        config.checkForUpdatesOnStartup = ReadBool(object, "CheckForUpdatesOnStartup", true);
         config.windowWidth = ReadInt(object, "WindowWidth", 1210);
         config.windowHeight = ReadInt(object, "WindowHeight", 730);
         config.startMaximized = ReadBool(object, "StartMaximized", false);
@@ -188,6 +189,7 @@ void ConfigStore::Save(const AppConfiguration& configuration) const
     object["StartWithWindows"] = configuration.startWithWindows;
     object["StartInTray"] = configuration.startInTray;
     object["StartMonitoringOnLaunch"] = configuration.startMonitoringOnLaunch;
+    object["CheckForUpdatesOnStartup"] = configuration.checkForUpdatesOnStartup;
     object["WindowWidth"] = static_cast<double>(configuration.windowWidth);
     object["WindowHeight"] = static_cast<double>(configuration.windowHeight);
     object["StartMaximized"] = configuration.startMaximized;

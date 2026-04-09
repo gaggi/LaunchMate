@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <commdlg.h>
+#include <memory>
 #include <string>
+#include <thread>
 
 namespace
 {
@@ -194,6 +196,21 @@ namespace
         DialogBoxParamW(instanceHandle, MAKEINTRESOURCEW(IDD_PROGRAM_OPTIONS), owner, ProgramOptionsDialogProc, reinterpret_cast<LPARAM>(&state));
         return state.accepted;
     }
+
+    template <typename T>
+    void PostOwnedMessage(HWND windowHandle, UINT message, T* payload)
+    {
+        if (!PostMessageW(windowHandle, message, 0, reinterpret_cast<LPARAM>(payload)))
+        {
+            delete payload;
+        }
+    }
+
+    struct PostedUpdateCheckResult
+    {
+        UpdateCheckResult result;
+        bool interactive{false};
+    };
 }
 
 MainWindow::MainWindow(App& app)
@@ -277,6 +294,7 @@ bool MainWindow::Create(int showCommand)
         HandleTrayCommand(command);
     });
 
+    StartUpdateCheck(false);
     return true;
 }
 
@@ -338,6 +356,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         {
         case IdToggleMonitoring: ToggleMonitoring(); return 0;
         case IdSaveConfig: SaveConfiguration(); return 0;
+        case IdCheckForUpdates: StartUpdateCheck(true); return 0;
         case IdAddGlobalProgram: AddGlobalProgram(); return 0;
         case IdRemoveGlobalProgram: RemoveGlobalProgram(); return 0;
         case IdAddWatchedProcess: AddWatchedProcess(); return 0;
@@ -345,7 +364,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         case IdAddRuleProgram: AddRuleProgram(); return 0;
         case IdRemoveRuleProgram: RemoveRuleProgram(); return 0;
         default:
-            if (controlId >= IdSettingsMinimizeToTray && controlId <= IdSettingsStartMonitoringOnLaunch)
+            if (controlId >= IdSettingsMinimizeToTray && controlId <= IdSettingsCheckForUpdatesOnStartup)
             {
                 UpdateSettingsFromUi();
                 return 0;
@@ -402,6 +421,81 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         PostQuitMessage(0);
         return 0;
     default:
+        if (message == kUpdateCheckResultMessage)
+        {
+            std::unique_ptr<PostedUpdateCheckResult> postedResult(reinterpret_cast<PostedUpdateCheckResult*>(lParam));
+            updateCheckInProgress_ = false;
+            if (!postedResult)
+            {
+                return 0;
+            }
+
+            const auto& result = postedResult->result;
+            if (result.state == UpdateCheckState::Failed)
+            {
+                app_.Log(L"Update check failed: " + result.message);
+                if (postedResult->interactive)
+                {
+                    MessageBoxW(windowHandle_, result.message.c_str(), L"LaunchMate Update", MB_OK | MB_ICONWARNING);
+                }
+                return 0;
+            }
+
+            if (result.state == UpdateCheckState::UpToDate)
+            {
+                app_.Log(L"Update check complete. LaunchMate is up to date.");
+                if (postedResult->interactive)
+                {
+                    MessageBoxW(windowHandle_, L"LaunchMate is already up to date.", L"LaunchMate Update", MB_OK | MB_ICONINFORMATION);
+                }
+                return 0;
+            }
+
+            app_.Log(L"Update available: " + result.release.versionDisplay);
+
+            std::wstring prompt = L"LaunchMate " + result.release.versionDisplay + L" is available.";
+            if (!result.release.assetDownloadUrl.empty())
+            {
+                prompt += L"\n\nDo you want to download and install it now?";
+                if (MessageBoxW(windowHandle_, prompt.c_str(), L"LaunchMate Update", MB_YESNO | MB_ICONINFORMATION) == IDYES)
+                {
+                    BeginUpdateInstall(result.release);
+                }
+            }
+            else
+            {
+                prompt += L"\n\nThis release does not include a direct updater package yet. Open the GitHub release page instead?";
+                if (MessageBoxW(windowHandle_, prompt.c_str(), L"LaunchMate Update", MB_YESNO | MB_ICONINFORMATION) == IDYES &&
+                    !UpdateChecker::OpenReleasePage(result.release.releasePageUrl))
+                {
+                    MessageBoxW(windowHandle_, L"Could not open the GitHub release page.", L"LaunchMate Update", MB_OK | MB_ICONWARNING);
+                }
+            }
+
+            return 0;
+        }
+
+        if (message == kApplyDownloadedUpdateMessage)
+        {
+            app_.Log(L"Update downloaded. Restarting LaunchMate to finish installation.");
+            SaveConfiguration();
+            exitRequested_ = true;
+            PostMessageW(windowHandle_, WM_CLOSE, 0, 0);
+            return 0;
+        }
+
+        if (message == kUpdateErrorMessage)
+        {
+            std::unique_ptr<std::wstring> errorText(reinterpret_cast<std::wstring*>(lParam));
+            updateInstallInProgress_ = false;
+            if (errorText && !errorText->empty())
+            {
+                app_.Log(*errorText);
+                MessageBoxW(windowHandle_, errorText->c_str(), L"LaunchMate Update", MB_OK | MB_ICONWARNING);
+            }
+            return 0;
+        }
+
         if (message == kRestoreRequestMessage)
         {
             ShowFromTray();
@@ -488,6 +582,8 @@ void MainWindow::CreateControls()
     startInTrayHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartInTray, L"Start in tray", 24, 654, 320, 24, uiFont_);
     startWithWindowsHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartWithWindows, L"Start with Windows", 360, 594, 320, 24, uiFont_);
     startMonitoringHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartMonitoringOnLaunch, L"Start monitoring on launch", 360, 624, 320, 24, uiFont_);
+    checkForUpdatesHandle_ = CreateCheckbox(windowHandle_, IdSettingsCheckForUpdatesOnStartup, L"Check for updates on startup", 360, 654, 360, 24, uiFont_);
+    CreateButtonControl(windowHandle_, IdCheckForUpdates, L"Check updates", 840, 620, 190, 34, uiFont_);
     CreateButtonControl(windowHandle_, IdSaveConfig, L"Save", 1040, 620, 140, 34, uiFont_);
 }
 
@@ -756,6 +852,68 @@ void MainWindow::HandleTrayCommand(UINT command)
     }
 }
 
+void MainWindow::StartUpdateCheck(bool interactive)
+{
+    if (!interactive && !app_.Configuration().checkForUpdatesOnStartup)
+    {
+        return;
+    }
+
+    if (updateCheckInProgress_)
+    {
+        if (interactive)
+        {
+            MessageBoxW(windowHandle_, L"An update check is already running.", L"LaunchMate Update", MB_OK | MB_ICONINFORMATION);
+        }
+        return;
+    }
+
+    updateCheckInProgress_ = true;
+    app_.Log(interactive
+        ? L"Running manual GitHub release check for LaunchMate updates."
+        : L"Checking GitHub releases for LaunchMate updates.");
+
+    const HWND windowHandle = windowHandle_;
+    std::thread([windowHandle, interactive]()
+    {
+        auto* result = new PostedUpdateCheckResult{};
+        result->result = UpdateChecker::CheckForUpdate();
+        result->interactive = interactive;
+        PostOwnedMessage(windowHandle, MainWindow::kUpdateCheckResultMessage, result);
+    }).detach();
+}
+
+void MainWindow::BeginUpdateInstall(UpdateReleaseInfo release)
+{
+    if (updateInstallInProgress_)
+    {
+        return;
+    }
+
+    updateInstallInProgress_ = true;
+    app_.Log(L"Downloading LaunchMate " + release.versionDisplay + L" for self-update.");
+
+    const HWND windowHandle = windowHandle_;
+    std::thread([windowHandle, release = std::move(release)]() mutable
+    {
+        std::filesystem::path downloadedPath;
+        std::wstring errorMessage;
+        if (!UpdateChecker::DownloadReleaseAsset(release, downloadedPath, errorMessage))
+        {
+            PostOwnedMessage(windowHandle, MainWindow::kUpdateErrorMessage, new std::wstring(L"Failed to download the LaunchMate update.\n\n" + errorMessage));
+            return;
+        }
+
+        if (!UpdateChecker::LaunchSelfUpdater(downloadedPath, GetCurrentProcessId(), errorMessage))
+        {
+            PostOwnedMessage(windowHandle, MainWindow::kUpdateErrorMessage, new std::wstring(L"Failed to prepare the LaunchMate update.\n\n" + errorMessage));
+            return;
+        }
+
+        PostMessageW(windowHandle, MainWindow::kApplyDownloadedUpdateMessage, 0, 0);
+    }).detach();
+}
+
 void MainWindow::UpdateSettingsFromUi()
 {
     auto& config = app_.Configuration();
@@ -764,6 +922,7 @@ void MainWindow::UpdateSettingsFromUi()
     config.startWithWindows = SendMessageW(startWithWindowsHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
     config.startInTray = SendMessageW(startInTrayHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
     config.startMonitoringOnLaunch = SendMessageW(startMonitoringHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    config.checkForUpdatesOnStartup = SendMessageW(checkForUpdatesHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
 }
 
 void MainWindow::UpdateSettingsUi()
@@ -774,6 +933,7 @@ void MainWindow::UpdateSettingsUi()
     SendMessageW(startWithWindowsHandle_, BM_SETCHECK, config.startWithWindows ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(startInTrayHandle_, BM_SETCHECK, config.startInTray ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(startMonitoringHandle_, BM_SETCHECK, config.startMonitoringOnLaunch ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(checkForUpdatesHandle_, BM_SETCHECK, config.checkForUpdatesOnStartup ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
 LaunchProgram MainWindow::SelectLaunchProgram()

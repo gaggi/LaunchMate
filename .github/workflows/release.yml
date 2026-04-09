@@ -17,13 +17,19 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure CMake x64
-        run: cmake --preset vs2022-x64
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          cmake --preset vs2022-x64 -DLAUNCHMATE_VERSION=$version
 
       - name: Build Release x64
         run: cmake --build --preset build-vs2022-x64-release
 
       - name: Configure CMake x86
-        run: cmake --preset vs2022-x86
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          cmake --preset vs2022-x86 -DLAUNCHMATE_VERSION=$version
 
       - name: Build Release x86
         run: cmake --build --preset build-vs2022-x86-release
@@ -35,14 +41,18 @@ jobs:
           $assetRoot = Join-Path $env:RUNNER_TEMP "launchmate-release"
           $x64PackageDir = Join-Path $assetRoot "LaunchMate-x64"
           $x86PackageDir = Join-Path $assetRoot "LaunchMate-x86"
+          $x64ExePath = Join-Path $env:GITHUB_WORKSPACE "LaunchMate-$tag-windows-x64.exe"
           $x64ZipPath = Join-Path $env:GITHUB_WORKSPACE "LaunchMate-$tag-windows-x64.zip"
           $x64HashPath = Join-Path $env:GITHUB_WORKSPACE "LaunchMate-$tag-windows-x64.sha256"
+          $x86ExePath = Join-Path $env:GITHUB_WORKSPACE "LaunchMate-$tag-windows-x86.exe"
           $x86ZipPath = Join-Path $env:GITHUB_WORKSPACE "LaunchMate-$tag-windows-x86.zip"
           $x86HashPath = Join-Path $env:GITHUB_WORKSPACE "LaunchMate-$tag-windows-x86.sha256"
 
           Remove-Item -Recurse -Force $assetRoot -ErrorAction SilentlyContinue
+          Remove-Item -Force $x64ExePath -ErrorAction SilentlyContinue
           Remove-Item -Force $x64ZipPath -ErrorAction SilentlyContinue
           Remove-Item -Force $x64HashPath -ErrorAction SilentlyContinue
+          Remove-Item -Force $x86ExePath -ErrorAction SilentlyContinue
           Remove-Item -Force $x86ZipPath -ErrorAction SilentlyContinue
           Remove-Item -Force $x86HashPath -ErrorAction SilentlyContinue
 
@@ -50,9 +60,11 @@ jobs:
           New-Item -ItemType Directory -Path $x86PackageDir -Force | Out-Null
 
           Copy-Item "build/vs2022-x64/Release/LaunchMate.exe" $x64PackageDir
+          Copy-Item "build/vs2022-x64/Release/LaunchMate.exe" $x64ExePath
           Copy-Item "README.md" $x64PackageDir
 
           Copy-Item "build/vs2022-x86/Release/LaunchMate.exe" $x86PackageDir
+          Copy-Item "build/vs2022-x86/Release/LaunchMate.exe" $x86ExePath
           Copy-Item "README.md" $x86PackageDir
 
           Compress-Archive -Path (Join-Path $x64PackageDir "*") -DestinationPath $x64ZipPath
@@ -64,8 +76,10 @@ jobs:
           $x86Hash = (Get-FileHash -Algorithm SHA256 $x86ZipPath).Hash.ToLowerInvariant()
           Set-Content -Path $x86HashPath -NoNewline -Value "$x86Hash  $(Split-Path -Leaf $x86ZipPath)"
 
+          "RELEASE_X64_EXE=$x64ExePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "RELEASE_X64_ZIP=$x64ZipPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "RELEASE_X64_SHA256=$x64HashPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_X86_EXE=$x86ExePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "RELEASE_X86_ZIP=$x86ZipPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "RELEASE_X86_SHA256=$x86HashPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -76,8 +90,10 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $assets = @(
+            $env:RELEASE_X64_EXE,
             $env:RELEASE_X64_ZIP,
             $env:RELEASE_X64_SHA256,
+            $env:RELEASE_X86_EXE,
             $env:RELEASE_X86_ZIP,
             $env:RELEASE_X86_SHA256
           )

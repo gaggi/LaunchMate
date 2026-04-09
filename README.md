@@ -8,6 +8,7 @@ LaunchMate is a native Windows desktop app for monitoring processes and automati
 - Watch processes and launch linked programs for each rule
 - Optional Windows autostart
 - Optional tray mode
+- Optional GitHub update checks on startup
 - Store configuration as JSON in the roaming profile
 
 ## Build
@@ -53,6 +54,8 @@ Optimized builds automatically enable compiler and linker optimizations. If supp
 
 The configuration is stored at `%APPDATA%\\LaunchMate\\config.json`.
 
+By default, LaunchMate checks the latest GitHub release on startup. That behavior can be disabled in the app settings.
+
 ## Command Line
 
 Optional runtime flags:
@@ -65,3 +68,7 @@ Optional runtime flags:
 When `Start with Windows` is enabled, LaunchMate writes an entry under:
 
 `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`
+
+## Updates
+
+Tagged GitHub releases publish direct `windows-x64.exe` and `windows-x86.exe` assets in addition to the ZIP packages. LaunchMate uses those direct executable assets for its built-in self-update flow.

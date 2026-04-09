@@ -29,6 +29,7 @@ struct AppConfiguration
     bool startWithWindows{false};
     bool startInTray{false};
     bool startMonitoringOnLaunch{false};
+    bool checkForUpdatesOnStartup{true};
     int windowWidth{1210};
     int windowHeight{730};
     int windowLeft{CW_USEDEFAULT};

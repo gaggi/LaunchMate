@@ -98,6 +98,11 @@ const AppConfiguration& App::Configuration() const noexcept
     return configuration_;
 }
 
+void App::Log(const std::wstring& text)
+{
+    LogMessage(text);
+}
+
 void App::SetStatus(const std::wstring& text)
 {
     if (mainWindow_)

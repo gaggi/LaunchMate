@@ -2,6 +2,7 @@
 
 #include "App.h"
 #include "TrayIcon.h"
+#include "UpdateChecker.h"
 
 #include <windows.h>
 
@@ -10,6 +11,9 @@ class MainWindow
 public:
     static constexpr wchar_t kWindowClassName[] = L"LaunchMateWindow";
     static constexpr UINT kRestoreRequestMessage = WM_APP + 2;
+    static constexpr UINT kUpdateCheckResultMessage = WM_APP + 3;
+    static constexpr UINT kApplyDownloadedUpdateMessage = WM_APP + 4;
+    static constexpr UINT kUpdateErrorMessage = WM_APP + 5;
 
     explicit MainWindow(App& app);
     ~MainWindow();
@@ -23,6 +27,7 @@ private:
     {
         IdToggleMonitoring = 2001,
         IdSaveConfig,
+        IdCheckForUpdates,
         IdAddGlobalProgram,
         IdRemoveGlobalProgram,
         IdAddWatchedProcess,
@@ -34,6 +39,7 @@ private:
         IdSettingsStartWithWindows,
         IdSettingsStartInTray,
         IdSettingsStartMonitoringOnLaunch,
+        IdSettingsCheckForUpdatesOnStartup,
         IdGlobalList,
         IdWatchedList,
         IdRuleProgramsList
@@ -64,6 +70,8 @@ private:
     void RemoveWatchedProcess();
     void RemoveRuleProgram();
     void HandleTrayCommand(UINT command);
+    void StartUpdateCheck(bool interactive);
+    void BeginUpdateInstall(UpdateReleaseInfo release);
     void UpdateSettingsFromUi();
     void UpdateSettingsUi();
     LaunchProgram SelectLaunchProgram();
@@ -81,10 +89,13 @@ private:
     HWND startWithWindowsHandle_{nullptr};
     HWND startInTrayHandle_{nullptr};
     HWND startMonitoringHandle_{nullptr};
+    HWND checkForUpdatesHandle_{nullptr};
     HFONT titleFont_{nullptr};
     HFONT uiFont_{nullptr};
     HBRUSH backgroundBrush_{nullptr};
     HBRUSH panelBrush_{nullptr};
     TrayIcon trayIcon_;
     bool exitRequested_{false};
+    bool updateCheckInProgress_{false};
+    bool updateInstallInProgress_{false};
 };

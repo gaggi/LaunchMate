@@ -74,7 +74,7 @@ private:
     std::shared_ptr<const RuntimeConfiguration> runtimeConfiguration_;
     StatusCallback statusCallback_;
     std::atomic<bool> running_{false};
-    std::atomic<DWORD> pollIntervalMs_{2000};
+    std::atomic<DWORD> pollIntervalMs_{5000};
     HANDLE wakeEvent_{nullptr};
     std::thread worker_;
     std::mutex mutex_;

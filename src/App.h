@@ -13,7 +13,7 @@ class MainWindow;
 
 struct AppLaunchOptions
 {
-    DWORD processPollIntervalMs{2000};
+    DWORD processPollIntervalMs{5000};
     bool loggingEnabled{false};
 };
 

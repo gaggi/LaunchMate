@@ -10,6 +10,8 @@
 namespace
 {
     constexpr DWORD kProgramLaunchSettleMs = 1200;
+constexpr DWORD kActiveRulePollMultiplier = 2;
+    constexpr DWORD kMaxActiveRulePollIntervalMs = 300000;
 
     std::wstring NormalizePath(const std::wstring& path)
     {
@@ -308,7 +310,23 @@ void ProcessMonitor::WorkerLoop()
             break;
         }
 
-        const DWORD waitDurationMs = pollIntervalMs_.load();
+        std::shared_ptr<const RuntimeConfiguration> runtimeConfiguration;
+        {
+            std::scoped_lock lock(mutex_);
+            runtimeConfiguration = runtimeConfiguration_;
+        }
+
+        DWORD waitDurationMs = pollIntervalMs_.load();
+        if (!runtimeConfiguration || runtimeConfiguration->watchedRules.empty())
+        {
+            waitDurationMs = INFINITE;
+        }
+        else if (!activeRules_.empty())
+        {
+            const ULONGLONG slowedInterval = static_cast<ULONGLONG>(waitDurationMs) * kActiveRulePollMultiplier;
+            waitDurationMs = static_cast<DWORD>(std::min<ULONGLONG>(slowedInterval, kMaxActiveRulePollIntervalMs));
+        }
+
         if (wakeEvent_ != nullptr)
         {
             WaitForSingleObject(wakeEvent_, waitDurationMs);

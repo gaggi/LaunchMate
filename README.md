@@ -4,8 +4,8 @@ LaunchMate is a native Windows desktop app for monitoring processes and automati
 
 ## Features
 
-- Start global programs when monitoring begins
 - Watch processes and launch linked programs for each rule
+- Detect known companion apps from common install paths and add them quickly to a watched process
 - Optional Windows autostart
 - Optional tray mode
 - Optional GitHub update checks on startup
@@ -60,7 +60,8 @@ By default, LaunchMate checks the latest GitHub release on startup. That behavio
 
 Optional runtime flags:
 
-- `--poll-interval <value>` sets the polling interval in milliseconds
+- `--poll-interval <value>` sets the idle polling interval in milliseconds
+- `--active-poll-interval <value>` sets the polling interval in milliseconds while at least one watched process is active
 - `--log` enables logging to `%APPDATA%\\LaunchMate\\launchmate.log`
 
 ## Autostart

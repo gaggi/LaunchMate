@@ -22,6 +22,7 @@ public:
 
     void UpdateConfiguration(const AppConfiguration& configuration);
     void SetPollInterval(DWORD pollIntervalMs);
+    void SetActivePollInterval(DWORD pollIntervalMs);
     void Start();
     void Stop();
     bool IsRunning() const noexcept;
@@ -36,7 +37,6 @@ private:
 
     struct RuntimeConfiguration
     {
-        std::vector<LaunchProgram> globalPrograms;
         std::vector<RuntimeRule> watchedRules;
         std::unordered_set<std::wstring> watchedProcessKeys;
     };
@@ -74,7 +74,8 @@ private:
     std::shared_ptr<const RuntimeConfiguration> runtimeConfiguration_;
     StatusCallback statusCallback_;
     std::atomic<bool> running_{false};
-    std::atomic<DWORD> pollIntervalMs_{5000};
+    std::atomic<DWORD> idlePollIntervalMs_{1000};
+    std::atomic<DWORD> activePollIntervalMs_{10000};
     HANDLE wakeEvent_{nullptr};
     std::thread worker_;
     std::mutex mutex_;

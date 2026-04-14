@@ -28,11 +28,12 @@ private:
         IdToggleMonitoring = 2001,
         IdSaveConfig,
         IdCheckForUpdates,
-        IdAddGlobalProgram,
-        IdRemoveGlobalProgram,
+        IdDetectInstalledApps,
+        IdTransferCatalogProgram,
+        IdAddCatalogProgram,
+        IdRemoveCatalogProgram,
         IdAddWatchedProcess,
         IdRemoveWatchedProcess,
-        IdAddRuleProgram,
         IdRemoveRuleProgram,
         IdSettingsMinimizeToTray,
         IdSettingsCloseToTray,
@@ -40,7 +41,8 @@ private:
         IdSettingsStartInTray,
         IdSettingsStartMonitoringOnLaunch,
         IdSettingsCheckForUpdatesOnStartup,
-        IdGlobalList,
+        IdCatalogSearch,
+        IdCatalogList,
         IdWatchedList,
         IdRuleProgramsList
     };
@@ -53,20 +55,21 @@ private:
     void CreateFonts();
     void CreateControls();
     void PopulateLists();
+    void PopulateCatalogPrograms();
+    void SyncCatalogProgramsFromConfiguration();
+    void DetectInstalledApps();
     void PopulateRulePrograms();
     void ToggleMonitoring();
     void SaveConfiguration();
-    void LoadConfiguration();
     void CaptureWindowPlacement();
     void RestoreWindowPlacement(int showCommand);
     void HideToTray();
     void ShowFromTray();
-    void AddGlobalProgram();
+    void AddSelectedCatalogProgram();
+    void AddCustomCatalogProgram();
+    void RemoveSelectedCatalogProgram();
     void AddWatchedProcess();
-    void AddRuleProgram();
-    void EditGlobalProgram();
     void EditRuleProgram();
-    void RemoveGlobalProgram();
     void RemoveWatchedProcess();
     void RemoveRuleProgram();
     void HandleTrayCommand(UINT command);
@@ -76,12 +79,14 @@ private:
     void UpdateSettingsUi();
     LaunchProgram SelectLaunchProgram();
     WatchedProcessRule SelectWatchedProcess();
+    int SelectedCatalogProgramIndex() const;
     int SelectedWatchedIndex() const;
 
     App& app_;
     HWND windowHandle_{nullptr};
     HWND toggleButtonHandle_{nullptr};
-    HWND globalListHandle_{nullptr};
+    HWND catalogSearchHandle_{nullptr};
+    HWND catalogListHandle_{nullptr};
     HWND watchedListHandle_{nullptr};
     HWND ruleProgramsListHandle_{nullptr};
     HWND minimizeToTrayHandle_{nullptr};
@@ -95,6 +100,8 @@ private:
     HBRUSH backgroundBrush_{nullptr};
     HBRUSH panelBrush_{nullptr};
     TrayIcon trayIcon_;
+    std::vector<CatalogProgram> detectedPrograms_;
+    std::vector<size_t> filteredDetectedProgramIndexes_;
     bool exitRequested_{false};
     bool updateCheckInProgress_{false};
     bool updateInstallInProgress_{false};

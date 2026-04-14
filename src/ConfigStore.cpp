@@ -52,6 +52,22 @@ namespace
         return program;
     }
 
+    Value ToJson(const CatalogProgram& program)
+    {
+        Object object;
+        object["DisplayName"] = ToUtf8(program.displayName);
+        object["FilePath"] = ToUtf8(program.filePath);
+        return object;
+    }
+
+    CatalogProgram CatalogProgramFromJson(const Object& object)
+    {
+        CatalogProgram program;
+        program.displayName = ReadWideString(object, "DisplayName");
+        program.filePath = ReadWideString(object, "FilePath");
+        return program;
+    }
+
     Value ToJson(const WatchedProcessRule& rule)
     {
         Object object;
@@ -149,14 +165,14 @@ AppConfiguration ConfigStore::Load() const
             config.hasWindowPlacement = true;
         }
 
-        const auto globalProgramsIt = object.find("GlobalPrograms");
-        if (globalProgramsIt != object.end() && globalProgramsIt->second.IsArray())
+        const auto catalogProgramsIt = object.find("CatalogPrograms");
+        if (catalogProgramsIt != object.end() && catalogProgramsIt->second.IsArray())
         {
-            for (const auto& item : globalProgramsIt->second.AsArray())
+            for (const auto& item : catalogProgramsIt->second.AsArray())
             {
                 if (item.IsObject())
                 {
-                    config.globalPrograms.push_back(LaunchProgramFromJson(item.AsObject()));
+                    config.catalogPrograms.push_back(CatalogProgramFromJson(item.AsObject()));
                 }
             }
         }
@@ -200,12 +216,12 @@ void ConfigStore::Save(const AppConfiguration& configuration) const
         object["WindowTop"] = static_cast<double>(configuration.windowTop);
     }
 
-    Array globalPrograms;
-    for (const auto& program : configuration.globalPrograms)
+    Array catalogPrograms;
+    for (const auto& program : configuration.catalogPrograms)
     {
-        globalPrograms.push_back(ToJson(program));
+        catalogPrograms.push_back(ToJson(program));
     }
-    object["GlobalPrograms"] = globalPrograms;
+    object["CatalogPrograms"] = catalogPrograms;
 
     Array watchedProcesses;
     for (const auto& rule : configuration.watchedProcesses)

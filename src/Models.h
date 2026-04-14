@@ -13,6 +13,12 @@ struct LaunchProgram
     int waitTimeMilliseconds{0};
 };
 
+struct CatalogProgram
+{
+    std::wstring displayName;
+    std::wstring filePath;
+};
+
 struct WatchedProcessRule
 {
     std::wstring displayName;
@@ -36,7 +42,7 @@ struct AppConfiguration
     int windowTop{CW_USEDEFAULT};
     bool hasWindowPlacement{false};
     bool startMaximized{false};
-    std::vector<LaunchProgram> globalPrograms;
+    std::vector<CatalogProgram> catalogPrograms;
     std::vector<WatchedProcessRule> watchedProcesses;
 
     static AppConfiguration CreateDefault()

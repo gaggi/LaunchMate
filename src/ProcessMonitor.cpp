@@ -10,8 +10,8 @@
 namespace
 {
     constexpr DWORD kProgramLaunchSettleMs = 1200;
-constexpr DWORD kActiveRulePollMultiplier = 2;
-    constexpr DWORD kMaxActiveRulePollIntervalMs = 300000;
+    constexpr DWORD kMinimumPollIntervalMs = 100;
+    constexpr DWORD kMaximumPollIntervalMs = 300000;
 
     std::wstring NormalizePath(const std::wstring& path)
     {
@@ -96,6 +96,11 @@ constexpr DWORD kActiveRulePollMultiplier = 2;
         WaitForSingleObject(process, 4000);
         CloseHandle(process);
     }
+
+    const std::unordered_set<std::wstring>* ProcessKeyFilterPointer(const std::unordered_set<std::wstring>& filter)
+    {
+        return filter.empty() ? nullptr : &filter;
+    }
 }
 
 ProcessMonitor::ProcessMonitor(StatusCallback callback)
@@ -118,7 +123,6 @@ ProcessMonitor::~ProcessMonitor()
 void ProcessMonitor::UpdateConfiguration(const AppConfiguration& configuration)
 {
     auto prepared = std::make_shared<RuntimeConfiguration>();
-    prepared->globalPrograms = configuration.globalPrograms;
     prepared->watchedRules.reserve(configuration.watchedProcesses.size());
     prepared->watchedProcessKeys.reserve(configuration.watchedProcesses.size());
 
@@ -144,7 +148,13 @@ void ProcessMonitor::UpdateConfiguration(const AppConfiguration& configuration)
 
 void ProcessMonitor::SetPollInterval(DWORD pollIntervalMs)
 {
-    pollIntervalMs_.store(std::clamp<DWORD>(pollIntervalMs, 100, 60000));
+    idlePollIntervalMs_.store(std::clamp<DWORD>(pollIntervalMs, kMinimumPollIntervalMs, kMaximumPollIntervalMs));
+    WakeWorker();
+}
+
+void ProcessMonitor::SetActivePollInterval(DWORD pollIntervalMs)
+{
+    activePollIntervalMs_.store(std::clamp<DWORD>(pollIntervalMs, kMinimumPollIntervalMs, kMaximumPollIntervalMs));
     WakeWorker();
 }
 
@@ -316,15 +326,14 @@ void ProcessMonitor::WorkerLoop()
             runtimeConfiguration = runtimeConfiguration_;
         }
 
-        DWORD waitDurationMs = pollIntervalMs_.load();
+        DWORD waitDurationMs = idlePollIntervalMs_.load();
         if (!runtimeConfiguration || runtimeConfiguration->watchedRules.empty())
         {
             waitDurationMs = INFINITE;
         }
         else if (!activeRules_.empty())
         {
-            const ULONGLONG slowedInterval = static_cast<ULONGLONG>(waitDurationMs) * kActiveRulePollMultiplier;
-            waitDurationMs = static_cast<DWORD>(std::min<ULONGLONG>(slowedInterval, kMaxActiveRulePollIntervalMs));
+            waitDurationMs = activePollIntervalMs_.load();
         }
 
         if (wakeEvent_ != nullptr)
@@ -377,12 +386,7 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeConfiguration& runtimeCon
 {
     std::vector<LaunchedProgramRecord> records;
     std::vector<const LaunchProgram*> scheduledPrograms;
-    scheduledPrograms.reserve(runtimeConfiguration.globalPrograms.size() + rule.programsToLaunch.size());
-
-    for (const auto& program : runtimeConfiguration.globalPrograms)
-    {
-        scheduledPrograms.push_back(&program);
-    }
+    scheduledPrograms.reserve(rule.programsToLaunch.size());
 
     for (const auto& program : rule.programsToLaunch)
     {
@@ -415,12 +419,16 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeConfiguration& runtimeCon
         }
 
         const auto normalizedPath = NormalizePath(program.filePath);
-        const auto beforeSnapshot = CaptureProcessSnapshot(false);
+        const auto processKey = NormalizeProcessKey(std::filesystem::path(program.filePath).stem().wstring());
+        const std::unordered_set<std::wstring> processKeyFilter =
+            processKey.empty() ? std::unordered_set<std::wstring>{} : std::unordered_set<std::wstring>{processKey};
+
+        const auto beforeSnapshot = CaptureProcessSnapshot(false, ProcessKeyFilterPointer(processKeyFilter));
         auto existing = FindMatchingProcesses(beforeSnapshot, program.filePath, normalizedPath);
         const DWORD launchedRootProcessId = LaunchProgramProcess(program);
         Sleep(kProgramLaunchSettleMs);
 
-        const auto afterSnapshot = CaptureProcessSnapshot(true);
+        const auto afterSnapshot = CaptureProcessSnapshot(true, ProcessKeyFilterPointer(processKeyFilter));
         auto after = FindMatchingProcesses(afterSnapshot, program.filePath, normalizedPath);
         std::unordered_set<DWORD> started;
         for (const auto pid : after)
@@ -462,7 +470,17 @@ void ProcessMonitor::StopProgramsForRule(const RuntimeRule& rule)
         startedPrograms_.erase(it);
     }
 
-    const auto snapshot = CaptureProcessSnapshot(true);
+    std::unordered_set<std::wstring> processKeyFilter;
+    processKeyFilter.reserve(records.size());
+    for (const auto& record : records)
+    {
+        if (!record.executablePath.empty())
+        {
+            processKeyFilter.insert(NormalizeProcessKey(std::filesystem::path(record.executablePath).stem().wstring()));
+        }
+    }
+
+    const auto snapshot = CaptureProcessSnapshot(true, ProcessKeyFilterPointer(processKeyFilter));
 
     for (const auto& record : records)
     {

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <sstream>
@@ -172,7 +173,12 @@ namespace
         return true;
     }
 
-    bool HttpGet(const std::wstring& url, std::vector<char>& body, DWORD& statusCode, std::wstring& errorMessage)
+    bool OpenHttpRequest(
+        const std::wstring& url,
+        UniqueInternetHandle& session,
+        UniqueInternetHandle& connection,
+        UniqueInternetHandle& request,
+        std::wstring& errorMessage)
     {
         URL_COMPONENTSW components{};
         components.dwStructSize = sizeof(components);
@@ -194,9 +200,9 @@ namespace
             resource.append(components.lpszExtraInfo, components.dwExtraInfoLength);
         }
 
-        UniqueInternetHandle session(WinHttpOpen(L"LaunchMate Update", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
-        UniqueInternetHandle connection(session ? WinHttpConnect(reinterpret_cast<HINTERNET>(session.get()), host.c_str(), components.nPort, 0) : nullptr);
-        UniqueInternetHandle request(connection
+        session.reset(WinHttpOpen(L"LaunchMate Update", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
+        connection.reset(session ? WinHttpConnect(reinterpret_cast<HINTERNET>(session.get()), host.c_str(), components.nPort, 0) : nullptr);
+        request.reset(connection
             ? WinHttpOpenRequest(reinterpret_cast<HINTERNET>(connection.get()), L"GET", resource.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, components.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0)
             : nullptr);
 
@@ -206,18 +212,37 @@ namespace
             return false;
         }
 
+        return true;
+    }
+
+    bool SendHttpRequest(HINTERNET requestHandle, DWORD& statusCode, std::wstring& errorMessage)
+    {
         const wchar_t* headers = L"Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n";
-        if (!WinHttpSendRequest(reinterpret_cast<HINTERNET>(request.get()), headers, static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
-            !WinHttpReceiveResponse(reinterpret_cast<HINTERNET>(request.get()), nullptr))
+        if (!WinHttpSendRequest(requestHandle, headers, static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+            !WinHttpReceiveResponse(requestHandle, nullptr))
         {
             errorMessage = L"The GitHub update request failed.";
             return false;
         }
 
         DWORD statusSize = sizeof(statusCode);
-        if (!WinHttpQueryHeaders(reinterpret_cast<HINTERNET>(request.get()), WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX))
+        if (!WinHttpQueryHeaders(requestHandle, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX))
         {
             errorMessage = L"Could not read the GitHub update status code.";
+            return false;
+        }
+
+        return true;
+    }
+
+    bool HttpGet(const std::wstring& url, std::vector<char>& body, DWORD& statusCode, std::wstring& errorMessage)
+    {
+        UniqueInternetHandle session;
+        UniqueInternetHandle connection;
+        UniqueInternetHandle request;
+        if (!OpenHttpRequest(url, session, connection, request, errorMessage) ||
+            !SendHttpRequest(reinterpret_cast<HINTERNET>(request.get()), statusCode, errorMessage))
+        {
             return false;
         }
 
@@ -248,6 +273,61 @@ namespace
 
             body.resize(previousSize + downloadedBytes);
         }
+    }
+
+    bool HttpDownloadToFile(const std::wstring& url, const std::filesystem::path& outputPath, DWORD& statusCode, std::wstring& errorMessage)
+    {
+        UniqueInternetHandle session;
+        UniqueInternetHandle connection;
+        UniqueInternetHandle request;
+        if (!OpenHttpRequest(url, session, connection, request, errorMessage) ||
+            !SendHttpRequest(reinterpret_cast<HINTERNET>(request.get()), statusCode, errorMessage))
+        {
+            return false;
+        }
+
+        std::ofstream stream(outputPath, std::ios::binary | std::ios::trunc);
+        if (!stream)
+        {
+            errorMessage = L"Could not create the temporary update file.";
+            return false;
+        }
+
+        std::vector<char> buffer(64 * 1024);
+        for (;;)
+        {
+            DWORD availableBytes = 0;
+            if (!WinHttpQueryDataAvailable(reinterpret_cast<HINTERNET>(request.get()), &availableBytes))
+            {
+                errorMessage = L"Could not read the update download response.";
+                break;
+            }
+
+            if (availableBytes == 0)
+            {
+                return true;
+            }
+
+            const DWORD bytesToRead = std::min<DWORD>(availableBytes, static_cast<DWORD>(buffer.size()));
+            DWORD downloadedBytes = 0;
+            if (!WinHttpReadData(reinterpret_cast<HINTERNET>(request.get()), buffer.data(), bytesToRead, &downloadedBytes))
+            {
+                errorMessage = L"Could not download the update file.";
+                break;
+            }
+
+            stream.write(buffer.data(), static_cast<std::streamsize>(downloadedBytes));
+            if (!stream.good())
+            {
+                errorMessage = L"Could not write the temporary update file.";
+                break;
+            }
+        }
+
+        stream.close();
+        std::error_code removeError;
+        std::filesystem::remove(outputPath, removeError);
+        return false;
     }
 
     std::wstring EscapeBatchValue(const std::wstring& value)
@@ -354,32 +434,25 @@ bool UpdateChecker::DownloadReleaseAsset(const UpdateReleaseInfo& release, std::
         return false;
     }
 
+    const auto updateDirectory = std::filesystem::temp_directory_path() / L"LaunchMate-updates";
+    std::filesystem::create_directories(updateDirectory);
+    downloadedPath = updateDirectory / (L"pending-" + (release.assetName.empty() ? std::wstring(L"LaunchMate-update.exe") : release.assetName));
+
     DWORD statusCode = 0;
-    std::vector<char> responseBody;
-    if (!HttpGet(release.assetDownloadUrl, responseBody, statusCode, errorMessage))
+    if (!HttpDownloadToFile(release.assetDownloadUrl, downloadedPath, statusCode, errorMessage))
     {
         return false;
     }
 
     if (statusCode != 200)
     {
+        std::error_code removeError;
+        std::filesystem::remove(downloadedPath, removeError);
         errorMessage = L"GitHub returned HTTP " + std::to_wstring(statusCode) + L" while downloading the update.";
         return false;
     }
 
-    const auto updateDirectory = std::filesystem::temp_directory_path() / L"LaunchMate-updates";
-    std::filesystem::create_directories(updateDirectory);
-    downloadedPath = updateDirectory / (L"pending-" + (release.assetName.empty() ? std::wstring(L"LaunchMate-update.exe") : release.assetName));
-
-    std::ofstream stream(downloadedPath, std::ios::binary | std::ios::trunc);
-    if (!stream)
-    {
-        errorMessage = L"Could not create the temporary update file.";
-        return false;
-    }
-
-    stream.write(responseBody.data(), static_cast<std::streamsize>(responseBody.size()));
-    return stream.good();
+    return true;
 }
 
 bool UpdateChecker::LaunchSelfUpdater(const std::filesystem::path& downloadedPath, DWORD processId, std::wstring& errorMessage)

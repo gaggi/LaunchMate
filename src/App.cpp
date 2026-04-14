@@ -33,14 +33,16 @@ App::App(HINSTANCE instanceHandle, AppLaunchOptions launchOptions)
       configuration_(configStore_.Load()),
       monitor_([this](const std::wstring& status) { SetStatus(status); })
 {
-    monitor_.SetPollInterval(launchOptions_.processPollIntervalMs);
+    monitor_.SetPollInterval(launchOptions_.pollIntervalMs);
+    monitor_.SetActivePollInterval(launchOptions_.activePollIntervalMs);
     monitor_.UpdateConfiguration(configuration_);
 
     if (launchOptions_.loggingEnabled)
     {
         logPath_ = configStore_.Path().parent_path() / L"launchmate.log";
         LogMessage(L"Logging enabled.");
-        LogMessage(L"Process poll interval: " + std::to_wstring(launchOptions_.processPollIntervalMs) + L" ms");
+        LogMessage(L"Idle poll interval: " + std::to_wstring(launchOptions_.pollIntervalMs) + L" ms");
+        LogMessage(L"Active poll interval: " + std::to_wstring(launchOptions_.activePollIntervalMs) + L" ms");
     }
 }
 

@@ -1,14 +1,19 @@
 #include "MainWindow.h"
 
+#include "CatalogPaths.h"
 #include "StartupRegistration.h"
 #include "resource.h"
 #include "Utils.h"
 
 #include <algorithm>
+#include <commctrl.h>
 #include <commdlg.h>
+#include <cwctype>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <thread>
+#include <unordered_set>
 
 namespace
 {
@@ -118,6 +123,25 @@ namespace
         return handle;
     }
 
+    HWND CreateEditControl(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h, HFONT font)
+    {
+        auto handle = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            L"EDIT",
+            text,
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            x,
+            y,
+            w,
+            h,
+            parent,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+            nullptr,
+            nullptr);
+        SendMessageW(handle, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        return handle;
+    }
+
     std::wstring PickExecutablePath(HWND owner, const wchar_t* title)
     {
         wchar_t fileBuffer[MAX_PATH] = {};
@@ -211,6 +235,76 @@ namespace
         UpdateCheckResult result;
         bool interactive{false};
     };
+
+    std::wstring ToLowerCopy(std::wstring text)
+    {
+        for (auto& character : text)
+        {
+            character = static_cast<wchar_t>(::towlower(character));
+        }
+        return text;
+    }
+
+    std::wstring ExpandEnvironmentPath(const std::wstring& path)
+    {
+        if (path.empty())
+        {
+            return {};
+        }
+
+        const DWORD requiredSize = ExpandEnvironmentStringsW(path.c_str(), nullptr, 0);
+        if (requiredSize == 0)
+        {
+            return path;
+        }
+
+        std::wstring expanded(requiredSize, L'\0');
+        const DWORD copiedSize = ExpandEnvironmentStringsW(path.c_str(), expanded.data(), requiredSize);
+        if (copiedSize == 0 || copiedSize > expanded.size())
+        {
+            return path;
+        }
+
+        if (!expanded.empty() && expanded.back() == L'\0')
+        {
+            expanded.pop_back();
+        }
+
+        return expanded;
+    }
+
+    bool ContainsInsensitive(const std::wstring& haystack, const std::wstring& needle)
+    {
+        if (needle.empty())
+        {
+            return true;
+        }
+
+        const auto loweredHaystack = ToLowerCopy(haystack);
+        const auto loweredNeedle = ToLowerCopy(needle);
+        return loweredHaystack.find(loweredNeedle) != std::wstring::npos;
+    }
+
+    bool TryAppendCatalogProgram(
+        std::vector<CatalogProgram>& programs,
+        std::unordered_set<std::wstring>& seenPaths,
+        const std::wstring& displayName,
+        const std::wstring& filePath)
+    {
+        if (filePath.empty())
+        {
+            return false;
+        }
+
+        const auto normalizedPath = ToLowerCopy(filePath);
+        if (!seenPaths.insert(normalizedPath).second)
+        {
+            return false;
+        }
+
+        programs.push_back({displayName, filePath});
+        return true;
+    }
 }
 
 MainWindow::MainWindow(App& app)
@@ -279,6 +373,7 @@ bool MainWindow::Create(int showCommand)
     }
 
     CreateControls();
+    SyncCatalogProgramsFromConfiguration();
     PopulateLists();
     UpdateSettingsUi();
     RestoreWindowPlacement(app_.Configuration().startInTray ? SW_HIDE : showCommand);
@@ -334,15 +429,21 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     {
         const int controlId = LOWORD(wParam);
         const int code = HIWORD(wParam);
+        if (code == EN_CHANGE && controlId == IdCatalogSearch)
+        {
+            PopulateCatalogPrograms();
+            return 0;
+        }
+
         if (code == LBN_SELCHANGE && controlId == IdWatchedList)
         {
             PopulateRulePrograms();
             return 0;
         }
 
-        if (code == LBN_DBLCLK && controlId == IdGlobalList)
+        if (code == LBN_DBLCLK && controlId == IdCatalogList)
         {
-            EditGlobalProgram();
+            AddSelectedCatalogProgram();
             return 0;
         }
 
@@ -357,11 +458,12 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         case IdToggleMonitoring: ToggleMonitoring(); return 0;
         case IdSaveConfig: SaveConfiguration(); return 0;
         case IdCheckForUpdates: StartUpdateCheck(true); return 0;
-        case IdAddGlobalProgram: AddGlobalProgram(); return 0;
-        case IdRemoveGlobalProgram: RemoveGlobalProgram(); return 0;
+        case IdDetectInstalledApps: DetectInstalledApps(); return 0;
+        case IdTransferCatalogProgram: AddSelectedCatalogProgram(); return 0;
+        case IdAddCatalogProgram: AddCustomCatalogProgram(); return 0;
+        case IdRemoveCatalogProgram: RemoveSelectedCatalogProgram(); return 0;
         case IdAddWatchedProcess: AddWatchedProcess(); return 0;
         case IdRemoveWatchedProcess: RemoveWatchedProcess(); return 0;
-        case IdAddRuleProgram: AddRuleProgram(); return 0;
         case IdRemoveRuleProgram: RemoveRuleProgram(); return 0;
         default:
             if (controlId >= IdSettingsMinimizeToTray && controlId <= IdSettingsCheckForUpdatesOnStartup)
@@ -531,9 +633,11 @@ void MainWindow::CreateFonts()
 void MainWindow::CreateControls()
 {
     constexpr int kGlobalListX = 24;
-    constexpr int kGlobalListY = 106;
+    constexpr int kCatalogSearchY = 106;
     constexpr int kGlobalListWidth = 530;
-    constexpr int kGlobalListHeight = 430;
+    constexpr int kCatalogSearchHeight = 28;
+    constexpr int kGlobalListY = 144;
+    constexpr int kGlobalListHeight = 392;
     constexpr int kWatchedListX = 620;
     constexpr int kWatchedListY = 106;
     constexpr int kWatchedListWidth = 560;
@@ -542,23 +646,30 @@ void MainWindow::CreateControls()
     constexpr int kRuleListY = 362;
     constexpr int kRuleListWidth = 560;
     constexpr int kRuleListHeight = 174;
+    constexpr int kTransferButtonWidth = 34;
+    constexpr int kTransferButtonHeight = 38;
     constexpr int kActionButtonWidth = 42;
     constexpr int kActionButtonGap = 6;
 
     const int globalButtonsRight = kGlobalListX + kGlobalListWidth;
     const int watchedButtonsRight = kWatchedListX + kWatchedListWidth;
     const int ruleButtonsRight = kRuleListX + kRuleListWidth;
+    const int transferButtonX = ((kGlobalListX + kGlobalListWidth) + kRuleListX - kTransferButtonWidth) / 2;
+    const int transferButtonY = kRuleListY + ((kRuleListHeight - kTransferButtonHeight) / 2);
 
     CreateLabel(windowHandle_, L"LaunchMate", 22, 16, 220, 32, titleFont_);
     toggleButtonHandle_ = CreateButtonControl(windowHandle_, IdToggleMonitoring, L"Start monitoring", watchedButtonsRight - 220, 14, 220, 34, uiFont_);
 
-    CreateLabel(windowHandle_, L"Global programs", 24, 72, 340, 22, uiFont_);
-    CreateButtonControl(windowHandle_, IdAddGlobalProgram, L"+", globalButtonsRight - (kActionButtonWidth * 2) - kActionButtonGap, 72, kActionButtonWidth, 28, uiFont_);
-    CreateButtonControl(windowHandle_, IdRemoveGlobalProgram, L"-", globalButtonsRight - kActionButtonWidth, 72, kActionButtonWidth, 28, uiFont_);
-    globalListHandle_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", nullptr,
+    CreateLabel(windowHandle_, L"Detected apps", 24, 72, 120, 22, uiFont_);
+    CreateButtonControl(windowHandle_, IdDetectInstalledApps, L"Detect installed apps", globalButtonsRight - 396, 72, 150, 28, uiFont_);
+    CreateButtonControl(windowHandle_, IdAddCatalogProgram, L"+", globalButtonsRight - (kActionButtonWidth * 2) - kActionButtonGap, 72, kActionButtonWidth, 28, uiFont_);
+    CreateButtonControl(windowHandle_, IdRemoveCatalogProgram, L"-", globalButtonsRight - kActionButtonWidth, 72, kActionButtonWidth, 28, uiFont_);
+    catalogSearchHandle_ = CreateEditControl(windowHandle_, IdCatalogSearch, L"", kGlobalListX, kCatalogSearchY, kGlobalListWidth, kCatalogSearchHeight, uiFont_);
+    SendMessageW(catalogSearchHandle_, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"Search apps"));
+    catalogListHandle_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", nullptr,
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
-        kGlobalListX, kGlobalListY, kGlobalListWidth, kGlobalListHeight, windowHandle_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdGlobalList)), nullptr, nullptr);
-    SendMessageW(globalListHandle_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
+        kGlobalListX, kGlobalListY, kGlobalListWidth, kGlobalListHeight, windowHandle_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdCatalogList)), nullptr, nullptr);
+    SendMessageW(catalogListHandle_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
 
     CreateLabel(windowHandle_, L"Watched processes", 620, 72, 240, 22, uiFont_);
     CreateButtonControl(windowHandle_, IdAddWatchedProcess, L"+", watchedButtonsRight - (kActionButtonWidth * 2) - kActionButtonGap, 72, kActionButtonWidth, 28, uiFont_);
@@ -569,7 +680,7 @@ void MainWindow::CreateControls()
     SendMessageW(watchedListHandle_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
 
     CreateLabel(windowHandle_, L"Linked programs", 620, 328, 240, 22, uiFont_);
-    CreateButtonControl(windowHandle_, IdAddRuleProgram, L"+", ruleButtonsRight - (kActionButtonWidth * 2) - kActionButtonGap, 328, kActionButtonWidth, 28, uiFont_);
+    CreateButtonControl(windowHandle_, IdTransferCatalogProgram, L">", transferButtonX, transferButtonY, kTransferButtonWidth, kTransferButtonHeight, uiFont_);
     CreateButtonControl(windowHandle_, IdRemoveRuleProgram, L"-", ruleButtonsRight - kActionButtonWidth, 328, kActionButtonWidth, 28, uiFont_);
     ruleProgramsListHandle_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", nullptr,
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
@@ -589,17 +700,7 @@ void MainWindow::CreateControls()
 
 void MainWindow::PopulateLists()
 {
-    SendMessageW(globalListHandle_, LB_RESETCONTENT, 0, 0);
-    for (const auto& program : app_.Configuration().globalPrograms)
-    {
-        std::wstring line = program.displayName.empty() ? FileNameWithoutExtension(program.filePath) : program.displayName;
-        if (!program.arguments.empty())
-        {
-            line += L"  |  Arguments: " + program.arguments;
-        }
-        line += L"  |  Delay: " + std::to_wstring(program.waitTimeMilliseconds) + L" ms";
-        SendMessageW(globalListHandle_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(line.c_str()));
-    }
+    PopulateCatalogPrograms();
 
     SendMessageW(watchedListHandle_, LB_RESETCONTENT, 0, 0);
     for (const auto& rule : app_.Configuration().watchedProcesses)
@@ -613,6 +714,93 @@ void MainWindow::PopulateLists()
     }
 
     PopulateRulePrograms();
+}
+
+void MainWindow::SyncCatalogProgramsFromConfiguration()
+{
+    detectedPrograms_ = app_.Configuration().catalogPrograms;
+
+    std::sort(
+        detectedPrograms_.begin(),
+        detectedPrograms_.end(),
+        [](const CatalogProgram& left, const CatalogProgram& right)
+        {
+            return _wcsicmp(left.displayName.c_str(), right.displayName.c_str()) < 0;
+        });
+}
+
+void MainWindow::DetectInstalledApps()
+{
+    std::vector<CatalogProgram> detectedPrograms;
+    std::unordered_set<std::wstring> seenPaths;
+    int removedPrograms = 0;
+    int addedPrograms = 0;
+
+    for (const auto& program : app_.Configuration().catalogPrograms)
+    {
+        if (!program.filePath.empty() && std::filesystem::exists(program.filePath))
+        {
+            TryAppendCatalogProgram(detectedPrograms, seenPaths, program.displayName, program.filePath);
+        }
+        else
+        {
+            ++removedPrograms;
+        }
+    }
+
+    for (const auto& candidate : kCatalogPathCandidates)
+    {
+        const auto expandedPath = ExpandEnvironmentPath(candidate.path);
+        if (expandedPath.empty() || !std::filesystem::exists(expandedPath))
+        {
+            continue;
+        }
+
+        if (TryAppendCatalogProgram(detectedPrograms, seenPaths, candidate.displayName, expandedPath))
+        {
+            ++addedPrograms;
+        }
+    }
+
+    app_.Configuration().catalogPrograms = std::move(detectedPrograms);
+    SyncCatalogProgramsFromConfiguration();
+    PopulateCatalogPrograms();
+    SaveConfiguration();
+
+    std::wstring message = L"Detection finished.\n\nFound apps: " + std::to_wstring(app_.Configuration().catalogPrograms.size());
+    if (addedPrograms > 0)
+    {
+        message += L"\nNew apps added: " + std::to_wstring(addedPrograms);
+    }
+    if (removedPrograms > 0)
+    {
+        message += L"\nMissing apps removed: " + std::to_wstring(removedPrograms);
+    }
+
+    MessageBoxW(windowHandle_, message.c_str(), L"LaunchMate", MB_OK | MB_ICONINFORMATION);
+}
+
+void MainWindow::PopulateCatalogPrograms()
+{
+    filteredDetectedProgramIndexes_.clear();
+    SendMessageW(catalogListHandle_, LB_RESETCONTENT, 0, 0);
+
+    wchar_t searchBuffer[256] = {};
+    GetWindowTextW(catalogSearchHandle_, searchBuffer, static_cast<int>(std::size(searchBuffer)));
+    const std::wstring searchText(searchBuffer);
+
+    for (size_t index = 0; index < detectedPrograms_.size(); ++index)
+    {
+        const auto& program = detectedPrograms_[index];
+        if (!ContainsInsensitive(program.displayName, searchText) && !ContainsInsensitive(program.filePath, searchText))
+        {
+            continue;
+        }
+
+        filteredDetectedProgramIndexes_.push_back(index);
+        const std::wstring line = program.displayName + L"  |  " + program.filePath;
+        SendMessageW(catalogListHandle_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(line.c_str()));
+    }
 }
 
 void MainWindow::PopulateRulePrograms()
@@ -660,20 +848,6 @@ void MainWindow::SaveConfiguration()
     app_.Config().Save(app_.Configuration());
     app_.Monitor().UpdateConfiguration(app_.Configuration());
     StartupRegistration::Apply(app_.Configuration().startWithWindows);
-}
-
-void MainWindow::LoadConfiguration()
-{
-    if (app_.Monitor().IsRunning())
-    {
-        MessageBoxW(windowHandle_, L"Please stop monitoring before reloading the configuration.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
-        return;
-    }
-
-    app_.Configuration() = app_.Config().Load();
-    app_.Monitor().UpdateConfiguration(app_.Configuration());
-    UpdateSettingsUi();
-    PopulateLists();
 }
 
 void MainWindow::CaptureWindowPlacement()
@@ -734,12 +908,68 @@ void MainWindow::ShowFromTray()
     SetForegroundWindow(windowHandle_);
 }
 
-void MainWindow::AddGlobalProgram()
+void MainWindow::AddSelectedCatalogProgram()
 {
-    const auto program = SelectLaunchProgram();
-    if (program.filePath.empty()) return;
-    app_.Configuration().globalPrograms.push_back(program);
-    PopulateLists();
+    const int watchedIndex = SelectedWatchedIndex();
+    if (watchedIndex < 0)
+    {
+        MessageBoxW(windowHandle_, L"Select a watched process first.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    const int catalogIndex = SelectedCatalogProgramIndex();
+    if (catalogIndex < 0 || catalogIndex >= static_cast<int>(detectedPrograms_.size()))
+    {
+        MessageBoxW(windowHandle_, L"Select a detected app first.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    const auto& detectedProgram = detectedPrograms_[static_cast<size_t>(catalogIndex)];
+    auto& programs = app_.Configuration().watchedProcesses[static_cast<size_t>(watchedIndex)].programsToLaunch;
+    const auto duplicate = std::find_if(
+        programs.begin(),
+        programs.end(),
+        [&detectedProgram](const LaunchProgram& existingProgram)
+        {
+            return _wcsicmp(existingProgram.filePath.c_str(), detectedProgram.filePath.c_str()) == 0;
+        });
+    if (duplicate != programs.end())
+    {
+        MessageBoxW(windowHandle_, L"This app is already linked to the selected watched process.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    LaunchProgram program;
+    program.displayName = detectedProgram.displayName;
+    program.filePath = detectedProgram.filePath;
+    programs.push_back(std::move(program));
+    PopulateRulePrograms();
+    SaveConfiguration();
+}
+
+void MainWindow::RemoveSelectedCatalogProgram()
+{
+    const int catalogIndex = SelectedCatalogProgramIndex();
+    if (catalogIndex < 0 || catalogIndex >= static_cast<int>(detectedPrograms_.size()))
+    {
+        MessageBoxW(windowHandle_, L"Select a detected app first.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    const auto selectedPath = detectedPrograms_[static_cast<size_t>(catalogIndex)].filePath;
+    auto& catalogPrograms = app_.Configuration().catalogPrograms;
+    catalogPrograms.erase(
+        std::remove_if(
+            catalogPrograms.begin(),
+            catalogPrograms.end(),
+            [&selectedPath](const CatalogProgram& program)
+            {
+                return _wcsicmp(program.filePath.c_str(), selectedPath.c_str()) == 0;
+            }),
+        catalogPrograms.end());
+
+    SyncCatalogProgramsFromConfiguration();
+    PopulateCatalogPrograms();
     SaveConfiguration();
 }
 
@@ -749,38 +979,6 @@ void MainWindow::AddWatchedProcess()
     if (rule.processName.empty()) return;
     app_.Configuration().watchedProcesses.push_back(rule);
     PopulateLists();
-    SaveConfiguration();
-}
-
-void MainWindow::AddRuleProgram()
-{
-    const int watchedIndex = SelectedWatchedIndex();
-    if (watchedIndex < 0) return;
-
-    const auto program = SelectLaunchProgram();
-    if (program.filePath.empty()) return;
-
-    app_.Configuration().watchedProcesses[static_cast<size_t>(watchedIndex)].programsToLaunch.push_back(program);
-    PopulateRulePrograms();
-    SaveConfiguration();
-}
-
-void MainWindow::EditGlobalProgram()
-{
-    const int index = static_cast<int>(SendMessageW(globalListHandle_, LB_GETCURSEL, 0, 0));
-    if (index < 0)
-    {
-        return;
-    }
-
-    auto& program = app_.Configuration().globalPrograms[static_cast<size_t>(index)];
-    if (!ShowProgramOptionsDialog(app_.InstanceHandle(), windowHandle_, program))
-    {
-        return;
-    }
-
-    PopulateLists();
-    SendMessageW(globalListHandle_, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
     SaveConfiguration();
 }
 
@@ -804,14 +1002,32 @@ void MainWindow::EditRuleProgram()
     SaveConfiguration();
 }
 
-void MainWindow::RemoveGlobalProgram()
+void MainWindow::AddCustomCatalogProgram()
 {
-    const int index = static_cast<int>(SendMessageW(globalListHandle_, LB_GETCURSEL, 0, 0));
-    if (index < 0) return;
+    const auto program = SelectLaunchProgram();
+    if (program.filePath.empty())
+    {
+        return;
+    }
 
-    auto& programs = app_.Configuration().globalPrograms;
-    programs.erase(programs.begin() + index);
-    PopulateLists();
+    const auto duplicate = std::find_if(
+        app_.Configuration().catalogPrograms.begin(),
+        app_.Configuration().catalogPrograms.end(),
+        [&program](const CatalogProgram& existingProgram)
+        {
+            return _wcsicmp(existingProgram.filePath.c_str(), program.filePath.c_str()) == 0;
+        });
+    if (duplicate != app_.Configuration().catalogPrograms.end())
+    {
+        SyncCatalogProgramsFromConfiguration();
+        PopulateCatalogPrograms();
+        MessageBoxW(windowHandle_, L"This app is already in the detected apps list.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    app_.Configuration().catalogPrograms.push_back({program.displayName, program.filePath});
+    SyncCatalogProgramsFromConfiguration();
+    PopulateCatalogPrograms();
     SaveConfiguration();
 }
 
@@ -957,6 +1173,17 @@ WatchedProcessRule MainWindow::SelectWatchedProcess()
         rule.processName = rule.displayName;
     }
     return rule;
+}
+
+int MainWindow::SelectedCatalogProgramIndex() const
+{
+    const int listIndex = static_cast<int>(SendMessageW(catalogListHandle_, LB_GETCURSEL, 0, 0));
+    if (listIndex < 0 || listIndex >= static_cast<int>(filteredDetectedProgramIndexes_.size()))
+    {
+        return -1;
+    }
+
+    return static_cast<int>(filteredDetectedProgramIndexes_[static_cast<size_t>(listIndex)]);
 }
 
 int MainWindow::SelectedWatchedIndex() const

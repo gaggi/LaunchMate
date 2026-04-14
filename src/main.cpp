@@ -11,6 +11,20 @@
 namespace
 {
     constexpr wchar_t kSingleInstanceMutexName[] = L"Local\\LaunchMate.SingleInstance";
+    constexpr DWORD kMinimumPollIntervalMs = 100;
+    constexpr DWORD kMaximumPollIntervalMs = 300000;
+
+    DWORD ParsePollIntervalArgument(const wchar_t* value, DWORD fallback)
+    {
+        wchar_t* end = nullptr;
+        const unsigned long parsed = std::wcstoul(value, &end, 10);
+        if (end == nullptr || *end != L'\0')
+        {
+            return fallback;
+        }
+
+        return static_cast<DWORD>(std::clamp<unsigned long>(parsed, kMinimumPollIntervalMs, kMaximumPollIntervalMs));
+    }
 
     AppLaunchOptions ParseLaunchOptions()
     {
@@ -39,12 +53,18 @@ namespace
                     continue;
                 }
 
-                wchar_t* end = nullptr;
-                const unsigned long value = std::wcstoul(argv[++index], &end, 10);
-                if (end != nullptr && *end == L'\0')
+                options.pollIntervalMs = ParsePollIntervalArgument(argv[++index], options.pollIntervalMs);
+                continue;
+            }
+
+            if (argument == L"--active-poll-interval")
+            {
+                if (index + 1 >= argc)
                 {
-                    options.processPollIntervalMs = static_cast<DWORD>(std::clamp<unsigned long>(value, 100, 60000));
+                    continue;
                 }
+
+                options.activePollIntervalMs = ParsePollIntervalArgument(argv[++index], options.activePollIntervalMs);
             }
         }
 

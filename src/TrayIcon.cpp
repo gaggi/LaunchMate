@@ -78,15 +78,35 @@ void TrayIcon::UpdateTooltip(const std::wstring& tooltip)
     Shell_NotifyIconW(NIM_MODIFY, &data_->notifyIcon);
 }
 
-void TrayIcon::ShowContextMenu(bool isMonitoring)
+void TrayIcon::ShowContextMenu(bool isMonitoring, const std::vector<std::wstring>& monitorSetupNames)
 {
+    if (menu_ != nullptr)
+    {
+        DestroyMenu(menu_);
+    }
+    menu_ = CreatePopupMenu();
     if (menu_ == nullptr)
     {
         return;
     }
 
-    ModifyMenuW(menu_, kMenuToggleMonitoring, MF_BYCOMMAND | MF_STRING, kMenuToggleMonitoring,
-        isMonitoring ? L"Stop monitoring" : L"Start monitoring");
+    AppendMenuW(menu_, MF_STRING, kMenuOpen, L"Open");
+    AppendMenuW(menu_, MF_STRING, kMenuToggleMonitoring, isMonitoring ? L"Stop monitoring" : L"Start monitoring");
+    if (!monitorSetupNames.empty())
+    {
+        HMENU monitorMenu = CreatePopupMenu();
+        if (monitorMenu != nullptr)
+        {
+            for (size_t index = 0; index < monitorSetupNames.size(); ++index)
+            {
+                const auto label = monitorSetupNames[index].empty() ? std::wstring(L"(Unnamed setup)") : monitorSetupNames[index];
+                AppendMenuW(monitorMenu, MF_STRING, TrayIcon::kMonitorSetupCommandBase + static_cast<UINT>(index), label.c_str());
+            }
+            AppendMenuW(menu_, MF_POPUP, reinterpret_cast<UINT_PTR>(monitorMenu), L"Monitor configs");
+        }
+    }
+    AppendMenuW(menu_, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu_, MF_STRING, kMenuExit, L"Exit");
 
     POINT cursor{};
     GetCursorPos(&cursor);

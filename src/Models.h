@@ -19,6 +19,14 @@ struct CatalogProgram
     std::wstring filePath;
 };
 
+struct MonitorPowerSetup
+{
+    std::wstring name;
+    std::vector<std::wstring> enabledDisplays;
+    UINT hotkeyModifiers{0};
+    UINT hotkeyVirtualKey{0};
+};
+
 struct WatchedProcessRule
 {
     std::wstring displayName;
@@ -43,6 +51,7 @@ struct AppConfiguration
     bool hasWindowPlacement{false};
     bool startMaximized{false};
     std::vector<CatalogProgram> catalogPrograms;
+    std::vector<MonitorPowerSetup> monitorPowerSetups;
     std::vector<WatchedProcessRule> watchedProcesses;
 
     static AppConfiguration CreateDefault()

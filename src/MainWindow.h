@@ -1,6 +1,7 @@
 #pragma once
 
 #include "App.h"
+#include "MonitorPowerController.h"
 #include "TrayIcon.h"
 #include "UpdateChecker.h"
 
@@ -26,6 +27,7 @@ private:
     enum ControlId
     {
         IdToggleMonitoring = 2001,
+        IdMonitorPowerSetups,
         IdSaveConfig,
         IdCheckForUpdates,
         IdDetectInstalledApps,
@@ -60,7 +62,11 @@ private:
     void DetectInstalledApps();
     void PopulateRulePrograms();
     void ToggleMonitoring();
+    void ManageMonitorPowerSetups();
+    bool ApplyMonitorPowerSetup(size_t index, bool interactive);
     void SaveConfiguration();
+    void RegisterMonitorHotkeys();
+    void UnregisterMonitorHotkeys();
     void CaptureWindowPlacement();
     void RestoreWindowPlacement(int showCommand);
     void HideToTray();
@@ -100,6 +106,7 @@ private:
     HBRUSH backgroundBrush_{nullptr};
     HBRUSH panelBrush_{nullptr};
     TrayIcon trayIcon_;
+    std::vector<MonitorPowerController::DisplayInfo> availableDisplays_;
     std::vector<CatalogProgram> detectedPrograms_;
     std::vector<size_t> filteredDetectedProgramIndexes_;
     bool exitRequested_{false};

@@ -30,6 +30,7 @@ public:
     ProcessMonitor& Monitor() noexcept;
     AppConfiguration& Configuration() noexcept;
     const AppConfiguration& Configuration() const noexcept;
+    bool LoggingEnabled() const noexcept;
     void Log(const std::wstring& text);
     void SetStatus(const std::wstring& text);
 

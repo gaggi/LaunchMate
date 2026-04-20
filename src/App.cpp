@@ -100,6 +100,11 @@ const AppConfiguration& App::Configuration() const noexcept
     return configuration_;
 }
 
+bool App::LoggingEnabled() const noexcept
+{
+    return launchOptions_.loggingEnabled;
+}
+
 void App::Log(const std::wstring& text)
 {
     LogMessage(text);

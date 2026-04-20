@@ -31,6 +31,7 @@ add_executable(LaunchMate WIN32
     src/main.cpp
     src/App.cpp
     src/MainWindow.cpp
+    src/MonitorPowerController.cpp
     src/ProcessMonitor.cpp
     src/ConfigStore.cpp
     src/TrayIcon.cpp
@@ -54,6 +55,7 @@ target_compile_definitions(LaunchMate PRIVATE
 
 target_link_libraries(LaunchMate PRIVATE
     comctl32
+    dxva2
     gdiplus
     shell32
     shlwapi

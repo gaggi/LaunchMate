@@ -68,6 +68,44 @@ namespace
         return program;
     }
 
+    Value ToJson(const MonitorPowerSetup& setup)
+    {
+        Object object;
+        object["Name"] = ToUtf8(setup.name);
+        object["HotkeyModifiers"] = static_cast<double>(setup.hotkeyModifiers);
+        object["HotkeyVirtualKey"] = static_cast<double>(setup.hotkeyVirtualKey);
+
+        Array enabledDisplays;
+        for (const auto& display : setup.enabledDisplays)
+        {
+            enabledDisplays.push_back(ToUtf8(display));
+        }
+        object["EnabledDisplays"] = enabledDisplays;
+        return object;
+    }
+
+    MonitorPowerSetup MonitorPowerSetupFromJson(const Object& object)
+    {
+        MonitorPowerSetup setup;
+        setup.name = ReadWideString(object, "Name");
+        setup.hotkeyModifiers = static_cast<UINT>(ReadInt(object, "HotkeyModifiers", 0));
+        setup.hotkeyVirtualKey = static_cast<UINT>(ReadInt(object, "HotkeyVirtualKey", 0));
+
+        const auto it = object.find("EnabledDisplays");
+        if (it != object.end() && it->second.IsArray())
+        {
+            for (const auto& item : it->second.AsArray())
+            {
+                if (item.IsString())
+                {
+                    setup.enabledDisplays.push_back(ToWide(item.AsString()));
+                }
+            }
+        }
+
+        return setup;
+    }
+
     Value ToJson(const WatchedProcessRule& rule)
     {
         Object object;
@@ -177,6 +215,18 @@ AppConfiguration ConfigStore::Load() const
             }
         }
 
+        const auto monitorSetupsIt = object.find("MonitorPowerSetups");
+        if (monitorSetupsIt != object.end() && monitorSetupsIt->second.IsArray())
+        {
+            for (const auto& item : monitorSetupsIt->second.AsArray())
+            {
+                if (item.IsObject())
+                {
+                    config.monitorPowerSetups.push_back(MonitorPowerSetupFromJson(item.AsObject()));
+                }
+            }
+        }
+
         const auto watchedIt = object.find("WatchedProcesses");
         if (watchedIt != object.end() && watchedIt->second.IsArray())
         {
@@ -222,6 +272,13 @@ void ConfigStore::Save(const AppConfiguration& configuration) const
         catalogPrograms.push_back(ToJson(program));
     }
     object["CatalogPrograms"] = catalogPrograms;
+
+    Array monitorPowerSetups;
+    for (const auto& setup : configuration.monitorPowerSetups)
+    {
+        monitorPowerSetups.push_back(ToJson(setup));
+    }
+    object["MonitorPowerSetups"] = monitorPowerSetups;
 
     Array watchedProcesses;
     for (const auto& rule : configuration.watchedProcesses)

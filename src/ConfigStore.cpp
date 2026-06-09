@@ -38,6 +38,7 @@ namespace
         object["Arguments"] = ToUtf8(program.arguments);
         object["CloseWhenGameStops"] = program.closeWhenGameStops;
         object["WaitTimeMilliseconds"] = static_cast<double>(program.waitTimeMilliseconds);
+        object["CloseDelayMilliseconds"] = static_cast<double>(program.closeDelayMilliseconds);
         return object;
     }
 
@@ -49,6 +50,7 @@ namespace
         program.arguments = ReadWideString(object, "Arguments");
         program.closeWhenGameStops = ReadBool(object, "CloseWhenGameStops", true);
         program.waitTimeMilliseconds = ReadInt(object, "WaitTimeMilliseconds");
+        program.closeDelayMilliseconds = ReadInt(object, "CloseDelayMilliseconds");
         return program;
     }
 

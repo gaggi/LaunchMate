@@ -11,6 +11,7 @@ struct LaunchProgram
     std::wstring arguments;
     bool closeWhenGameStops{true};
     int waitTimeMilliseconds{0};
+    int closeDelayMilliseconds{0};
 };
 
 struct CatalogProgram

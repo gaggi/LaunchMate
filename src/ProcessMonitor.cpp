@@ -480,7 +480,15 @@ void ProcessMonitor::StopProgramsForRule(const RuntimeRule& rule)
         }
     }
 
-    const auto snapshot = CaptureProcessSnapshot(true, ProcessKeyFilterPointer(processKeyFilter));
+    std::stable_sort(
+        records.begin(),
+        records.end(),
+        [](const LaunchedProgramRecord& left, const LaunchedProgramRecord& right)
+        {
+            return left.program.closeDelayMilliseconds < right.program.closeDelayMilliseconds;
+        });
+
+    const ULONGLONG scheduleStartTick = GetTickCount64();
 
     for (const auto& record : records)
     {
@@ -489,6 +497,14 @@ void ProcessMonitor::StopProgramsForRule(const RuntimeRule& rule)
             continue;
         }
 
+        const DWORD scheduledDelayMs = record.program.closeDelayMilliseconds > 0 ? static_cast<DWORD>(record.program.closeDelayMilliseconds) : 0;
+        const ULONGLONG elapsedMs = GetTickCount64() - scheduleStartTick;
+        if (elapsedMs < scheduledDelayMs)
+        {
+            Sleep(static_cast<DWORD>(scheduledDelayMs - elapsedMs));
+        }
+
+        const auto snapshot = CaptureProcessSnapshot(true, ProcessKeyFilterPointer(processKeyFilter));
         auto candidates = FindMatchingProcesses(snapshot, record.executablePath, record.executablePath);
         for (const auto pid : record.startedProcessIds)
         {

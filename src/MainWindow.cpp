@@ -183,6 +183,7 @@ namespace
             {
                 SetDlgItemTextW(dialogHandle, IDC_PROGRAM_ARGS, state->program->arguments.c_str());
                 SetDlgItemInt(dialogHandle, IDC_PROGRAM_DELAY, static_cast<UINT>(state->program->waitTimeMilliseconds), FALSE);
+                SetDlgItemInt(dialogHandle, IDC_PROGRAM_CLOSE_DELAY, static_cast<UINT>(state->program->closeDelayMilliseconds), FALSE);
             }
             return TRUE;
         }
@@ -197,8 +198,11 @@ namespace
 
                     BOOL translated = FALSE;
                     const UINT delayValue = GetDlgItemInt(dialogHandle, IDC_PROGRAM_DELAY, &translated, FALSE);
+                    BOOL closeDelayTranslated = FALSE;
+                    const UINT closeDelayValue = GetDlgItemInt(dialogHandle, IDC_PROGRAM_CLOSE_DELAY, &closeDelayTranslated, FALSE);
                     state->program->arguments = argsBuffer;
                     state->program->waitTimeMilliseconds = translated ? static_cast<int>(delayValue) : 0;
+                    state->program->closeDelayMilliseconds = closeDelayTranslated ? static_cast<int>(closeDelayValue) : 0;
                     state->accepted = true;
                 }
                 EndDialog(dialogHandle, IDOK);
@@ -1135,7 +1139,8 @@ void MainWindow::PopulateRulePrograms()
         {
             line += L"  |  Arguments: " + program.arguments;
         }
-        line += L"  |  Delay: " + std::to_wstring(program.waitTimeMilliseconds) + L" ms";
+        line += L"  |  Start delay: " + std::to_wstring(program.waitTimeMilliseconds) + L" ms";
+        line += L"  |  Stop delay: " + std::to_wstring(program.closeDelayMilliseconds) + L" ms";
         SendMessageW(ruleProgramsListHandle_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(line.c_str()));
     }
 }

@@ -30,6 +30,12 @@ namespace
         return it != object.end() ? static_cast<int>(it->second.AsNumber(fallback)) : fallback;
     }
 
+    double ReadNumber(const Object& object, const char* key, double fallback = 0.0)
+    {
+        const auto it = object.find(key);
+        return it != object.end() ? it->second.AsNumber(fallback) : fallback;
+    }
+
     Value ToJson(const LaunchProgram& program)
     {
         Object object;
@@ -77,12 +83,26 @@ namespace
         object["HotkeyModifiers"] = static_cast<double>(setup.hotkeyModifiers);
         object["HotkeyVirtualKey"] = static_cast<double>(setup.hotkeyVirtualKey);
 
-        Array enabledDisplays;
-        for (const auto& display : setup.enabledDisplays)
+        Array displayPaths;
+        for (const auto& path : setup.displayPaths)
         {
-            enabledDisplays.push_back(ToUtf8(display));
+            Object pathObject;
+            pathObject["DisplayName"] = ToUtf8(path.displayName);
+            pathObject["MonitorName"] = ToUtf8(path.monitorName);
+            pathObject["SourceAdapterLowPart"] = static_cast<double>(path.sourceAdapterLowPart);
+            pathObject["SourceAdapterHighPart"] = static_cast<double>(path.sourceAdapterHighPart);
+            pathObject["SourceId"] = static_cast<double>(path.sourceId);
+            pathObject["TargetAdapterLowPart"] = static_cast<double>(path.targetAdapterLowPart);
+            pathObject["TargetAdapterHighPart"] = static_cast<double>(path.targetAdapterHighPart);
+            pathObject["TargetId"] = static_cast<double>(path.targetId);
+            pathObject["PositionX"] = static_cast<double>(path.positionX);
+            pathObject["PositionY"] = static_cast<double>(path.positionY);
+            pathObject["Width"] = static_cast<double>(path.width);
+            pathObject["Enabled"] = path.enabled;
+            pathObject["IsPrimary"] = path.isPrimary;
+            displayPaths.push_back(pathObject);
         }
-        object["EnabledDisplays"] = enabledDisplays;
+        object["DisplayPaths"] = displayPaths;
         return object;
     }
 
@@ -93,14 +113,34 @@ namespace
         setup.hotkeyModifiers = static_cast<UINT>(ReadInt(object, "HotkeyModifiers", 0));
         setup.hotkeyVirtualKey = static_cast<UINT>(ReadInt(object, "HotkeyVirtualKey", 0));
 
-        const auto it = object.find("EnabledDisplays");
-        if (it != object.end() && it->second.IsArray())
+        const auto pathsIt = object.find("DisplayPaths");
+        if (pathsIt != object.end() && pathsIt->second.IsArray())
         {
-            for (const auto& item : it->second.AsArray())
+            for (const auto& item : pathsIt->second.AsArray())
             {
-                if (item.IsString())
+                if (!item.IsObject())
                 {
-                    setup.enabledDisplays.push_back(ToWide(item.AsString()));
+                    continue;
+                }
+
+                const auto& pathObject = item.AsObject();
+                MonitorPowerSetup::DisplayPath path;
+                path.displayName = ReadWideString(pathObject, "DisplayName");
+                path.monitorName = ReadWideString(pathObject, "MonitorName");
+                path.sourceAdapterLowPart = static_cast<DWORD>(ReadNumber(pathObject, "SourceAdapterLowPart"));
+                path.sourceAdapterHighPart = static_cast<LONG>(ReadNumber(pathObject, "SourceAdapterHighPart"));
+                path.sourceId = static_cast<UINT>(ReadNumber(pathObject, "SourceId"));
+                path.targetAdapterLowPart = static_cast<DWORD>(ReadNumber(pathObject, "TargetAdapterLowPart"));
+                path.targetAdapterHighPart = static_cast<LONG>(ReadNumber(pathObject, "TargetAdapterHighPart"));
+                path.targetId = static_cast<UINT>(ReadNumber(pathObject, "TargetId"));
+                path.positionX = static_cast<LONG>(ReadNumber(pathObject, "PositionX"));
+                path.positionY = static_cast<LONG>(ReadNumber(pathObject, "PositionY"));
+                path.width = static_cast<UINT>(ReadNumber(pathObject, "Width"));
+                path.enabled = ReadBool(pathObject, "Enabled", true);
+                path.isPrimary = ReadBool(pathObject, "IsPrimary", path.positionX == 0 && path.positionY == 0);
+                if (!path.displayName.empty())
+                {
+                    setup.displayPaths.push_back(std::move(path));
                 }
             }
         }

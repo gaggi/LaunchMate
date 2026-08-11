@@ -106,7 +106,6 @@ private:
     HBRUSH backgroundBrush_{nullptr};
     HBRUSH panelBrush_{nullptr};
     TrayIcon trayIcon_;
-    std::vector<MonitorPowerController::DisplayInfo> availableDisplays_;
     std::vector<CatalogProgram> detectedPrograms_;
     std::vector<size_t> filteredDetectedProgramIndexes_;
     bool exitRequested_{false};

@@ -228,13 +228,56 @@ namespace
 
     struct MonitorPowerSetupDialogState
     {
+        static constexpr int kEnabledControlBase = 3000;
+        static constexpr int kPrimaryControlBase = 4000;
+
         std::vector<MonitorPowerSetup>* setups{nullptr};
-        std::vector<MonitorPowerController::DisplayInfo>* displays{nullptr};
         std::function<void()> saveCallback;
         std::function<bool(size_t)> applyCallback;
+        std::vector<HWND> rowControls;
+        std::vector<HWND> enabledChecks;
+        std::vector<HWND> primaryRadios;
         int selectedIndex{0};
         bool syncingControls{false};
     };
+
+    RECT DialogUnitsToPixels(HWND dialogHandle, LONG x, LONG y, LONG width, LONG height)
+    {
+        RECT rectangle{x, y, x + width, y + height};
+        MapDialogRect(dialogHandle, &rectangle);
+        return rectangle;
+    }
+
+    HWND CreateMonitorSetupRowControl(
+        HWND dialogHandle,
+        MonitorPowerSetupDialogState& state,
+        const wchar_t* className,
+        const std::wstring& text,
+        DWORD style,
+        LONG x,
+        LONG y,
+        LONG width,
+        LONG height,
+        int controlId = 0)
+    {
+        const RECT rectangle = DialogUnitsToPixels(dialogHandle, x, y, width, height);
+        HWND control = CreateWindowExW(
+            0,
+            className,
+            text.c_str(),
+            WS_CHILD | WS_VISIBLE | style,
+            rectangle.left,
+            rectangle.top,
+            rectangle.right - rectangle.left,
+            rectangle.bottom - rectangle.top,
+            dialogHandle,
+            controlId == 0 ? nullptr : reinterpret_cast<HMENU>(static_cast<INT_PTR>(controlId)),
+            reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(dialogHandle, GWLP_HINSTANCE)),
+            nullptr);
+        SendMessageW(control, WM_SETFONT, SendMessageW(dialogHandle, WM_GETFONT, 0, 0), TRUE);
+        state.rowControls.push_back(control);
+        return control;
+    }
 
     void PopulateMonitorPowerSetupList(HWND dialogHandle, MonitorPowerSetupDialogState& state)
     {
@@ -252,7 +295,6 @@ namespace
             state.selectedIndex = -1;
             SetDlgItemTextW(dialogHandle, IDC_MONITOR_SETUP_NAME, L"");
             SendMessageW(GetDlgItem(dialogHandle, IDC_MONITOR_SETUP_HOTKEY), HKM_SETHOTKEY, 0, 0);
-            SendMessageW(GetDlgItem(dialogHandle, IDC_MONITOR_SETUP_MONITOR_LIST), LB_SETSEL, FALSE, -1);
             state.syncingControls = false;
             return;
         }
@@ -262,13 +304,90 @@ namespace
         state.syncingControls = false;
     }
 
-    void PopulateMonitorPowerDisplayList(HWND dialogHandle, MonitorPowerSetupDialogState& state)
+    void DestroyMonitorSetupRows(MonitorPowerSetupDialogState& state)
     {
-        const HWND monitorListHandle = GetDlgItem(dialogHandle, IDC_MONITOR_SETUP_MONITOR_LIST);
-        SendMessageW(monitorListHandle, LB_RESETCONTENT, 0, 0);
-        for (const auto& display : *state.displays)
+        for (HWND control : state.rowControls)
         {
-            SendMessageW(monitorListHandle, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(display.displayLabel.c_str()));
+            DestroyWindow(control);
+        }
+        state.rowControls.clear();
+        state.enabledChecks.clear();
+        state.primaryRadios.clear();
+    }
+
+    void PopulateMonitorSetupRows(HWND dialogHandle, MonitorPowerSetupDialogState& state, const MonitorPowerSetup& setup)
+    {
+        DestroyMonitorSetupRows(state);
+        CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"Monitor", 0, 150, 52, 52, 10);
+        CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"Name", 0, 207, 52, 180, 10);
+        CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"Enabled", 0, 395, 52, 45, 10);
+        CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"Primary", 0, 455, 52, 45, 10);
+
+        if (setup.displayPaths.empty())
+        {
+            CreateMonitorSetupRowControl(
+                dialogHandle,
+                state,
+                L"STATIC",
+                L"No monitors detected yet. Activate the desired monitors in Windows and click Detect Current.",
+                0,
+                150,
+                70,
+                350,
+                12);
+            return;
+        }
+
+        for (size_t index = 0; index < setup.displayPaths.size(); ++index)
+        {
+            const auto& path = setup.displayPaths[index];
+            const LONG y = 70 + static_cast<LONG>(index) * 24;
+            CreateMonitorSetupRowControl(
+                dialogHandle,
+                state,
+                L"STATIC",
+                L"Monitor " + std::to_wstring(index + 1),
+                0,
+                150,
+                y + 2,
+                52,
+                12);
+            CreateMonitorSetupRowControl(
+                dialogHandle,
+                state,
+                L"STATIC",
+                path.monitorName.empty() ? path.displayName : path.monitorName,
+                0,
+                207,
+                y + 2,
+                180,
+                12);
+            HWND enabled = CreateMonitorSetupRowControl(
+                dialogHandle,
+                state,
+                L"BUTTON",
+                L"",
+                BS_AUTOCHECKBOX,
+                405,
+                y,
+                14,
+                14,
+                MonitorPowerSetupDialogState::kEnabledControlBase + static_cast<int>(index));
+            HWND primary = CreateMonitorSetupRowControl(
+                dialogHandle,
+                state,
+                L"BUTTON",
+                L"",
+                BS_RADIOBUTTON,
+                466,
+                y,
+                14,
+                14,
+                MonitorPowerSetupDialogState::kPrimaryControlBase + static_cast<int>(index));
+            SendMessageW(enabled, BM_SETCHECK, path.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+            SendMessageW(primary, BM_SETCHECK, path.isPrimary ? BST_CHECKED : BST_UNCHECKED, 0);
+            state.enabledChecks.push_back(enabled);
+            state.primaryRadios.push_back(primary);
         }
     }
 
@@ -279,7 +398,7 @@ namespace
         {
             SetDlgItemTextW(dialogHandle, IDC_MONITOR_SETUP_NAME, L"");
             SendMessageW(GetDlgItem(dialogHandle, IDC_MONITOR_SETUP_HOTKEY), HKM_SETHOTKEY, 0, 0);
-            SendMessageW(GetDlgItem(dialogHandle, IDC_MONITOR_SETUP_MONITOR_LIST), LB_SETSEL, FALSE, -1);
+            DestroyMonitorSetupRows(state);
             state.syncingControls = false;
             return;
         }
@@ -297,23 +416,7 @@ namespace
             MAKEWORD(setup.hotkeyVirtualKey, hotkeyModifiers),
             0);
 
-        const HWND monitorListHandle = GetDlgItem(dialogHandle, IDC_MONITOR_SETUP_MONITOR_LIST);
-        SendMessageW(monitorListHandle, LB_SETSEL, FALSE, -1);
-        for (int index = 0; index < static_cast<int>(state.displays->size()); ++index)
-        {
-            const auto& display = (*state.displays)[static_cast<size_t>(index)];
-            const bool selected = std::find_if(
-                setup.enabledDisplays.begin(),
-                setup.enabledDisplays.end(),
-                [&display](const std::wstring& value)
-                {
-                    return _wcsicmp(value.c_str(), display.displayName.c_str()) == 0;
-                }) != setup.enabledDisplays.end();
-            if (selected)
-            {
-                SendMessageW(monitorListHandle, LB_SETSEL, TRUE, index);
-            }
-        }
+        PopulateMonitorSetupRows(dialogHandle, state, setup);
         state.syncingControls = false;
     }
 
@@ -337,14 +440,10 @@ namespace
         if ((hotkeyModifiers & HOTKEYF_SHIFT) != 0) setup.hotkeyModifiers |= MOD_SHIFT;
         if ((hotkeyModifiers & HOTKEYF_EXT) != 0) setup.hotkeyModifiers |= MOD_WIN;
 
-        setup.enabledDisplays.clear();
-        const HWND monitorListHandle = GetDlgItem(dialogHandle, IDC_MONITOR_SETUP_MONITOR_LIST);
-        for (int index = 0; index < static_cast<int>(state.displays->size()); ++index)
+        for (size_t index = 0; index < setup.displayPaths.size() && index < state.enabledChecks.size(); ++index)
         {
-            if (SendMessageW(monitorListHandle, LB_GETSEL, index, 0) > 0)
-            {
-                setup.enabledDisplays.push_back((*state.displays)[static_cast<size_t>(index)].displayName);
-            }
+            setup.displayPaths[index].enabled = SendMessageW(state.enabledChecks[index], BM_GETCHECK, 0, 0) == BST_CHECKED;
+            setup.displayPaths[index].isPrimary = SendMessageW(state.primaryRadios[index], BM_GETCHECK, 0, 0) == BST_CHECKED;
         }
     }
 
@@ -358,9 +457,22 @@ namespace
                 MessageBoxW(dialogHandle, L"Each monitor config needs a name.", L"LaunchMate", MB_OK | MB_ICONWARNING);
                 return false;
             }
-            if (setup.enabledDisplays.empty())
+            if (setup.displayPaths.empty())
             {
-                MessageBoxW(dialogHandle, L"Each monitor config must keep at least one monitor powered on.", L"LaunchMate", MB_OK | MB_ICONWARNING);
+                MessageBoxW(dialogHandle, L"Capture the current Windows display state for each monitor config before saving.", L"LaunchMate", MB_OK | MB_ICONWARNING);
+                return false;
+            }
+            const auto enabledCount = std::count_if(setup.displayPaths.begin(), setup.displayPaths.end(), [](const auto& display)
+            {
+                return display.enabled;
+            });
+            const auto primaryCount = std::count_if(setup.displayPaths.begin(), setup.displayPaths.end(), [](const auto& display)
+            {
+                return display.enabled && display.isPrimary;
+            });
+            if (enabledCount == 0 || primaryCount != 1)
+            {
+                MessageBoxW(dialogHandle, L"Each monitor config must enable at least one monitor and select exactly one enabled monitor as Primary.", L"LaunchMate", MB_OK | MB_ICONWARNING);
                 return false;
             }
             if (setup.hotkeyVirtualKey != 0)
@@ -392,7 +504,6 @@ namespace
                 return FALSE;
             }
 
-            PopulateMonitorPowerDisplayList(dialogHandle, *state);
             PopulateMonitorPowerSetupList(dialogHandle, *state);
             LoadSelectedMonitorPowerSetup(dialogHandle, *state);
             return TRUE;
@@ -405,6 +516,32 @@ namespace
 
             if (state->syncingControls)
             {
+                return TRUE;
+            }
+
+            if (LOWORD(wParam) >= MonitorPowerSetupDialogState::kEnabledControlBase &&
+                LOWORD(wParam) < MonitorPowerSetupDialogState::kEnabledControlBase + static_cast<int>(state->enabledChecks.size()))
+            {
+                const size_t index = static_cast<size_t>(LOWORD(wParam) - MonitorPowerSetupDialogState::kEnabledControlBase);
+                if (SendMessageW(state->enabledChecks[index], BM_GETCHECK, 0, 0) != BST_CHECKED &&
+                    SendMessageW(state->primaryRadios[index], BM_GETCHECK, 0, 0) == BST_CHECKED)
+                {
+                    SendMessageW(state->primaryRadios[index], BM_SETCHECK, BST_UNCHECKED, 0);
+                }
+                StoreSelectedMonitorPowerSetup(dialogHandle, *state);
+                return TRUE;
+            }
+
+            if (LOWORD(wParam) >= MonitorPowerSetupDialogState::kPrimaryControlBase &&
+                LOWORD(wParam) < MonitorPowerSetupDialogState::kPrimaryControlBase + static_cast<int>(state->primaryRadios.size()))
+            {
+                const size_t selected = static_cast<size_t>(LOWORD(wParam) - MonitorPowerSetupDialogState::kPrimaryControlBase);
+                SendMessageW(state->enabledChecks[selected], BM_SETCHECK, BST_CHECKED, 0);
+                for (size_t index = 0; index < state->primaryRadios.size(); ++index)
+                {
+                    SendMessageW(state->primaryRadios[index], BM_SETCHECK, index == selected ? BST_CHECKED : BST_UNCHECKED, 0);
+                }
+                StoreSelectedMonitorPowerSetup(dialogHandle, *state);
                 return TRUE;
             }
 
@@ -425,20 +562,14 @@ namespace
                     PopulateMonitorPowerSetupList(dialogHandle, *state);
                 }
                 return TRUE;
-            case IDC_MONITOR_SETUP_MONITOR_LIST:
-                if (HIWORD(wParam) == LBN_SELCHANGE)
-                {
-                    StoreSelectedMonitorPowerSetup(dialogHandle, *state);
-                }
-                return TRUE;
             case IDC_MONITOR_SETUP_ADD:
             {
                 StoreSelectedMonitorPowerSetup(dialogHandle, *state);
                 MonitorPowerSetup setup;
                 setup.name = L"New setup";
-                if (!state->displays->empty())
+                if (state->selectedIndex >= 0 && state->selectedIndex < static_cast<int>(state->setups->size()))
                 {
-                    setup.enabledDisplays.push_back(state->displays->front().displayName);
+                    setup.displayPaths = (*state->setups)[static_cast<size_t>(state->selectedIndex)].displayPaths;
                 }
                 state->setups->push_back(std::move(setup));
                 state->selectedIndex = static_cast<int>(state->setups->size()) - 1;
@@ -458,6 +589,24 @@ namespace
                     LoadSelectedMonitorPowerSetup(dialogHandle, *state);
                 }
                 return TRUE;
+            case IDC_MONITOR_SETUP_CAPTURE:
+            {
+                StoreSelectedMonitorPowerSetup(dialogHandle, *state);
+                if (state->selectedIndex < 0 || state->selectedIndex >= static_cast<int>(state->setups->size()))
+                {
+                    return TRUE;
+                }
+
+                std::wstring errorMessage;
+                auto& setup = (*state->setups)[static_cast<size_t>(state->selectedIndex)];
+                if (!MonitorPowerController::CaptureSetup(setup, &errorMessage))
+                {
+                    MessageBoxW(dialogHandle, errorMessage.c_str(), L"LaunchMate", MB_OK | MB_ICONWARNING);
+                    return TRUE;
+                }
+                LoadSelectedMonitorPowerSetup(dialogHandle, *state);
+                return TRUE;
+            }
             case IDC_MONITOR_SETUP_APPLY:
                 StoreSelectedMonitorPowerSetup(dialogHandle, *state);
                 if (!ValidateMonitorPowerSetups(dialogHandle, *state))
@@ -495,13 +644,11 @@ namespace
         HINSTANCE instanceHandle,
         HWND owner,
         std::vector<MonitorPowerSetup>& setups,
-        std::vector<MonitorPowerController::DisplayInfo>& displays,
         std::function<void()> saveCallback,
         std::function<bool(size_t)> applyCallback)
     {
         MonitorPowerSetupDialogState state;
         state.setups = &setups;
-        state.displays = &displays;
         state.saveCallback = std::move(saveCallback);
         state.applyCallback = std::move(applyCallback);
         DialogBoxParamW(
@@ -1163,28 +1310,11 @@ void MainWindow::ToggleMonitoring()
 
 void MainWindow::ManageMonitorPowerSetups()
 {
-    availableDisplays_ = MonitorPowerController::EnumerateDisplays();
-    if (app_.LoggingEnabled())
-    {
-        app_.Log(L"[MonitorSetup] Detected displays for setup dialog: " + std::to_wstring(availableDisplays_.size()));
-        for (const auto& display : availableDisplays_)
-        {
-            app_.Log(L"[MonitorSetup] Display option: " + display.displayLabel);
-        }
-    }
-    if (availableDisplays_.empty())
-    {
-        MessageBoxW(windowHandle_, L"No monitors were detected.", L"LaunchMate", MB_OK | MB_ICONWARNING);
-        return;
-    }
-
     auto workingSetups = app_.Configuration().monitorPowerSetups;
-    auto workingDisplays = availableDisplays_;
     ShowMonitorPowerSetupsDialog(
         app_.InstanceHandle(),
         windowHandle_,
         workingSetups,
-        workingDisplays,
         [this, &workingSetups]()
         {
             app_.Configuration().monitorPowerSetups = workingSetups;
@@ -1207,7 +1337,7 @@ void MainWindow::ManageMonitorPowerSetups()
                 };
             }
 
-            if (!MonitorPowerController::ApplySetup(workingSetups[index].enabledDisplays, logger, &errorMessage))
+            if (!MonitorPowerController::ApplySetup(workingSetups[index], logger, &errorMessage))
             {
                 const auto label = workingSetups[index].name.empty() ? std::wstring(L"(Unnamed setup)") : workingSetups[index].name;
                 app_.Log(L"Failed to apply monitor config " + label + L": " + errorMessage);
@@ -1271,7 +1401,7 @@ bool MainWindow::ApplyMonitorPowerSetup(size_t index, bool interactive)
     }
 
     const auto& setup = app_.Configuration().monitorPowerSetups[index];
-    if (!MonitorPowerController::ApplySetup(setup.enabledDisplays, logger, &errorMessage))
+    if (!MonitorPowerController::ApplySetup(setup, logger, &errorMessage))
     {
         const auto label = setup.name.empty() ? std::wstring(L"(Unnamed setup)") : setup.name;
         app_.Log(L"Failed to apply monitor config " + label + L": " + errorMessage);

@@ -22,8 +22,25 @@ struct CatalogProgram
 
 struct MonitorPowerSetup
 {
+    struct DisplayPath
+    {
+        std::wstring displayName;
+        std::wstring monitorName;
+        DWORD sourceAdapterLowPart{0};
+        LONG sourceAdapterHighPart{0};
+        UINT sourceId{0};
+        DWORD targetAdapterLowPart{0};
+        LONG targetAdapterHighPart{0};
+        UINT targetId{0};
+        LONG positionX{0};
+        LONG positionY{0};
+        UINT width{0};
+        bool enabled{true};
+        bool isPrimary{false};
+    };
+
     std::wstring name;
-    std::vector<std::wstring> enabledDisplays;
+    std::vector<DisplayPath> displayPaths;
     UINT hotkeyModifiers{0};
     UINT hotkeyVirtualKey{0};
 };

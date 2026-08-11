@@ -1,352 +1,459 @@
 #include "MonitorPowerController.h"
 
-#include <physicalmonitorenumerationapi.h>
-#include <lowlevelmonitorconfigurationapi.h>
 #include <windows.h>
 
 #include <algorithm>
-#include <memory>
-#include <sstream>
 #include <unordered_set>
 #include <vector>
 
 namespace
 {
-    constexpr BYTE kPowerModeVcpCode = 0xD6;
-    constexpr DWORD kPowerModeOn = 0x01;
-    constexpr DWORD kPowerModeOff = 0x05;
+    using DisplayPath = MonitorPowerSetup::DisplayPath;
 
-    std::wstring BuildWin32ErrorMessage(const wchar_t* prefix, DWORD errorCode)
+    struct DisplayConfiguration
     {
-        wchar_t* systemMessage = nullptr;
-        const DWORD messageLength = FormatMessageW(
+        std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+        std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+    };
+
+    std::wstring WindowsError(const std::wstring& prefix, LONG code)
+    {
+        wchar_t* messageBuffer = nullptr;
+        FormatMessageW(
             FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
             nullptr,
-            errorCode,
+            static_cast<DWORD>(code),
             0,
-            reinterpret_cast<LPWSTR>(&systemMessage),
+            reinterpret_cast<LPWSTR>(&messageBuffer),
             0,
             nullptr);
 
-        std::wstring message = prefix;
-        message += L" (";
-        message += std::to_wstring(errorCode);
-        message += L")";
-
-        if (messageLength > 0 && systemMessage != nullptr)
+        std::wstring message = prefix + L" (" + std::to_wstring(code) + L")";
+        if (messageBuffer != nullptr)
         {
             message += L": ";
-            message.append(systemMessage, messageLength);
-            while (!message.empty() && (message.back() == L'\r' || message.back() == L'\n'))
-            {
-                message.pop_back();
-            }
+            message += messageBuffer;
+            LocalFree(messageBuffer);
         }
-
-        if (systemMessage != nullptr)
+        while (!message.empty() && (message.back() == L'\r' || message.back() == L'\n'))
         {
-            LocalFree(systemMessage);
+            message.pop_back();
         }
-
         return message;
     }
 
-    struct PhysicalMonitorDeleter
+    bool QueryConfiguration(UINT flags, DisplayConfiguration& configuration, std::wstring* errorMessage)
     {
-        void operator()(std::vector<PHYSICAL_MONITOR>* monitors) const noexcept
+        for (int attempt = 0; attempt < 3; ++attempt)
         {
-            if (monitors == nullptr)
+            UINT32 pathCount = 0;
+            UINT32 modeCount = 0;
+            LONG result = GetDisplayConfigBufferSizes(flags, &pathCount, &modeCount);
+            if (result != ERROR_SUCCESS)
             {
-                return;
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage = WindowsError(L"GetDisplayConfigBufferSizes failed", result);
+                }
+                return false;
             }
 
-            if (!monitors->empty())
+            configuration.paths.resize(pathCount);
+            configuration.modes.resize(modeCount);
+            result = QueryDisplayConfig(
+                flags,
+                &pathCount,
+                configuration.paths.data(),
+                &modeCount,
+                configuration.modes.data(),
+                nullptr);
+            if (result == ERROR_INSUFFICIENT_BUFFER)
             {
-                DestroyPhysicalMonitors(static_cast<DWORD>(monitors->size()), monitors->data());
+                continue;
+            }
+            if (result != ERROR_SUCCESS)
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage = WindowsError(L"QueryDisplayConfig failed", result);
+                }
+                return false;
             }
 
-            delete monitors;
+            configuration.paths.resize(pathCount);
+            configuration.modes.resize(modeCount);
+            return true;
         }
-    };
 
-    struct MonitorLookupContext
-    {
-        const std::wstring* displayName{nullptr};
-        std::vector<PHYSICAL_MONITOR>* result{nullptr};
-        std::wstring* errorMessage{nullptr};
-    };
-
-    BOOL CALLBACK MonitorEnumProc(HMONITOR monitorHandle, HDC, LPRECT, LPARAM contextValue)
-    {
-        auto* context = reinterpret_cast<MonitorLookupContext*>(contextValue);
-        if (context == nullptr || context->displayName == nullptr || context->result == nullptr)
+        if (errorMessage != nullptr)
         {
-            return FALSE;
+            *errorMessage = L"The display configuration changed while it was being read.";
         }
-
-        MONITORINFOEXW monitorInfo{};
-        monitorInfo.cbSize = sizeof(monitorInfo);
-        if (!GetMonitorInfoW(monitorHandle, &monitorInfo))
-        {
-            return TRUE;
-        }
-
-        if (_wcsicmp(monitorInfo.szDevice, context->displayName->c_str()) != 0)
-        {
-            return TRUE;
-        }
-
-        DWORD physicalMonitorCount = 0;
-        if (!GetNumberOfPhysicalMonitorsFromHMONITOR(monitorHandle, &physicalMonitorCount))
-        {
-            if (context->errorMessage != nullptr)
-            {
-                *context->errorMessage = BuildWin32ErrorMessage(L"GetNumberOfPhysicalMonitorsFromHMONITOR failed", GetLastError());
-            }
-            return FALSE;
-        }
-
-        context->result->resize(physicalMonitorCount);
-        if (!GetPhysicalMonitorsFromHMONITOR(monitorHandle, physicalMonitorCount, context->result->data()))
-        {
-            if (context->errorMessage != nullptr)
-            {
-                *context->errorMessage = BuildWin32ErrorMessage(L"GetPhysicalMonitorsFromHMONITOR failed", GetLastError());
-            }
-            context->result->clear();
-            return FALSE;
-        }
-
-        return FALSE;
+        return false;
     }
 
-    bool FindPhysicalMonitorsForDisplay(
-        const std::wstring& displayName,
-        std::vector<PHYSICAL_MONITOR>& physicalMonitors,
-        std::wstring* errorMessage)
+    std::wstring SourceName(const DISPLAYCONFIG_PATH_INFO& path)
     {
-        physicalMonitors.clear();
-        MonitorLookupContext context{&displayName, &physicalMonitors, errorMessage};
-        EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, reinterpret_cast<LPARAM>(&context));
-        if (physicalMonitors.empty())
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME name{};
+        name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        name.header.size = sizeof(name);
+        name.header.adapterId = path.sourceInfo.adapterId;
+        name.header.id = path.sourceInfo.id;
+        return DisplayConfigGetDeviceInfo(&name.header) == ERROR_SUCCESS ? name.viewGdiDeviceName : L"";
+    }
+
+    std::wstring FriendlyName(const DISPLAYCONFIG_PATH_INFO& path)
+    {
+        DISPLAYCONFIG_TARGET_DEVICE_NAME name{};
+        name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+        name.header.size = sizeof(name);
+        name.header.adapterId = path.targetInfo.adapterId;
+        name.header.id = path.targetInfo.id;
+        if (DisplayConfigGetDeviceInfo(&name.header) == ERROR_SUCCESS && name.monitorFriendlyDeviceName[0] != L'\0')
         {
-            if (errorMessage != nullptr && errorMessage->empty())
+            return name.monitorFriendlyDeviceName;
+        }
+        return SourceName(path);
+    }
+
+    bool IsPrimaryDevice(const std::wstring& deviceName)
+    {
+        for (DWORD index = 0;; ++index)
+        {
+            DISPLAY_DEVICEW device{};
+            device.cb = sizeof(device);
+            if (!EnumDisplayDevicesW(nullptr, index, &device, 0))
             {
-                *errorMessage = L"No physical monitor was found for " + displayName + L".";
+                return false;
+            }
+            if (_wcsicmp(device.DeviceName, deviceName.c_str()) == 0)
+            {
+                return (device.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0;
+            }
+        }
+    }
+
+    bool IsConnected(const std::wstring& deviceName)
+    {
+        DEVMODEW mode{};
+        mode.dmSize = sizeof(mode);
+        return EnumDisplaySettingsW(deviceName.c_str(), ENUM_CURRENT_SETTINGS, &mode) != FALSE;
+    }
+
+    std::vector<DisplayPath> DetectCurrentDisplays(std::wstring* errorMessage)
+    {
+        DisplayConfiguration configuration;
+        if (!QueryConfiguration(QDC_ONLY_ACTIVE_PATHS, configuration, errorMessage))
+        {
+            return {};
+        }
+
+        std::vector<DisplayPath> displays;
+        for (const auto& path : configuration.paths)
+        {
+            if (path.targetInfo.targetAvailable == FALSE)
+            {
+                continue;
+            }
+
+            DisplayPath display;
+            display.monitorName = FriendlyName(path);
+            display.displayName = SourceName(path);
+            display.sourceAdapterLowPart = path.sourceInfo.adapterId.LowPart;
+            display.sourceAdapterHighPart = path.sourceInfo.adapterId.HighPart;
+            display.sourceId = path.sourceInfo.id;
+            display.targetAdapterLowPart = path.targetInfo.adapterId.LowPart;
+            display.targetAdapterHighPart = path.targetInfo.adapterId.HighPart;
+            display.targetId = path.targetInfo.id;
+            display.enabled = true;
+            display.isPrimary = IsPrimaryDevice(display.displayName);
+            if (path.sourceInfo.modeInfoIdx != DISPLAYCONFIG_PATH_MODE_IDX_INVALID &&
+                path.sourceInfo.modeInfoIdx < configuration.modes.size())
+            {
+                const auto& mode = configuration.modes[path.sourceInfo.modeInfoIdx];
+                if (mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+                {
+                    display.positionX = mode.sourceMode.position.x;
+                    display.positionY = mode.sourceMode.position.y;
+                    display.width = mode.sourceMode.width;
+                }
+            }
+            displays.push_back(std::move(display));
+        }
+
+        std::sort(displays.begin(), displays.end(), [](const auto& left, const auto& right)
+        {
+            return _wcsicmp(left.displayName.c_str(), right.displayName.c_str()) < 0;
+        });
+        return displays;
+    }
+
+    bool SameDisplay(const DISPLAYCONFIG_PATH_INFO& path, const DisplayPath& display)
+    {
+        return path.sourceInfo.id == display.sourceId && path.targetInfo.id == display.targetId;
+    }
+
+    bool InProfile(const DISPLAYCONFIG_PATH_INFO& path, const std::vector<DisplayPath>& displays)
+    {
+        return std::any_of(displays.begin(), displays.end(), [&path](const auto& display)
+        {
+            return SameDisplay(path, display);
+        });
+    }
+
+    bool ApplyPaths(DisplayConfiguration& configuration, std::wstring* errorMessage, const wchar_t* operation)
+    {
+        const LONG result = SetDisplayConfig(
+            static_cast<UINT32>(configuration.paths.size()),
+            configuration.paths.data(),
+            static_cast<UINT32>(configuration.modes.size()),
+            configuration.modes.data(),
+            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE);
+        if (result != ERROR_SUCCESS)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = WindowsError(operation, result);
             }
             return false;
         }
         return true;
     }
 
-}
-
-std::vector<MonitorPowerController::DisplayInfo> MonitorPowerController::EnumerateDisplays()
-{
-    std::vector<DisplayInfo> displays;
-    DISPLAY_DEVICEW adapter{};
-    adapter.cb = sizeof(adapter);
-    for (DWORD adapterIndex = 0; EnumDisplayDevicesW(nullptr, adapterIndex, &adapter, 0); ++adapterIndex)
+    bool ApplyPartialTopology(const std::vector<DisplayPath>& displays, std::wstring* errorMessage)
     {
-        if ((adapter.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) == 0)
+        DisplayConfiguration configuration;
+        if (!QueryConfiguration(QDC_ALL_PATHS, configuration, errorMessage))
         {
-            adapter.cb = sizeof(adapter);
-            continue;
+            return false;
         }
 
-        if ((adapter.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) != 0)
+        for (auto& path : configuration.paths)
         {
-            adapter.cb = sizeof(adapter);
-            continue;
+            const auto display = std::find_if(displays.begin(), displays.end(), [&path](const auto& candidate)
+            {
+                return SameDisplay(path, candidate);
+            });
+            if (display == displays.end())
+            {
+                continue;
+            }
+            if (display->enabled)
+            {
+                path.flags |= DISPLAYCONFIG_PATH_ACTIVE;
+            }
+            else
+            {
+                path.flags &= ~DISPLAYCONFIG_PATH_ACTIVE;
+            }
+        }
+        return ApplyPaths(configuration, errorMessage, L"Partial display topology failed");
+    }
+
+    bool ApplyFullTopology(const std::vector<DisplayPath>& displays, std::wstring* errorMessage)
+    {
+        DisplayConfiguration configuration;
+        if (!QueryConfiguration(QDC_ALL_PATHS, configuration, errorMessage))
+        {
+            return false;
         }
 
-        DisplayInfo info;
-        info.displayName = adapter.DeviceName;
-        info.displayLabel = adapter.DeviceString[0] != L'\0'
-            ? std::wstring(adapter.DeviceString) + L"  |  " + adapter.DeviceName
-            : std::wstring(adapter.DeviceName);
-        displays.push_back(std::move(info));
-
-        adapter.cb = sizeof(adapter);
-    }
-
-    if (displays.empty())
-    {
-        displays.push_back({L"\\\\.\\DISPLAY1", L"Monitor 1  |  \\\\.\\DISPLAY1"});
-        displays.push_back({L"\\\\.\\DISPLAY2", L"Monitor 2  |  \\\\.\\DISPLAY2"});
-    }
-
-    std::sort(
-        displays.begin(),
-        displays.end(),
-        [](const DisplayInfo& left, const DisplayInfo& right)
+        for (auto& path : configuration.paths)
         {
-            return _wcsicmp(left.displayName.c_str(), right.displayName.c_str()) < 0;
+            const auto display = std::find_if(displays.begin(), displays.end(), [&path](const auto& candidate)
+            {
+                return SameDisplay(path, candidate);
+            });
+            if (display != displays.end())
+            {
+                if (display->enabled)
+                {
+                    path.flags |= DISPLAYCONFIG_PATH_ACTIVE;
+                }
+                else
+                {
+                    path.flags &= ~DISPLAYCONFIG_PATH_ACTIVE;
+                }
+            }
+            else if (path.targetInfo.targetAvailable != FALSE)
+            {
+                path.flags &= ~DISPLAYCONFIG_PATH_ACTIVE;
+            }
+        }
+        return ApplyPaths(configuration, errorMessage, L"Full display topology failed");
+    }
+
+    bool ApplyPositions(const std::vector<DisplayPath>& displays, std::wstring* errorMessage)
+    {
+        DisplayConfiguration configuration;
+        if (!QueryConfiguration(QDC_ALL_PATHS, configuration, errorMessage))
+        {
+            return false;
+        }
+
+        LONG rightEdge = 0;
+        for (const auto& display : displays)
+        {
+            if (!display.enabled)
+            {
+                continue;
+            }
+            rightEdge = std::max(rightEdge, display.positionX + static_cast<LONG>(display.width));
+            const auto path = std::find_if(configuration.paths.begin(), configuration.paths.end(), [&display](const auto& candidate)
+            {
+                return SameDisplay(candidate, display);
+            });
+            if (path == configuration.paths.end() || path->targetInfo.targetAvailable == FALSE ||
+                path->sourceInfo.modeInfoIdx == DISPLAYCONFIG_PATH_MODE_IDX_INVALID ||
+                path->sourceInfo.modeInfoIdx >= configuration.modes.size())
+            {
+                continue;
+            }
+
+            auto& mode = configuration.modes[path->sourceInfo.modeInfoIdx];
+            if (mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+            {
+                mode.sourceMode.position.x = display.positionX;
+                mode.sourceMode.position.y = display.positionY;
+            }
+        }
+
+        for (const auto& path : configuration.paths)
+        {
+            if (path.targetInfo.targetAvailable == FALSE || path.targetInfo.scanLineOrdering == 0 || InProfile(path, displays) ||
+                path.sourceInfo.modeInfoIdx == DISPLAYCONFIG_PATH_MODE_IDX_INVALID ||
+                path.sourceInfo.modeInfoIdx >= configuration.modes.size())
+            {
+                continue;
+            }
+            auto& mode = configuration.modes[path.sourceInfo.modeInfoIdx];
+            if (mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+            {
+                mode.sourceMode.position.x = rightEdge;
+                mode.sourceMode.position.y = 0;
+                rightEdge += static_cast<LONG>(mode.sourceMode.width);
+            }
+        }
+        return ApplyPaths(configuration, errorMessage, L"Applying display positions failed");
+    }
+
+    std::vector<DisplayPath> PreparePrimary(std::vector<DisplayPath> displays)
+    {
+        const auto primary = std::find_if(displays.begin(), displays.end(), [](const auto& display)
+        {
+            return display.enabled && display.isPrimary;
         });
-    return displays;
+        if (primary == displays.end())
+        {
+            return displays;
+        }
+
+        const LONG offsetX = -primary->positionX;
+        const LONG offsetY = -primary->positionY;
+        for (auto& display : displays)
+        {
+            display.positionX += offsetX;
+            display.positionY += offsetY;
+        }
+        return displays;
+    }
 }
 
-bool MonitorPowerController::SetPower(
-    const std::wstring& displayName,
-    bool powerOn,
-    const std::function<void(const std::wstring&)>& logger,
-    std::wstring* errorMessage)
+bool MonitorPowerController::CaptureSetup(MonitorPowerSetup& setup, std::wstring* errorMessage)
 {
-    if (displayName.empty())
+    setup.displayPaths = DetectCurrentDisplays(errorMessage);
+    if (setup.displayPaths.empty())
     {
-        if (errorMessage != nullptr)
+        if (errorMessage != nullptr && errorMessage->empty())
         {
-            *errorMessage = L"No display name was provided.";
+            *errorMessage = L"Windows did not report any active monitors.";
         }
         return false;
     }
-
-    auto ownedMonitors = std::unique_ptr<std::vector<PHYSICAL_MONITOR>, PhysicalMonitorDeleter>(new std::vector<PHYSICAL_MONITOR>());
-    if (!FindPhysicalMonitorsForDisplay(displayName, *ownedMonitors, errorMessage))
-    {
-        return false;
-    }
-
-    const DWORD targetValue = powerOn ? kPowerModeOn : kPowerModeOff;
-    if (logger)
-    {
-        logger(std::wstring(L"Setting ") + displayName + (powerOn ? L" to power on." : L" to power off."));
-    }
-
-    auto& physicalMonitor = ownedMonitors->front();
-    if (!SetVCPFeature(physicalMonitor.hPhysicalMonitor, kPowerModeVcpCode, targetValue))
-    {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = BuildWin32ErrorMessage(
-                powerOn
-                    ? L"SetVCPFeature failed while powering on the monitor"
-                    : L"SetVCPFeature failed while powering off the monitor",
-                GetLastError());
-        }
-        return false;
-    }
-
-    if (logger)
-    {
-        logger(L"Power command sent to " + displayName + L".");
-    }
-
-    return true;
-}
-
-bool MonitorPowerController::TogglePower(
-    const std::wstring& displayName,
-    const std::function<void(const std::wstring&)>& logger,
-    std::wstring* errorMessage)
-{
-    if (displayName.empty())
-    {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = L"No display name was provided.";
-        }
-        return false;
-    }
-
-    MC_VCP_CODE_TYPE codeType = MC_MOMENTARY;
-    DWORD currentValue = 0;
-    DWORD maximumValue = 0;
-    auto ownedMonitors = std::unique_ptr<std::vector<PHYSICAL_MONITOR>, PhysicalMonitorDeleter>(new std::vector<PHYSICAL_MONITOR>());
-    if (!FindPhysicalMonitorsForDisplay(displayName, *ownedMonitors, errorMessage))
-    {
-        return false;
-    }
-
-    auto& physicalMonitor = ownedMonitors->front();
-    DWORD targetValue = kPowerModeOn;
-    if (!GetVCPFeatureAndVCPFeatureReply(
-            physicalMonitor.hPhysicalMonitor,
-            kPowerModeVcpCode,
-            &codeType,
-            &currentValue,
-            &maximumValue))
-    {
-        const DWORD getError = GetLastError();
-        if (logger)
-        {
-            logger(BuildWin32ErrorMessage(
-                L"GetVCPFeatureAndVCPFeatureReply failed. Falling back to a direct power-on attempt",
-                getError));
-        }
-        targetValue = kPowerModeOn;
-    }
-    else
-    {
-        targetValue = currentValue == kPowerModeOn ? kPowerModeOff : kPowerModeOn;
-        if (logger)
-        {
-            std::wostringstream stream;
-            stream << L"Display " << displayName
-                   << L" current power mode=" << currentValue
-                   << L", target=" << targetValue;
-            logger(stream.str());
-        }
-    }
-
-    if (!SetVCPFeature(physicalMonitor.hPhysicalMonitor, kPowerModeVcpCode, targetValue))
-    {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = BuildWin32ErrorMessage(
-                L"SetVCPFeature failed. The monitor may reject power toggles over DDC/CI",
-                GetLastError());
-        }
-        return false;
-    }
-
-    if (logger)
-    {
-        logger(L"Power toggle command sent to " + displayName + L".");
-    }
-
     return true;
 }
 
 bool MonitorPowerController::ApplySetup(
-    const std::vector<std::wstring>& enabledDisplays,
+    const MonitorPowerSetup& setup,
     const std::function<void(const std::wstring&)>& logger,
     std::wstring* errorMessage)
 {
-    if (enabledDisplays.empty())
+    const auto enabledCount = std::count_if(setup.displayPaths.begin(), setup.displayPaths.end(), [](const auto& display)
+    {
+        return display.enabled;
+    });
+    const auto primaryCount = std::count_if(setup.displayPaths.begin(), setup.displayPaths.end(), [](const auto& display)
+    {
+        return display.enabled && display.isPrimary;
+    });
+    if (enabledCount == 0 || primaryCount != 1)
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = L"Select at least one monitor to remain powered on.";
+            *errorMessage = L"Enable at least one monitor and select exactly one enabled monitor as Primary.";
         }
         return false;
     }
 
-    const auto displays = EnumerateDisplays();
-    if (displays.empty())
+    auto targetDisplays = PreparePrimary(setup.displayPaths);
+    const bool allConnected = std::all_of(targetDisplays.begin(), targetDisplays.end(), [](const auto& display)
     {
-        if (errorMessage != nullptr)
+        return IsConnected(display.displayName);
+    });
+    if (allConnected)
+    {
+        if (logger)
         {
-            *errorMessage = L"No monitors were detected.";
+            logger(L"Preparing the saved primary display and monitor positions.");
         }
-        return false;
-    }
-
-    std::unordered_set<std::wstring> enabledSet;
-    enabledSet.reserve(enabledDisplays.size());
-    for (const auto& display : enabledDisplays)
-    {
-        enabledSet.insert(display);
-    }
-
-    for (const auto& display : displays)
-    {
-        const bool powerOn = enabledSet.contains(display.displayName);
-        if (!SetPower(display.displayName, powerOn, logger, errorMessage))
+        if (!ApplyPositions(targetDisplays, errorMessage))
         {
             return false;
         }
     }
 
+    std::wstring detectError;
+    const auto currentDisplays = DetectCurrentDisplays(&detectError);
+    std::unordered_set<UINT> activeTargetIds;
+    for (const auto& display : currentDisplays)
+    {
+        activeTargetIds.insert(display.targetId);
+    }
+
+    std::vector<DisplayPath> phaseOne;
+    for (const auto& display : targetDisplays)
+    {
+        if (display.enabled && activeTargetIds.contains(display.targetId))
+        {
+            phaseOne.push_back(display);
+        }
+    }
+    if (!phaseOne.empty())
+    {
+        if (logger)
+        {
+            logger(L"Applying the partial topology for monitors that are already active.");
+        }
+        if (!ApplyPartialTopology(phaseOne, errorMessage))
+        {
+            return false;
+        }
+        Sleep(750);
+    }
+
+    if (logger)
+    {
+        logger(L"Applying the complete target topology.");
+    }
+    if (!ApplyFullTopology(targetDisplays, errorMessage))
+    {
+        return false;
+    }
+
+    if (logger)
+    {
+        logger(L"Applying final monitor positions.");
+    }
+    ApplyPositions(targetDisplays, &detectError);
     return true;
 }

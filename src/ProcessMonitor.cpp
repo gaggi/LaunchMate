@@ -509,7 +509,7 @@ void ProcessMonitor::CheckRules()
         {
             activeRules_.insert(rule.processKey);
             statusCallback_(rule.displayName + L" detected. Running actions.");
-            ExecuteStartActions(*runtimeConfiguration, rule);
+            ExecuteStartActions(rule);
         }
         else if (!detected && alreadyRunning)
         {
@@ -523,7 +523,7 @@ void ProcessMonitor::CheckRules()
     }
 }
 
-void ProcessMonitor::ExecuteStartActions(const RuntimeConfiguration& runtimeConfiguration, const RuntimeRule& rule)
+void ProcessMonitor::ExecuteStartActions(const RuntimeRule& rule)
 {
     if (rule.hasMonitorPowerSetup)
     {
@@ -589,7 +589,7 @@ void ProcessMonitor::ExecuteStartActions(const RuntimeConfiguration& runtimeConf
         if (!PostWebhook(*action)) statusCallback_(L"Home Assistant webhook failed: " + action->displayName);
     }
 
-    StartProgramsForRule(runtimeConfiguration, rule);
+    StartProgramsForRule(rule);
 }
 
 void ProcessMonitor::RestoreMonitorSetupForRule(const RuntimeRule& rule, ULONGLONG exitTick)
@@ -657,7 +657,7 @@ void ProcessMonitor::ExecuteExitActions(const RuntimeRule& rule, ULONGLONG exitT
     }
 }
 
-void ProcessMonitor::StartProgramsForRule(const RuntimeConfiguration& runtimeConfiguration, const RuntimeRule& rule)
+void ProcessMonitor::StartProgramsForRule(const RuntimeRule& rule)
 {
     std::vector<LaunchedProgramRecord> records;
     std::vector<const LaunchProgram*> scheduledPrograms;

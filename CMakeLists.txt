@@ -27,9 +27,10 @@ add_executable(LaunchMate WIN32
     resources/resources.rc
 )
 
-add_executable(DisplayProfileTest WIN32
-    tools/DisplayProfileTest.cpp
-)
+if(MSVC)
+    set_property(TARGET LaunchMate PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 target_include_directories(LaunchMate PRIVATE
     src
@@ -44,26 +45,13 @@ target_compile_definitions(LaunchMate PRIVATE
     LAUNCHMATE_GITHUB_REPOSITORY="${LAUNCHMATE_GITHUB_REPOSITORY}"
 )
 
-target_compile_definitions(DisplayProfileTest PRIVATE
-    UNICODE
-    _UNICODE
-    NOMINMAX
-    WIN32_LEAN_AND_MEAN
-)
-
 target_link_libraries(LaunchMate PRIVATE
     comctl32
     dxva2
     gdiplus
-    psapi
     shell32
     shlwapi
     winhttp
-)
-
-target_link_libraries(DisplayProfileTest PRIVATE
-    comctl32
-    user32
 )
 
 check_ipo_supported(RESULT launchmate_ipo_supported OUTPUT launchmate_ipo_error)

@@ -64,8 +64,8 @@ private:
 
     void WorkerLoop();
     void CheckRules();
-    void StartProgramsForRule(const RuntimeConfiguration& runtimeConfiguration, const RuntimeRule& rule);
-    void ExecuteStartActions(const RuntimeConfiguration& runtimeConfiguration, const RuntimeRule& rule);
+    void StartProgramsForRule(const RuntimeRule& rule);
+    void ExecuteStartActions(const RuntimeRule& rule);
     void RestoreMonitorSetupForRule(const RuntimeRule& rule, ULONGLONG exitTick);
     void ExecuteExitActions(const RuntimeRule& rule, ULONGLONG exitTick);
     void StopProgramsForRule(const RuntimeRule& rule);

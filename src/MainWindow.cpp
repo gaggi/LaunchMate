@@ -41,14 +41,11 @@ namespace
         });
     }
 
-    std::wstring QueryProcessPath(DWORD processId)
+    std::wstring QueryProcessPath(HANDLE process)
     {
-        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
-        if (!process) return {};
         std::wstring path(1024, L'\0');
         DWORD length = static_cast<DWORD>(path.size());
         if (!QueryFullProcessImageNameW(process, 0, path.data(), &length)) length = 0;
-        CloseHandle(process);
         path.resize(length);
         return path;
     }
@@ -1464,6 +1461,21 @@ void MainWindow::CaptureRunningProcesses()
 {
     runningProcesses_.clear();
     std::unordered_set<std::wstring> seenProcesses;
+    seenProcesses.reserve(128);
+    if (runningProcesses_.capacity() < 128) runningProcesses_.reserve(128);
+
+    struct CpuSample
+    {
+        HANDLE process{};
+        size_t processIndex{};
+        unsigned long long initialTime{};
+        LARGE_INTEGER sampleStart{};
+    };
+    std::vector<CpuSample> cpuSamples;
+    cpuSamples.reserve(128);
+
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
 
     std::wstring watchedProcessName;
     const int watchedIndex = SelectedWatchedIndex();
@@ -1491,82 +1503,76 @@ void MainWindow::CaptureRunningProcesses()
                 continue;
             }
 
-            const std::wstring path = QueryProcessPath(entry.th32ProcessID);
+            HANDLE process = OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+                FALSE,
+                entry.th32ProcessID);
+            if (!process)
+            {
+                process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
+            }
+
+            const std::wstring path = process ? QueryProcessPath(process) : std::wstring{};
             std::wstring key = processName + L"|" + path;
             std::transform(key.begin(), key.end(), key.begin(), [](wchar_t character)
             {
                 return static_cast<wchar_t>(std::towlower(character));
             });
-            if (!seenProcesses.insert(key).second) continue;
+            if (!seenProcesses.insert(key).second)
+            {
+                if (process) CloseHandle(process);
+                continue;
+            }
 
             RunningProcessEntry item;
             item.displayName = std::filesystem::path(processName).stem().wstring();
             item.processName = processName;
             item.executablePath = path;
             item.processId = entry.th32ProcessID;
+
+            if (process)
+            {
+                PROCESS_MEMORY_COUNTERS memory{};
+                if (K32GetProcessMemoryInfo(process, &memory, sizeof(memory)))
+                {
+                    item.memoryUsageBytes = memory.WorkingSetSize;
+                    item.hasMemoryUsage = true;
+                }
+            }
+
+            const size_t processIndex = runningProcesses_.size();
             runningProcesses_.push_back(std::move(item));
+
+            if (process)
+            {
+                FILETIME creation{};
+                FILETIME exit{};
+                FILETIME kernel{};
+                FILETIME user{};
+                if (GetProcessTimes(process, &creation, &exit, &kernel, &user))
+                {
+                    LARGE_INTEGER sampleStart{};
+                    QueryPerformanceCounter(&sampleStart);
+                    cpuSamples.push_back({
+                        process,
+                        processIndex,
+                        FileTimeValue(kernel) + FileTimeValue(user),
+                        sampleStart});
+                }
+                else
+                {
+                    CloseHandle(process);
+                }
+            }
         }
         while (Process32NextW(snapshot, &entry));
     }
     CloseHandle(snapshot);
 
-    struct CpuSample
-    {
-        HANDLE process{};
-        size_t processIndex{};
-        unsigned long long initialTime{};
-    };
-    std::vector<CpuSample> cpuSamples;
-    cpuSamples.reserve(runningProcesses_.size());
-
-    LARGE_INTEGER frequency{};
-    LARGE_INTEGER sampleStart{};
-    QueryPerformanceFrequency(&frequency);
-    QueryPerformanceCounter(&sampleStart);
-
-    for (size_t index = 0; index < runningProcesses_.size(); ++index)
-    {
-        auto& item = runningProcesses_[index];
-        HANDLE process = OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
-            FALSE,
-            item.processId);
-        if (!process)
-        {
-            process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, item.processId);
-        }
-        if (!process) continue;
-
-        PROCESS_MEMORY_COUNTERS memory{};
-        if (K32GetProcessMemoryInfo(process, &memory, sizeof(memory)))
-        {
-            item.memoryUsageBytes = memory.WorkingSetSize;
-            item.hasMemoryUsage = true;
-        }
-
-        FILETIME creation{};
-        FILETIME exit{};
-        FILETIME kernel{};
-        FILETIME user{};
-        if (GetProcessTimes(process, &creation, &exit, &kernel, &user))
-        {
-            cpuSamples.push_back({process, index, FileTimeValue(kernel) + FileTimeValue(user)});
-        }
-        else
-        {
-            CloseHandle(process);
-        }
-    }
-
     if (!cpuSamples.empty()) Sleep(250);
 
-    LARGE_INTEGER sampleEnd{};
-    QueryPerformanceCounter(&sampleEnd);
     SYSTEM_INFO systemInfo{};
     GetSystemInfo(&systemInfo);
-    const double elapsedSeconds = frequency.QuadPart > 0
-        ? static_cast<double>(sampleEnd.QuadPart - sampleStart.QuadPart) / static_cast<double>(frequency.QuadPart)
-        : 0.0;
     const double processorCount = std::max<DWORD>(1, systemInfo.dwNumberOfProcessors);
 
     for (const auto& sample : cpuSamples)
@@ -1575,10 +1581,16 @@ void MainWindow::CaptureRunningProcesses()
         FILETIME exit{};
         FILETIME kernel{};
         FILETIME user{};
-        if (elapsedSeconds > 0.0 && GetProcessTimes(sample.process, &creation, &exit, &kernel, &user))
+        if (GetProcessTimes(sample.process, &creation, &exit, &kernel, &user))
         {
+            LARGE_INTEGER sampleEnd{};
+            QueryPerformanceCounter(&sampleEnd);
+            const double elapsedSeconds = frequency.QuadPart > 0
+                ? static_cast<double>(sampleEnd.QuadPart - sample.sampleStart.QuadPart) /
+                    static_cast<double>(frequency.QuadPart)
+                : 0.0;
             const unsigned long long finalTime = FileTimeValue(kernel) + FileTimeValue(user);
-            if (finalTime >= sample.initialTime)
+            if (elapsedSeconds > 0.0 && finalTime >= sample.initialTime)
             {
                 auto& item = runningProcesses_[sample.processIndex];
                 const double processSeconds = static_cast<double>(finalTime - sample.initialTime) / 10000000.0;

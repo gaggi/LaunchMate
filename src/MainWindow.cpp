@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "CatalogPaths.h"
+#include "RuleActionsDialog.h"
 #include "StartupRegistration.h"
 #include "resource.h"
 #include "Utils.h"
@@ -17,10 +18,80 @@
 
 namespace
 {
-    constexpr COLORREF kBackground = RGB(16, 20, 24);
-    constexpr COLORREF kPanel = RGB(21, 29, 36);
-    constexpr COLORREF kText = RGB(236, 241, 246);
+    constexpr COLORREF kBackground = RGB(240, 240, 240);
+    constexpr COLORREF kPanel = RGB(255, 255, 255);
+    constexpr COLORREF kText = RGB(20, 20, 20);
     constexpr UINT kMonitorSetupHotkeyBase = 5000;
+    constexpr int kUpdateDialogInstall = 6101;
+    constexpr int kUpdateDialogOpenGitHub = 6102;
+    constexpr int kUpdateDialogLater = 6103;
+
+    HRESULT CALLBACK UpdateDialogCallback(HWND, UINT notification, WPARAM, LPARAM lParam, LONG_PTR)
+    {
+        if (notification == TDN_HYPERLINK_CLICKED && lParam != 0)
+        {
+            UpdateChecker::OpenReleasePage(reinterpret_cast<const wchar_t*>(lParam));
+        }
+        return S_OK;
+    }
+
+    int ShowUpdateDetailsDialog(HWND owner, const UpdateCheckResult& result)
+    {
+        const std::wstring currentVersion = UpdateChecker::CurrentVersion();
+        const std::wstring githubVersion = result.release.versionDisplay.empty() ? L"Unavailable" : result.release.versionDisplay;
+        const bool updateAvailable = result.state == UpdateCheckState::UpdateAvailable;
+        const std::wstring instruction = updateAvailable
+            ? L"A newer LaunchMate version is available"
+            : L"LaunchMate is up to date";
+
+        std::wstring content = L"Current version:  " + currentVersion +
+            L"\nGitHub version:  " + githubVersion;
+        if (!result.release.releasePageUrl.empty())
+        {
+            content += L"\n\n<a href=\"" + result.release.releasePageUrl + L"\">Open this release on GitHub</a>";
+        }
+
+        TASKDIALOGCONFIG config{};
+        config.cbSize = sizeof(config);
+        config.hwndParent = owner;
+        config.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+        config.pszWindowTitle = L"LaunchMate Update";
+        config.pszMainIcon = TD_INFORMATION_ICON;
+        config.pszMainInstruction = instruction.c_str();
+        config.pszContent = content.c_str();
+        config.pfCallback = UpdateDialogCallback;
+
+        TASKDIALOG_BUTTON buttons[2]{};
+        if (updateAvailable)
+        {
+            if (!result.release.assetDownloadUrl.empty())
+            {
+                buttons[0] = {kUpdateDialogInstall, L"Download and install update"};
+            }
+            else
+            {
+                buttons[0] = {kUpdateDialogOpenGitHub, L"Open release on GitHub"};
+            }
+            buttons[1] = {kUpdateDialogLater, L"Later"};
+            config.pButtons = buttons;
+            config.cButtons = 2;
+            config.nDefaultButton = buttons[0].nButtonID;
+        }
+        else
+        {
+            config.dwCommonButtons = TDCBF_OK_BUTTON;
+        }
+
+        int selectedButton = IDCANCEL;
+        if (FAILED(TaskDialogIndirect(&config, &selectedButton, nullptr, nullptr)))
+        {
+            const UINT flags = updateAvailable ? MB_YESNO | MB_ICONINFORMATION : MB_OK | MB_ICONINFORMATION;
+            selectedButton = MessageBoxW(owner, content.c_str(), L"LaunchMate Update", flags) == IDYES
+                ? (result.release.assetDownloadUrl.empty() ? kUpdateDialogOpenGitHub : kUpdateDialogInstall)
+                : IDCANCEL;
+        }
+        return selectedButton;
+    }
 
     bool IsValidRect(const RECT& rect)
     {
@@ -794,7 +865,7 @@ bool MainWindow::Create(int showCommand)
     windowHandle_ = CreateWindowExW(
         0,
         windowClass.lpszClassName,
-        L"LaunchMate",
+        (L"LaunchMate " + UpdateChecker::CurrentVersion()).c_str(),
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
@@ -821,7 +892,7 @@ bool MainWindow::Create(int showCommand)
         windowHandle_,
         kTrayCallbackMessage,
         appSmallIcon ? appSmallIcon : windowClass.hIcon,
-        L"LaunchMate",
+        (L"LaunchMate " + UpdateChecker::CurrentVersion()).c_str(),
         [this](UINT command)
     {
         HandleTrayCommand(command);
@@ -888,7 +959,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
 
         if (code == LBN_DBLCLK && controlId == IdRuleProgramsList)
         {
-            EditRuleProgram();
+            EditRuleActions();
             return 0;
         }
 
@@ -905,6 +976,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         case IdAddWatchedProcess: AddWatchedProcess(); return 0;
         case IdRemoveWatchedProcess: RemoveWatchedProcess(); return 0;
         case IdRemoveRuleProgram: RemoveRuleProgram(); return 0;
+        case IdEditRuleActions: EditRuleActions(); return 0;
         default:
             if (controlId >= IdSettingsMinimizeToTray && controlId <= IdSettingsCheckForUpdatesOnStartup)
             {
@@ -922,7 +994,6 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         SetBkMode(dc, TRANSPARENT);
         return reinterpret_cast<LRESULT>(backgroundBrush_);
     }
-    case WM_CTLCOLORBTN:
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORLISTBOX:
     {
@@ -987,7 +1058,9 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
                 app_.Log(L"Update check failed: " + result.message);
                 if (postedResult->interactive)
                 {
-                    MessageBoxW(windowHandle_, result.message.c_str(), L"LaunchMate Update", MB_OK | MB_ICONWARNING);
+                    const std::wstring details = L"Current version:  " + UpdateChecker::CurrentVersion() +
+                        L"\nGitHub version:  Unavailable\n\nUpdate check failed:\n" + result.message;
+                    MessageBoxW(windowHandle_, details.c_str(), L"LaunchMate Update", MB_OK | MB_ICONWARNING);
                 }
                 return 0;
             }
@@ -997,30 +1070,22 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
                 app_.Log(L"Update check complete. LaunchMate is up to date.");
                 if (postedResult->interactive)
                 {
-                    MessageBoxW(windowHandle_, L"LaunchMate is already up to date.", L"LaunchMate Update", MB_OK | MB_ICONINFORMATION);
+                    ShowUpdateDetailsDialog(windowHandle_, result);
                 }
                 return 0;
             }
 
             app_.Log(L"Update available: " + result.release.versionDisplay);
 
-            std::wstring prompt = L"LaunchMate " + result.release.versionDisplay + L" is available.";
-            if (!result.release.assetDownloadUrl.empty())
+            const int selectedButton = ShowUpdateDetailsDialog(windowHandle_, result);
+            if (selectedButton == kUpdateDialogInstall)
             {
-                prompt += L"\n\nDo you want to download and install it now?";
-                if (MessageBoxW(windowHandle_, prompt.c_str(), L"LaunchMate Update", MB_YESNO | MB_ICONINFORMATION) == IDYES)
-                {
-                    BeginUpdateInstall(result.release);
-                }
+                BeginUpdateInstall(result.release);
             }
-            else
+            else if (selectedButton == kUpdateDialogOpenGitHub &&
+                !UpdateChecker::OpenReleasePage(result.release.releasePageUrl))
             {
-                prompt += L"\n\nThis release does not include a direct updater package yet. Open the GitHub release page instead?";
-                if (MessageBoxW(windowHandle_, prompt.c_str(), L"LaunchMate Update", MB_YESNO | MB_ICONINFORMATION) == IDYES &&
-                    !UpdateChecker::OpenReleasePage(result.release.releasePageUrl))
-                {
-                    MessageBoxW(windowHandle_, L"Could not open the GitHub release page.", L"LaunchMate Update", MB_OK | MB_ICONWARNING);
-                }
+                MessageBoxW(windowHandle_, L"Could not open the GitHub release page.", L"LaunchMate Update", MB_OK | MB_ICONWARNING);
             }
 
             return 0;
@@ -1112,7 +1177,6 @@ void MainWindow::CreateControls()
     const int transferButtonX = ((kGlobalListX + kGlobalListWidth) + kRuleListX - kTransferButtonWidth) / 2;
     const int transferButtonY = kRuleListY + ((kRuleListHeight - kTransferButtonHeight) / 2);
 
-    CreateLabel(windowHandle_, L"LaunchMate", 22, 16, 220, 32, titleFont_);
     constexpr int kTopButtonGap = 12;
     constexpr int kMonitorSetupButtonWidth = 150;
     toggleButtonHandle_ = CreateButtonControl(windowHandle_, IdToggleMonitoring, L"Start monitoring", watchedButtonsRight - 220, 14, 220, 34, uiFont_);
@@ -1145,9 +1209,9 @@ void MainWindow::CreateControls()
         kWatchedListX, kWatchedListY, kWatchedListWidth, kWatchedListHeight, windowHandle_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdWatchedList)), nullptr, nullptr);
     SendMessageW(watchedListHandle_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
 
-    CreateLabel(windowHandle_, L"Linked programs", 620, 328, 240, 22, uiFont_);
+    CreateLabel(windowHandle_, L"Actions", 620, 328, 240, 22, uiFont_);
     CreateButtonControl(windowHandle_, IdTransferCatalogProgram, L">", transferButtonX, transferButtonY, kTransferButtonWidth, kTransferButtonHeight, uiFont_);
-    CreateButtonControl(windowHandle_, IdRemoveRuleProgram, L"-", ruleButtonsRight - kActionButtonWidth, 328, kActionButtonWidth, 28, uiFont_);
+    CreateButtonControl(windowHandle_, IdEditRuleActions, L"Edit actions...", ruleButtonsRight - 130, 328, 130, 28, uiFont_);
     ruleProgramsListHandle_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", nullptr,
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
         kRuleListX, kRuleListY, kRuleListWidth, kRuleListHeight, windowHandle_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdRuleProgramsList)), nullptr, nullptr);
@@ -1160,7 +1224,7 @@ void MainWindow::CreateControls()
     startWithWindowsHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartWithWindows, L"Start with Windows", 360, 594, 320, 24, uiFont_);
     startMonitoringHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartMonitoringOnLaunch, L"Start monitoring on launch", 360, 624, 320, 24, uiFont_);
     checkForUpdatesHandle_ = CreateCheckbox(windowHandle_, IdSettingsCheckForUpdatesOnStartup, L"Check for updates on startup", 360, 654, 360, 24, uiFont_);
-    CreateButtonControl(windowHandle_, IdCheckForUpdates, L"Check updates", 840, 620, 190, 34, uiFont_);
+    CreateButtonControl(windowHandle_, IdCheckForUpdates, L"Check for updates", 840, 620, 190, 34, uiFont_);
     CreateButtonControl(windowHandle_, IdSaveConfig, L"Save", 1040, 620, 140, 34, uiFont_);
 }
 
@@ -1281,13 +1345,33 @@ void MainWindow::PopulateRulePrograms()
     const auto& rule = app_.Configuration().watchedProcesses[static_cast<size_t>(index)];
     for (const auto& program : rule.programsToLaunch)
     {
-        std::wstring line = program.displayName.empty() ? FileNameWithoutExtension(program.filePath) : program.displayName;
+        std::wstring line = L"Start  |  " + (program.displayName.empty() ? FileNameWithoutExtension(program.filePath) : program.displayName);
         if (!program.arguments.empty())
         {
             line += L"  |  Arguments: " + program.arguments;
         }
         line += L"  |  Start delay: " + std::to_wstring(program.waitTimeMilliseconds) + L" ms";
         line += L"  |  Stop delay: " + std::to_wstring(program.closeDelayMilliseconds) + L" ms";
+        SendMessageW(ruleProgramsListHandle_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(line.c_str()));
+    }
+    for (const auto& action : rule.processesToStop)
+    {
+        std::wstring line = L"Stop  |  " + (action.displayName.empty() ? action.processName : action.displayName) + L"  |  " + action.processName;
+        if (action.restartAfterWatchProcessEnds)
+        {
+            line += L"  |  Restart after exit: " + std::to_wstring(action.restartDelayMilliseconds) + L" ms";
+        }
+        SendMessageW(ruleProgramsListHandle_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(line.c_str()));
+    }
+    for (const auto& action : rule.homeAssistantActions)
+    {
+        const std::wstring line = L"Home Assistant  |  " + action.displayName + L"  |  Delay: " + std::to_wstring(action.waitTimeMilliseconds) + L" ms";
+        SendMessageW(ruleProgramsListHandle_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(line.c_str()));
+    }
+    if (!rule.monitorPowerSetupName.empty())
+    {
+        std::wstring line = L"Monitor config  |  " + rule.monitorPowerSetupName;
+        if (rule.restoreMonitorPowerSetupOnExit) line += L"  |  Restore after exit";
         SendMessageW(ruleProgramsListHandle_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(line.c_str()));
     }
 }
@@ -1576,6 +1660,25 @@ void MainWindow::EditRuleProgram()
 
     PopulateRulePrograms();
     SendMessageW(ruleProgramsListHandle_, LB_SETCURSEL, static_cast<WPARAM>(programIndex), 0);
+    SaveConfiguration();
+}
+
+void MainWindow::EditRuleActions()
+{
+    const int watchedIndex = SelectedWatchedIndex();
+    if (watchedIndex < 0)
+    {
+        MessageBoxW(windowHandle_, L"Select a watched process first.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    auto& rule = app_.Configuration().watchedProcesses[static_cast<size_t>(watchedIndex)];
+    if (!ShowRuleActionsDialog(app_.InstanceHandle(), windowHandle_, rule, app_.Configuration().monitorPowerSetups))
+    {
+        return;
+    }
+
+    PopulateRulePrograms();
     SaveConfiguration();
 }
 

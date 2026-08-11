@@ -17,7 +17,7 @@
 namespace
 {
 #ifndef LAUNCHMATE_VERSION
-#define LAUNCHMATE_VERSION "0.0.6"
+#define LAUNCHMATE_VERSION "0.1.0"
 #endif
 
 #ifndef LAUNCHMATE_GITHUB_OWNER
@@ -380,6 +380,9 @@ UpdateCheckResult UpdateChecker::CheckForUpdate()
 
         const auto& object = root.AsObject();
         const std::wstring tagName = ReadWideString(object, "tag_name");
+        result.release.versionTag = tagName;
+        result.release.versionDisplay = NormalizeVersion(tagName);
+        result.release.releasePageUrl = ReadWideString(object, "html_url");
         if (!IsNewerVersion(tagName, CurrentVersion()))
         {
             result.state = UpdateCheckState::UpToDate;
@@ -388,10 +391,6 @@ UpdateCheckResult UpdateChecker::CheckForUpdate()
         }
 
         result.state = UpdateCheckState::UpdateAvailable;
-        result.release.versionTag = tagName;
-        result.release.versionDisplay = NormalizeVersion(tagName);
-        result.release.releasePageUrl = ReadWideString(object, "html_url");
-
         const std::wstring preferredSuffix = PreferredAssetSuffix();
         const auto assetsIt = object.find("assets");
         if (assetsIt != object.end() && assetsIt->second.IsArray())

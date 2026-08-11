@@ -37,6 +37,7 @@ private:
         IdAddWatchedProcess,
         IdRemoveWatchedProcess,
         IdRemoveRuleProgram,
+        IdEditRuleActions,
         IdSettingsMinimizeToTray,
         IdSettingsCloseToTray,
         IdSettingsStartWithWindows,
@@ -76,6 +77,7 @@ private:
     void RemoveSelectedCatalogProgram();
     void AddWatchedProcess();
     void EditRuleProgram();
+    void EditRuleActions();
     void RemoveWatchedProcess();
     void RemoveRuleProgram();
     void HandleTrayCommand(UINT command);

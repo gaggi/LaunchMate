@@ -60,6 +60,52 @@ namespace
         return program;
     }
 
+    Value ToJson(const ProcessStopAction& action)
+    {
+        Object object;
+        object["DisplayName"] = ToUtf8(action.displayName);
+        object["ProcessName"] = ToUtf8(action.processName);
+        object["ExecutablePath"] = ToUtf8(action.executablePath);
+        object["GracefulCloseFirst"] = action.gracefulCloseFirst;
+        object["ForceAfterMilliseconds"] = static_cast<double>(action.forceAfterMilliseconds);
+        object["RestartAfterWatchProcessEnds"] = action.restartAfterWatchProcessEnds;
+        object["RestartDelayMilliseconds"] = static_cast<double>(action.restartDelayMilliseconds);
+        return object;
+    }
+
+    ProcessStopAction ProcessStopActionFromJson(const Object& object)
+    {
+        ProcessStopAction action;
+        action.displayName = ReadWideString(object, "DisplayName");
+        action.processName = ReadWideString(object, "ProcessName");
+        action.executablePath = ReadWideString(object, "ExecutablePath");
+        action.gracefulCloseFirst = ReadBool(object, "GracefulCloseFirst", true);
+        action.forceAfterMilliseconds = ReadInt(object, "ForceAfterMilliseconds", 3000);
+        action.restartAfterWatchProcessEnds = ReadBool(object, "RestartAfterWatchProcessEnds", false);
+        action.restartDelayMilliseconds = ReadInt(object, "RestartDelayMilliseconds");
+        return action;
+    }
+
+    Value ToJson(const HomeAssistantAction& action)
+    {
+        Object object;
+        object["DisplayName"] = ToUtf8(action.displayName);
+        object["WebhookUrl"] = ToUtf8(action.webhookUrl);
+        object["JsonPayload"] = ToUtf8(action.jsonPayload);
+        object["WaitTimeMilliseconds"] = static_cast<double>(action.waitTimeMilliseconds);
+        return object;
+    }
+
+    HomeAssistantAction HomeAssistantActionFromJson(const Object& object)
+    {
+        HomeAssistantAction action;
+        action.displayName = ReadWideString(object, "DisplayName");
+        action.webhookUrl = ReadWideString(object, "WebhookUrl");
+        action.jsonPayload = ReadWideString(object, "JsonPayload", L"{}");
+        action.waitTimeMilliseconds = ReadInt(object, "WaitTimeMilliseconds");
+        return action;
+    }
+
     Value ToJson(const CatalogProgram& program)
     {
         Object object;
@@ -162,6 +208,22 @@ namespace
             programs.push_back(ToJson(program));
         }
         object["ProgramsToLaunch"] = programs;
+
+        Array stopActions;
+        for (const auto& action : rule.processesToStop)
+        {
+            stopActions.push_back(ToJson(action));
+        }
+        object["ProcessesToStop"] = stopActions;
+
+        Array homeActions;
+        for (const auto& action : rule.homeAssistantActions)
+        {
+            homeActions.push_back(ToJson(action));
+        }
+        object["HomeAssistantActions"] = homeActions;
+        object["MonitorPowerSetupName"] = ToUtf8(rule.monitorPowerSetupName);
+        object["RestoreMonitorPowerSetupOnExit"] = rule.restoreMonitorPowerSetupOnExit;
         return object;
     }
 
@@ -172,6 +234,8 @@ namespace
         rule.processName = ReadWideString(object, "ProcessName");
         rule.executablePath = ReadWideString(object, "ExecutablePath");
         rule.enabled = ReadBool(object, "Enabled", true);
+        rule.monitorPowerSetupName = ReadWideString(object, "MonitorPowerSetupName");
+        rule.restoreMonitorPowerSetupOnExit = ReadBool(object, "RestoreMonitorPowerSetupOnExit", true);
 
         const auto it = object.find("ProgramsToLaunch");
         if (it != object.end() && it->second.IsArray())
@@ -182,6 +246,24 @@ namespace
                 {
                     rule.programsToLaunch.push_back(LaunchProgramFromJson(item.AsObject()));
                 }
+            }
+        }
+
+        const auto stopIt = object.find("ProcessesToStop");
+        if (stopIt != object.end() && stopIt->second.IsArray())
+        {
+            for (const auto& item : stopIt->second.AsArray())
+            {
+                if (item.IsObject()) rule.processesToStop.push_back(ProcessStopActionFromJson(item.AsObject()));
+            }
+        }
+
+        const auto homeIt = object.find("HomeAssistantActions");
+        if (homeIt != object.end() && homeIt->second.IsArray())
+        {
+            for (const auto& item : homeIt->second.AsArray())
+            {
+                if (item.IsObject()) rule.homeAssistantActions.push_back(HomeAssistantActionFromJson(item.AsObject()));
             }
         }
 

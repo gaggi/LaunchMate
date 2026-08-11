@@ -3,30 +3,10 @@ project(LaunchMate LANGUAGES CXX)
 
 include(CheckIPOSupported)
 
-set(LAUNCHMATE_VERSION_DEFAULT "0.0.6")
+set(LAUNCHMATE_VERSION_DEFAULT "0.1.0")
 set(LAUNCHMATE_VERSION "${LAUNCHMATE_VERSION_DEFAULT}" CACHE STRING "LaunchMate version")
 set(LAUNCHMATE_GITHUB_OWNER "gaggi" CACHE STRING "LaunchMate GitHub owner")
 set(LAUNCHMATE_GITHUB_REPOSITORY "LaunchMate" CACHE STRING "LaunchMate GitHub repository")
-
-if(LAUNCHMATE_VERSION STREQUAL "0.0.0-dev" OR LAUNCHMATE_VERSION STREQUAL "0.0.5")
-    set(LAUNCHMATE_VERSION "${LAUNCHMATE_VERSION_DEFAULT}" CACHE STRING "LaunchMate version" FORCE)
-endif()
-
-if(LAUNCHMATE_VERSION STREQUAL "${LAUNCHMATE_VERSION_DEFAULT}")
-    find_package(Git QUIET)
-    if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
-        execute_process(
-            COMMAND "${GIT_EXECUTABLE}" describe --tags --abbrev=0
-            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-            OUTPUT_VARIABLE launchmate_git_tag
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            ERROR_QUIET
-        )
-        if(launchmate_git_tag)
-            string(REGEX REPLACE "^v" "" LAUNCHMATE_VERSION "${launchmate_git_tag}")
-        endif()
-    endif()
-endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -36,6 +16,7 @@ add_executable(LaunchMate WIN32
     src/main.cpp
     src/App.cpp
     src/MainWindow.cpp
+    src/RuleActionsDialog.cpp
     src/MonitorPowerController.cpp
     src/ProcessMonitor.cpp
     src/ConfigStore.cpp

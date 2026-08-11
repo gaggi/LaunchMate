@@ -14,6 +14,25 @@ struct LaunchProgram
     int closeDelayMilliseconds{0};
 };
 
+struct ProcessStopAction
+{
+    std::wstring displayName;
+    std::wstring processName;
+    std::wstring executablePath;
+    bool gracefulCloseFirst{true};
+    int forceAfterMilliseconds{3000};
+    bool restartAfterWatchProcessEnds{false};
+    int restartDelayMilliseconds{0};
+};
+
+struct HomeAssistantAction
+{
+    std::wstring displayName;
+    std::wstring webhookUrl;
+    std::wstring jsonPayload{L"{}"};
+    int waitTimeMilliseconds{0};
+};
+
 struct CatalogProgram
 {
     std::wstring displayName;
@@ -52,6 +71,10 @@ struct WatchedProcessRule
     std::wstring executablePath;
     bool enabled{true};
     std::vector<LaunchProgram> programsToLaunch;
+    std::vector<ProcessStopAction> processesToStop;
+    std::vector<HomeAssistantAction> homeAssistantActions;
+    std::wstring monitorPowerSetupName;
+    bool restoreMonitorPowerSetupOnExit{true};
 };
 
 struct AppConfiguration

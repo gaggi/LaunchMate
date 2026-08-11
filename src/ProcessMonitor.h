@@ -33,6 +33,11 @@ private:
         std::wstring processKey;
         std::wstring displayName;
         std::vector<LaunchProgram> programsToLaunch;
+        std::vector<ProcessStopAction> processesToStop;
+        std::vector<HomeAssistantAction> homeAssistantActions;
+        MonitorPowerSetup monitorPowerSetup;
+        bool hasMonitorPowerSetup{false};
+        bool restoreMonitorPowerSetupOnExit{true};
     };
 
     struct RuntimeConfiguration
@@ -58,6 +63,9 @@ private:
     void WorkerLoop();
     void CheckRules();
     void StartProgramsForRule(const RuntimeConfiguration& runtimeConfiguration, const RuntimeRule& rule);
+    void ExecuteStartActions(const RuntimeConfiguration& runtimeConfiguration, const RuntimeRule& rule);
+    void RestoreMonitorSetupForRule(const RuntimeRule& rule);
+    void ExecuteExitActions(const RuntimeRule& rule, ULONGLONG exitTick);
     void StopProgramsForRule(const RuntimeRule& rule);
     ProcessSnapshot CaptureProcessSnapshot(
         bool includeProcessTree,
@@ -81,4 +89,6 @@ private:
     std::mutex mutex_;
     std::unordered_set<std::wstring> activeRules_;
     std::map<std::wstring, std::vector<LaunchedProgramRecord>> startedPrograms_;
+    std::map<std::wstring, std::vector<ProcessStopAction>> stoppedProcesses_;
+    std::map<std::wstring, MonitorPowerSetup> previousMonitorSetups_;
 };

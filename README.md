@@ -1,10 +1,15 @@
 # LaunchMate
 
-LaunchMate is a native Windows desktop app for monitoring processes and automatically starting related programs.
+LaunchMate is a native Windows desktop app for monitoring processes and automatically running related actions.
 
 ## Features
 
 - Watch processes and launch linked programs for each rule
+- Gracefully close or force-stop selected processes when a watched process starts
+- Optionally restart stopped processes after the watched process exits
+- Trigger Home Assistant webhooks with an optional JSON payload
+- Apply a saved monitor config and restore the previous display state afterward
+- Configure start, stop, and webhook actions in a compact tabbed editor
 - Detect known companion apps from common install paths and add them quickly to a watched process
 - Optional Windows autostart
 - Optional tray mode

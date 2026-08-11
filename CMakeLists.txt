@@ -5,6 +5,9 @@ include(CheckIPOSupported)
 
 set(LAUNCHMATE_VERSION_DEFAULT "0.1.0")
 set(LAUNCHMATE_VERSION "${LAUNCHMATE_VERSION_DEFAULT}" CACHE STRING "LaunchMate version")
+if(NOT LAUNCHMATE_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+([-.+][0-9A-Za-z.-]+)?$")
+    message(FATAL_ERROR "Invalid LAUNCHMATE_VERSION: '${LAUNCHMATE_VERSION}'")
+endif()
 set(LAUNCHMATE_GITHUB_OWNER "gaggi" CACHE STRING "LaunchMate GitHub owner")
 set(LAUNCHMATE_GITHUB_REPOSITORY "LaunchMate" CACHE STRING "LaunchMate GitHub repository")
 

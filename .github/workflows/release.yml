@@ -21,7 +21,8 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}".TrimStart('v')
-          cmake --preset vs2022-x64 -DLAUNCHMATE_VERSION=$version
+          Write-Host "Building LaunchMate version $version (x64)"
+          cmake --preset vs2022-x64 "-DLAUNCHMATE_VERSION:STRING=$version"
 
       - name: Build Release x64
         run: cmake --build --preset build-vs2022-x64-release
@@ -30,7 +31,8 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}".TrimStart('v')
-          cmake --preset vs2022-x86 -DLAUNCHMATE_VERSION=$version
+          Write-Host "Building LaunchMate version $version (x86)"
+          cmake --preset vs2022-x86 "-DLAUNCHMATE_VERSION:STRING=$version"
 
       - name: Build Release x86
         run: cmake --build --preset build-vs2022-x86-release

@@ -10,7 +10,8 @@ permissions:
 
 jobs:
   build-and-release:
-    runs-on: windows-latest
+    # The CMake presets intentionally target Visual Studio 2022.
+    runs-on: windows-2022
 
     steps:
       - name: Check out repository

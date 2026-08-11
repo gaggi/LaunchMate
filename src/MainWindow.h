@@ -36,7 +36,7 @@ private:
         IdRemoveCatalogProgram,
         IdAddWatchedProcess,
         IdRemoveWatchedProcess,
-        IdRemoveRuleProgram,
+        IdRemoveRuleAction,
         IdEditRuleActions,
         IdSettingsMinimizeToTray,
         IdSettingsCloseToTray,
@@ -47,7 +47,8 @@ private:
         IdCatalogSearch,
         IdCatalogList,
         IdWatchedList,
-        IdRuleProgramsList
+        IdRuleProgramsList,
+        IdSourceTabs
     };
 
     static constexpr UINT kTrayCallbackMessage = WM_APP + 1;
@@ -59,6 +60,9 @@ private:
     void CreateControls();
     void PopulateLists();
     void PopulateCatalogPrograms();
+    void CaptureRunningProcesses();
+    void PopulateRunningProcesses();
+    void SwitchSourceTab();
     void SyncCatalogProgramsFromConfiguration();
     void DetectInstalledApps();
     void PopulateRulePrograms();
@@ -73,13 +77,15 @@ private:
     void HideToTray();
     void ShowFromTray();
     void AddSelectedCatalogProgram();
+    void TransferSelectedSource();
+    void AddSelectedRunningProcess();
     void AddCustomCatalogProgram();
     void RemoveSelectedCatalogProgram();
     void AddWatchedProcess();
     void EditRuleProgram();
     void EditRuleActions();
     void RemoveWatchedProcess();
-    void RemoveRuleProgram();
+    void RemoveSelectedRuleAction();
     void HandleTrayCommand(UINT command);
     void StartUpdateCheck(bool interactive);
     void BeginUpdateInstall(UpdateReleaseInfo release);
@@ -88,6 +94,7 @@ private:
     LaunchProgram SelectLaunchProgram();
     WatchedProcessRule SelectWatchedProcess();
     int SelectedCatalogProgramIndex() const;
+    int SelectedRunningProcessIndex() const;
     int SelectedWatchedIndex() const;
 
     App& app_;
@@ -95,6 +102,10 @@ private:
     HWND toggleButtonHandle_{nullptr};
     HWND catalogSearchHandle_{nullptr};
     HWND catalogListHandle_{nullptr};
+    HWND sourceTabsHandle_{nullptr};
+    HWND detectSourceButtonHandle_{nullptr};
+    HWND addCatalogButtonHandle_{nullptr};
+    HWND removeCatalogButtonHandle_{nullptr};
     HWND watchedListHandle_{nullptr};
     HWND ruleProgramsListHandle_{nullptr};
     HWND minimizeToTrayHandle_{nullptr};
@@ -105,11 +116,21 @@ private:
     HWND checkForUpdatesHandle_{nullptr};
     HFONT titleFont_{nullptr};
     HFONT uiFont_{nullptr};
-    HBRUSH backgroundBrush_{nullptr};
-    HBRUSH panelBrush_{nullptr};
     TrayIcon trayIcon_;
     std::vector<CatalogProgram> detectedPrograms_;
-    std::vector<size_t> filteredDetectedProgramIndexes_;
+    struct RunningProcessEntry
+    {
+        std::wstring displayName;
+        std::wstring processName;
+        std::wstring executablePath;
+        DWORD processId{};
+        double cpuUsagePercent{};
+        unsigned long long memoryUsageBytes{};
+        bool hasCpuUsage{};
+        bool hasMemoryUsage{};
+    };
+    std::vector<RunningProcessEntry> runningProcesses_;
+    int sourceTabIndex_{0};
     bool exitRequested_{false};
     bool updateCheckInProgress_{false};
     bool updateInstallInProgress_{false};

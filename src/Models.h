@@ -74,7 +74,9 @@ struct WatchedProcessRule
     std::vector<ProcessStopAction> processesToStop;
     std::vector<HomeAssistantAction> homeAssistantActions;
     std::wstring monitorPowerSetupName;
+    int monitorPowerSetupDelayMilliseconds{0};
     bool restoreMonitorPowerSetupOnExit{true};
+    int restoreMonitorPowerSetupDelayMilliseconds{0};
 };
 
 struct AppConfiguration

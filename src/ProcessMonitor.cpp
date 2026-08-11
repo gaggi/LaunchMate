@@ -263,7 +263,9 @@ void ProcessMonitor::UpdateConfiguration(const AppConfiguration& configuration)
         runtimeRule.programsToLaunch = rule.programsToLaunch;
         runtimeRule.processesToStop = rule.processesToStop;
         runtimeRule.homeAssistantActions = rule.homeAssistantActions;
+        runtimeRule.monitorPowerSetupDelayMilliseconds = rule.monitorPowerSetupDelayMilliseconds;
         runtimeRule.restoreMonitorPowerSetupOnExit = rule.restoreMonitorPowerSetupOnExit;
+        runtimeRule.restoreMonitorPowerSetupDelayMilliseconds = rule.restoreMonitorPowerSetupDelayMilliseconds;
         const auto monitorSetup = std::find_if(
             configuration.monitorPowerSetups.begin(),
             configuration.monitorPowerSetups.end(),
@@ -514,7 +516,7 @@ void ProcessMonitor::CheckRules()
             activeRules_.erase(rule.processKey);
             statusCallback_(rule.displayName + L" exited. Closing started programs.");
             const ULONGLONG exitTick = GetTickCount64();
-            RestoreMonitorSetupForRule(rule);
+            RestoreMonitorSetupForRule(rule, exitTick);
             StopProgramsForRule(rule);
             ExecuteExitActions(rule, exitTick);
         }
@@ -525,6 +527,9 @@ void ProcessMonitor::ExecuteStartActions(const RuntimeConfiguration& runtimeConf
 {
     if (rule.hasMonitorPowerSetup)
     {
+        const DWORD applyDelay = static_cast<DWORD>(std::max(0, rule.monitorPowerSetupDelayMilliseconds));
+        if (applyDelay > 0) Sleep(applyDelay);
+
         MonitorPowerSetup previousSetup;
         std::wstring errorMessage;
         bool capturedPrevious = false;
@@ -587,7 +592,7 @@ void ProcessMonitor::ExecuteStartActions(const RuntimeConfiguration& runtimeConf
     StartProgramsForRule(runtimeConfiguration, rule);
 }
 
-void ProcessMonitor::RestoreMonitorSetupForRule(const RuntimeRule& rule)
+void ProcessMonitor::RestoreMonitorSetupForRule(const RuntimeRule& rule, ULONGLONG exitTick)
 {
     MonitorPowerSetup previousSetup;
     {
@@ -597,6 +602,10 @@ void ProcessMonitor::RestoreMonitorSetupForRule(const RuntimeRule& rule)
         previousSetup = std::move(monitorIt->second);
         previousMonitorSetups_.erase(monitorIt);
     }
+
+    const DWORD restoreDelay = static_cast<DWORD>(std::max(0, rule.restoreMonitorPowerSetupDelayMilliseconds));
+    const ULONGLONG elapsed = GetTickCount64() - exitTick;
+    if (elapsed < restoreDelay) Sleep(static_cast<DWORD>(restoreDelay - elapsed));
 
     std::wstring errorMessage;
     if (!MonitorPowerController::ApplySetup(previousSetup, {}, &errorMessage))

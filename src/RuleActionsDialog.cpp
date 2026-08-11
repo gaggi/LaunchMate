@@ -1,10 +1,14 @@
 #include "RuleActionsDialog.h"
 
+#include "ListViewHelpers.h"
 #include "resource.h"
+#include "TabHost.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
+#include <cwchar>
 #include <filesystem>
+#include <iterator>
 #include <string>
 
 namespace
@@ -22,6 +26,48 @@ namespace
         BOOL translated = FALSE;
         const UINT value = GetDlgItemInt(dialog, id, &translated, FALSE);
         return translated ? static_cast<int>(value) : fallback;
+    }
+
+    HWND FindActionControl(HWND dialog, int id)
+    {
+        if (HWND control = GetDlgItem(dialog, id)) return control;
+        return GetDlgItem(GetDlgItem(dialog, IDC_ACTION_TAB), id);
+    }
+
+    bool IsActionCheckboxChecked(HWND dialog, int id)
+    {
+        return SendMessageW(FindActionControl(dialog, id), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }
+
+    LRESULT SendActionMessage(HWND dialog, int id, UINT message, WPARAM wParam = 0, LPARAM lParam = 0)
+    {
+        return SendMessageW(FindActionControl(dialog, id), message, wParam, lParam);
+    }
+
+    int GetActionNumber(HWND dialog, int id, int fallback = 0)
+    {
+        wchar_t value[32]{};
+        GetWindowTextW(FindActionControl(dialog, id), value, static_cast<int>(std::size(value)));
+        wchar_t* end = nullptr;
+        const unsigned long parsed = std::wcstoul(value, &end, 10);
+        return end != value && *end == L'\0' ? static_cast<int>(parsed) : fallback;
+    }
+
+    void HostRuleActionControls(HWND dialog)
+    {
+        HWND tab = GetDlgItem(dialog, IDC_ACTION_TAB);
+        HostControlsInTab(dialog, tab, {
+            GetDlgItem(dialog, IDC_ACTION_LIST),
+            GetDlgItem(dialog, IDC_ACTION_ADD),
+            GetDlgItem(dialog, IDC_ACTION_EDIT),
+            GetDlgItem(dialog, IDC_ACTION_REMOVE),
+            GetDlgItem(dialog, IDC_ACTION_MONITOR_LABEL),
+            GetDlgItem(dialog, IDC_ACTION_MONITOR_COMBO),
+            GetDlgItem(dialog, IDC_ACTION_MONITOR_DELAY_LABEL),
+            GetDlgItem(dialog, IDC_ACTION_MONITOR_DELAY),
+            GetDlgItem(dialog, IDC_ACTION_MONITOR_RESTORE),
+            GetDlgItem(dialog, IDC_ACTION_MONITOR_RESTORE_DELAY_LABEL),
+            GetDlgItem(dialog, IDC_ACTION_MONITOR_RESTORE_DELAY)});
     }
 
     std::wstring PickExecutable(HWND owner)
@@ -217,19 +263,21 @@ namespace
 
     int SelectedItem(HWND dialog)
     {
-        return static_cast<int>(SendDlgItemMessageW(dialog, IDC_ACTION_LIST, LB_GETCURSEL, 0, 0));
+        return SelectedListViewRow(FindActionControl(dialog, IDC_ACTION_LIST));
     }
 
     void StoreMonitorSettings(HWND dialog, ActionsState& state)
     {
-        const int selected = static_cast<int>(SendDlgItemMessageW(dialog, IDC_ACTION_MONITOR_COMBO, CB_GETCURSEL, 0, 0));
+        const int selected = static_cast<int>(SendActionMessage(dialog, IDC_ACTION_MONITOR_COMBO, CB_GETCURSEL));
         state.workingRule.monitorPowerSetupName.clear();
         if (selected > 0 && state.monitorSetups && static_cast<size_t>(selected - 1) < state.monitorSetups->size())
         {
             state.workingRule.monitorPowerSetupName = (*state.monitorSetups)[static_cast<size_t>(selected - 1)].name;
         }
         state.workingRule.restoreMonitorPowerSetupOnExit =
-            IsDlgButtonChecked(dialog, IDC_ACTION_MONITOR_RESTORE) == BST_CHECKED;
+            IsActionCheckboxChecked(dialog, IDC_ACTION_MONITOR_RESTORE);
+        state.workingRule.monitorPowerSetupDelayMilliseconds = GetActionNumber(dialog, IDC_ACTION_MONITOR_DELAY);
+        state.workingRule.restoreMonitorPowerSetupDelayMilliseconds = GetActionNumber(dialog, IDC_ACTION_MONITOR_RESTORE_DELAY);
     }
 
     void ShowTabControls(HWND dialog, const ActionsState& state)
@@ -238,40 +286,66 @@ namespace
         const int monitorCommand = state.tab == 3 ? SW_SHOW : SW_HIDE;
         for (const int id : {IDC_ACTION_LIST, IDC_ACTION_ADD, IDC_ACTION_EDIT, IDC_ACTION_REMOVE})
         {
-            ShowWindow(GetDlgItem(dialog, id), listCommand);
+            ShowWindow(FindActionControl(dialog, id), listCommand);
         }
-        for (const int id : {IDC_ACTION_MONITOR_LABEL, IDC_ACTION_MONITOR_COMBO, IDC_ACTION_MONITOR_RESTORE})
+        for (const int id : {
+            IDC_ACTION_MONITOR_LABEL,
+            IDC_ACTION_MONITOR_COMBO,
+            IDC_ACTION_MONITOR_DELAY_LABEL,
+            IDC_ACTION_MONITOR_DELAY,
+            IDC_ACTION_MONITOR_RESTORE,
+            IDC_ACTION_MONITOR_RESTORE_DELAY_LABEL,
+            IDC_ACTION_MONITOR_RESTORE_DELAY})
         {
-            ShowWindow(GetDlgItem(dialog, id), monitorCommand);
+            ShowWindow(FindActionControl(dialog, id), monitorCommand);
         }
     }
 
     void RefreshActions(HWND dialog, ActionsState& state)
     {
-        SendDlgItemMessageW(dialog, IDC_ACTION_LIST, LB_RESETCONTENT, 0, 0);
+        HWND list = FindActionControl(dialog, IDC_ACTION_LIST);
         if (state.tab == 0)
         {
+            ConfigureListView(list, {{L"Name", 2}, {L"Program", 4}, {L"Arguments", 3}, {L"Start delay", 2}, {L"Stop delay", 2}});
             for (const auto& item : state.workingRule.programsToLaunch)
             {
-                const auto text = item.displayName + L"  |  " + item.filePath + L"  |  " + std::to_wstring(item.waitTimeMilliseconds) + L" ms";
-                SendDlgItemMessageW(dialog, IDC_ACTION_LIST, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
+                AddListViewRow(list, {
+                    item.displayName,
+                    item.filePath,
+                    item.arguments,
+                    std::to_wstring(item.waitTimeMilliseconds) + L" ms",
+                    std::to_wstring(item.closeDelayMilliseconds) + L" ms"});
             }
         }
         else if (state.tab == 1)
         {
+            ConfigureListView(list, {{L"Name", 2}, {L"Process", 3}, {L"Close mode", 3}, {L"Restart", 3}});
             for (const auto& item : state.workingRule.processesToStop)
             {
-                const auto text = item.displayName + L"  |  " + item.processName + (item.gracefulCloseFirst ? L"  |  graceful then force" : L"  |  force");
-                SendDlgItemMessageW(dialog, IDC_ACTION_LIST, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
+                const std::wstring restart = item.restartAfterWatchProcessEnds
+                    ? std::to_wstring(item.restartDelayMilliseconds) + L" ms after exit"
+                    : L"No";
+                AddListViewRow(list, {
+                    item.displayName,
+                    item.processName,
+                    item.gracefulCloseFirst ? L"Graceful, then force" : L"Force",
+                    restart});
             }
         }
         else if (state.tab == 2)
         {
+            ConfigureListView(list, {{L"Name", 2}, {L"Webhook URL", 6}, {L"Delay", 2}});
             for (const auto& item : state.workingRule.homeAssistantActions)
             {
-                const auto text = item.displayName + L"  |  " + item.webhookUrl + L"  |  " + std::to_wstring(item.waitTimeMilliseconds) + L" ms";
-                SendDlgItemMessageW(dialog, IDC_ACTION_LIST, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
+                AddListViewRow(list, {
+                    item.displayName,
+                    item.webhookUrl,
+                    std::to_wstring(item.waitTimeMilliseconds) + L" ms"});
             }
+        }
+        else
+        {
+            ListView_DeleteAllItems(list);
         }
         ShowTabControls(dialog, state);
     }
@@ -342,21 +416,50 @@ namespace
             SendDlgItemMessageW(dialog, IDC_ACTION_MONITOR_COMBO, CB_SETCURSEL, monitorSelection, 0);
             CheckDlgButton(dialog, IDC_ACTION_MONITOR_RESTORE,
                 state->workingRule.restoreMonitorPowerSetupOnExit ? BST_CHECKED : BST_UNCHECKED);
+            SetDlgItemInt(dialog, IDC_ACTION_MONITOR_DELAY,
+                static_cast<UINT>(state->workingRule.monitorPowerSetupDelayMilliseconds), FALSE);
+            SetDlgItemInt(dialog, IDC_ACTION_MONITOR_RESTORE_DELAY,
+                static_cast<UINT>(state->workingRule.restoreMonitorPowerSetupDelayMilliseconds), FALSE);
+            EnableWindow(GetDlgItem(dialog, IDC_ACTION_MONITOR_RESTORE_DELAY), state->workingRule.restoreMonitorPowerSetupOnExit);
+            EnableWindow(GetDlgItem(dialog, IDC_ACTION_MONITOR_RESTORE_DELAY_LABEL), state->workingRule.restoreMonitorPowerSetupOnExit);
+            HostRuleActionControls(dialog);
+            InitializeReportListView(FindActionControl(dialog, IDC_ACTION_LIST));
             RefreshActions(dialog, *state);
             return TRUE;
         }
-        if (message == WM_NOTIFY && reinterpret_cast<NMHDR*>(lParam)->idFrom == IDC_ACTION_TAB && reinterpret_cast<NMHDR*>(lParam)->code == TCN_SELCHANGE)
+        if (message == WM_NOTIFY)
         {
-            state->tab = TabCtrl_GetCurSel(GetDlgItem(dialog, IDC_ACTION_TAB));
-            RefreshActions(dialog, *state);
-            return TRUE;
+            const auto* header = reinterpret_cast<NMHDR*>(lParam);
+            if (header->idFrom == IDC_ACTION_TAB && header->code == TCN_SELCHANGE)
+            {
+                state->tab = TabCtrl_GetCurSel(GetDlgItem(dialog, IDC_ACTION_TAB));
+                RefreshActions(dialog, *state);
+                return TRUE;
+            }
+            if (header->idFrom == IDC_ACTION_LIST && header->code == LVN_COLUMNCLICK)
+            {
+                const auto* column = reinterpret_cast<NMLISTVIEW*>(lParam);
+                SortListViewByColumn(header->hwndFrom, column->iSubItem);
+                return TRUE;
+            }
+            if (header->idFrom == IDC_ACTION_LIST && header->code == NM_DBLCLK)
+            {
+                EditAction(dialog, *state, false);
+                return TRUE;
+            }
         }
         if (message != WM_COMMAND) return FALSE;
         if (LOWORD(wParam) == IDC_ACTION_ADD) { EditAction(dialog, *state, true); return TRUE; }
-        if (LOWORD(wParam) == IDC_ACTION_EDIT || (LOWORD(wParam) == IDC_ACTION_LIST && HIWORD(wParam) == LBN_DBLCLK)) { EditAction(dialog, *state, false); return TRUE; }
+        if (LOWORD(wParam) == IDC_ACTION_EDIT) { EditAction(dialog, *state, false); return TRUE; }
         if (LOWORD(wParam) == IDC_ACTION_REMOVE) { RemoveAction(dialog, *state); return TRUE; }
         if (LOWORD(wParam) == IDC_ACTION_MONITOR_COMBO || LOWORD(wParam) == IDC_ACTION_MONITOR_RESTORE)
         {
+            if (LOWORD(wParam) == IDC_ACTION_MONITOR_RESTORE)
+            {
+                const bool restore = IsActionCheckboxChecked(dialog, IDC_ACTION_MONITOR_RESTORE);
+                EnableWindow(FindActionControl(dialog, IDC_ACTION_MONITOR_RESTORE_DELAY), restore);
+                EnableWindow(FindActionControl(dialog, IDC_ACTION_MONITOR_RESTORE_DELAY_LABEL), restore);
+            }
             StoreMonitorSettings(dialog, *state);
             return TRUE;
         }

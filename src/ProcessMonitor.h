@@ -37,7 +37,9 @@ private:
         std::vector<HomeAssistantAction> homeAssistantActions;
         MonitorPowerSetup monitorPowerSetup;
         bool hasMonitorPowerSetup{false};
+        int monitorPowerSetupDelayMilliseconds{0};
         bool restoreMonitorPowerSetupOnExit{true};
+        int restoreMonitorPowerSetupDelayMilliseconds{0};
     };
 
     struct RuntimeConfiguration
@@ -64,7 +66,7 @@ private:
     void CheckRules();
     void StartProgramsForRule(const RuntimeConfiguration& runtimeConfiguration, const RuntimeRule& rule);
     void ExecuteStartActions(const RuntimeConfiguration& runtimeConfiguration, const RuntimeRule& rule);
-    void RestoreMonitorSetupForRule(const RuntimeRule& rule);
+    void RestoreMonitorSetupForRule(const RuntimeRule& rule, ULONGLONG exitTick);
     void ExecuteExitActions(const RuntimeRule& rule, ULONGLONG exitTick);
     void StopProgramsForRule(const RuntimeRule& rule);
     ProcessSnapshot CaptureProcessSnapshot(

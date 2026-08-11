@@ -55,6 +55,7 @@ target_link_libraries(LaunchMate PRIVATE
     comctl32
     dxva2
     gdiplus
+    psapi
     shell32
     shlwapi
     winhttp

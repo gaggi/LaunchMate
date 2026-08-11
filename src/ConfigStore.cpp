@@ -223,7 +223,9 @@ namespace
         }
         object["HomeAssistantActions"] = homeActions;
         object["MonitorPowerSetupName"] = ToUtf8(rule.monitorPowerSetupName);
+        object["MonitorPowerSetupDelayMilliseconds"] = static_cast<double>(rule.monitorPowerSetupDelayMilliseconds);
         object["RestoreMonitorPowerSetupOnExit"] = rule.restoreMonitorPowerSetupOnExit;
+        object["RestoreMonitorPowerSetupDelayMilliseconds"] = static_cast<double>(rule.restoreMonitorPowerSetupDelayMilliseconds);
         return object;
     }
 
@@ -235,7 +237,9 @@ namespace
         rule.executablePath = ReadWideString(object, "ExecutablePath");
         rule.enabled = ReadBool(object, "Enabled", true);
         rule.monitorPowerSetupName = ReadWideString(object, "MonitorPowerSetupName");
+        rule.monitorPowerSetupDelayMilliseconds = ReadInt(object, "MonitorPowerSetupDelayMilliseconds");
         rule.restoreMonitorPowerSetupOnExit = ReadBool(object, "RestoreMonitorPowerSetupOnExit", true);
+        rule.restoreMonitorPowerSetupDelayMilliseconds = ReadInt(object, "RestoreMonitorPowerSetupDelayMilliseconds");
 
         const auto it = object.find("ProgramsToLaunch");
         if (it != object.end() && it->second.IsArray())

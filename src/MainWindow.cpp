@@ -352,6 +352,7 @@ namespace
         static constexpr int kPrimaryControlBase = 4000;
 
         std::vector<MonitorPowerSetup>* setups{nullptr};
+        std::vector<MonitorPowerSetup::DisplayPath>* detectedDisplays{nullptr};
         std::function<void()> saveCallback;
         std::function<bool(size_t)> applyCallback;
         std::vector<HWND> rowControls;
@@ -360,6 +361,42 @@ namespace
         int selectedIndex{0};
         bool syncingControls{false};
     };
+
+    bool IsSameDisplay(
+        const MonitorPowerSetup::DisplayPath& left,
+        const MonitorPowerSetup::DisplayPath& right)
+    {
+        return left.targetAdapterLowPart == right.targetAdapterLowPart &&
+            left.targetAdapterHighPart == right.targetAdapterHighPart &&
+            left.targetId == right.targetId;
+    }
+
+    void MergeDetectedDisplaysIntoSetup(
+        MonitorPowerSetup& setup,
+        const std::vector<MonitorPowerSetup::DisplayPath>& detectedDisplays)
+    {
+        if (detectedDisplays.empty()) return;
+
+        std::vector<MonitorPowerSetup::DisplayPath> merged;
+        merged.reserve(std::max(setup.displayPaths.size(), detectedDisplays.size()));
+        for (const auto& detected : detectedDisplays)
+        {
+            const auto existing = std::find_if(
+                setup.displayPaths.begin(),
+                setup.displayPaths.end(),
+                [&detected](const auto& path) { return IsSameDisplay(path, detected); });
+            merged.push_back(existing == setup.displayPaths.end() ? detected : *existing);
+        }
+        for (const auto& existing : setup.displayPaths)
+        {
+            const auto present = std::any_of(
+                merged.begin(),
+                merged.end(),
+                [&existing](const auto& path) { return IsSameDisplay(path, existing); });
+            if (!present) merged.push_back(existing);
+        }
+        setup.displayPaths = std::move(merged);
+    }
 
     RECT DialogUnitsToPixels(HWND dialogHandle, LONG x, LONG y, LONG width, LONG height)
     {
@@ -523,7 +560,11 @@ namespace
             return;
         }
 
-        const auto& setup = (*state.setups)[static_cast<size_t>(state.selectedIndex)];
+        auto& setup = (*state.setups)[static_cast<size_t>(state.selectedIndex)];
+        if (state.detectedDisplays != nullptr)
+        {
+            MergeDetectedDisplaysIntoSetup(setup, *state.detectedDisplays);
+        }
         SetDlgItemTextW(dialogHandle, IDC_MONITOR_SETUP_NAME, setup.name.c_str());
         BYTE hotkeyModifiers = 0;
         if ((setup.hotkeyModifiers & MOD_CONTROL) != 0) hotkeyModifiers |= HOTKEYF_CONTROL;
@@ -687,7 +728,11 @@ namespace
                 StoreSelectedMonitorPowerSetup(dialogHandle, *state);
                 MonitorPowerSetup setup;
                 setup.name = L"New setup";
-                if (state->selectedIndex >= 0 && state->selectedIndex < static_cast<int>(state->setups->size()))
+                if (state->detectedDisplays != nullptr && !state->detectedDisplays->empty())
+                {
+                    setup.displayPaths = *state->detectedDisplays;
+                }
+                else if (state->selectedIndex >= 0 && state->selectedIndex < static_cast<int>(state->setups->size()))
                 {
                     setup.displayPaths = (*state->setups)[static_cast<size_t>(state->selectedIndex)].displayPaths;
                 }
@@ -712,17 +757,20 @@ namespace
             case IDC_MONITOR_SETUP_CAPTURE:
             {
                 StoreSelectedMonitorPowerSetup(dialogHandle, *state);
-                if (state->selectedIndex < 0 || state->selectedIndex >= static_cast<int>(state->setups->size()))
-                {
-                    return TRUE;
-                }
-
                 std::wstring errorMessage;
-                auto& setup = (*state->setups)[static_cast<size_t>(state->selectedIndex)];
-                if (!MonitorPowerController::CaptureSetup(setup, &errorMessage))
+                MonitorPowerSetup detectedSetup;
+                if (!MonitorPowerController::CaptureSetup(detectedSetup, &errorMessage))
                 {
                     MessageBoxW(dialogHandle, errorMessage.c_str(), L"LaunchMate", MB_OK | MB_ICONWARNING);
                     return TRUE;
+                }
+                if (state->detectedDisplays != nullptr)
+                {
+                    *state->detectedDisplays = detectedSetup.displayPaths;
+                    for (auto& setup : *state->setups)
+                    {
+                        MergeDetectedDisplaysIntoSetup(setup, *state->detectedDisplays);
+                    }
                 }
                 LoadSelectedMonitorPowerSetup(dialogHandle, *state);
                 return TRUE;
@@ -764,11 +812,13 @@ namespace
         HINSTANCE instanceHandle,
         HWND owner,
         std::vector<MonitorPowerSetup>& setups,
+        std::vector<MonitorPowerSetup::DisplayPath>& detectedDisplays,
         std::function<void()> saveCallback,
         std::function<bool(size_t)> applyCallback)
     {
         MonitorPowerSetupDialogState state;
         state.setups = &setups;
+        state.detectedDisplays = &detectedDisplays;
         state.saveCallback = std::move(saveCallback);
         state.applyCallback = std::move(applyCallback);
         DialogBoxParamW(
@@ -1679,13 +1729,16 @@ void MainWindow::ToggleMonitoring()
 void MainWindow::ManageMonitorPowerSetups()
 {
     auto workingSetups = app_.Configuration().monitorPowerSetups;
+    auto workingDetectedDisplays = app_.Configuration().detectedDisplays;
     ShowMonitorPowerSetupsDialog(
         app_.InstanceHandle(),
         windowHandle_,
         workingSetups,
-        [this, &workingSetups]()
+        workingDetectedDisplays,
+        [this, &workingSetups, &workingDetectedDisplays]()
         {
             app_.Configuration().monitorPowerSetups = workingSetups;
+            app_.Configuration().detectedDisplays = workingDetectedDisplays;
             SaveConfiguration();
         },
         [this, &workingSetups](size_t index)

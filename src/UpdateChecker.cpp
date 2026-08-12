@@ -17,7 +17,7 @@
 namespace
 {
 #ifndef LAUNCHMATE_VERSION
-#define LAUNCHMATE_VERSION "0.1.0"
+#define LAUNCHMATE_VERSION "0.1.1"
 #endif
 
 #ifndef LAUNCHMATE_GITHUB_OWNER

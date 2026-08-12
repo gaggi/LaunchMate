@@ -3,6 +3,7 @@
 #include "JsonLite.h"
 #include "Utils.h"
 
+#include <algorithm>
 #include <fstream>
 #include <shlobj.h>
 
@@ -122,6 +123,44 @@ namespace
         return program;
     }
 
+    Value ToJson(const MonitorPowerSetup::DisplayPath& path)
+    {
+        Object object;
+        object["DisplayName"] = ToUtf8(path.displayName);
+        object["MonitorName"] = ToUtf8(path.monitorName);
+        object["SourceAdapterLowPart"] = static_cast<double>(path.sourceAdapterLowPart);
+        object["SourceAdapterHighPart"] = static_cast<double>(path.sourceAdapterHighPart);
+        object["SourceId"] = static_cast<double>(path.sourceId);
+        object["TargetAdapterLowPart"] = static_cast<double>(path.targetAdapterLowPart);
+        object["TargetAdapterHighPart"] = static_cast<double>(path.targetAdapterHighPart);
+        object["TargetId"] = static_cast<double>(path.targetId);
+        object["PositionX"] = static_cast<double>(path.positionX);
+        object["PositionY"] = static_cast<double>(path.positionY);
+        object["Width"] = static_cast<double>(path.width);
+        object["Enabled"] = path.enabled;
+        object["IsPrimary"] = path.isPrimary;
+        return object;
+    }
+
+    MonitorPowerSetup::DisplayPath DisplayPathFromJson(const Object& object)
+    {
+        MonitorPowerSetup::DisplayPath path;
+        path.displayName = ReadWideString(object, "DisplayName");
+        path.monitorName = ReadWideString(object, "MonitorName");
+        path.sourceAdapterLowPart = static_cast<DWORD>(ReadNumber(object, "SourceAdapterLowPart"));
+        path.sourceAdapterHighPart = static_cast<LONG>(ReadNumber(object, "SourceAdapterHighPart"));
+        path.sourceId = static_cast<UINT>(ReadNumber(object, "SourceId"));
+        path.targetAdapterLowPart = static_cast<DWORD>(ReadNumber(object, "TargetAdapterLowPart"));
+        path.targetAdapterHighPart = static_cast<LONG>(ReadNumber(object, "TargetAdapterHighPart"));
+        path.targetId = static_cast<UINT>(ReadNumber(object, "TargetId"));
+        path.positionX = static_cast<LONG>(ReadNumber(object, "PositionX"));
+        path.positionY = static_cast<LONG>(ReadNumber(object, "PositionY"));
+        path.width = static_cast<UINT>(ReadNumber(object, "Width"));
+        path.enabled = ReadBool(object, "Enabled", true);
+        path.isPrimary = ReadBool(object, "IsPrimary", path.positionX == 0 && path.positionY == 0);
+        return path;
+    }
+
     Value ToJson(const MonitorPowerSetup& setup)
     {
         Object object;
@@ -132,21 +171,7 @@ namespace
         Array displayPaths;
         for (const auto& path : setup.displayPaths)
         {
-            Object pathObject;
-            pathObject["DisplayName"] = ToUtf8(path.displayName);
-            pathObject["MonitorName"] = ToUtf8(path.monitorName);
-            pathObject["SourceAdapterLowPart"] = static_cast<double>(path.sourceAdapterLowPart);
-            pathObject["SourceAdapterHighPart"] = static_cast<double>(path.sourceAdapterHighPart);
-            pathObject["SourceId"] = static_cast<double>(path.sourceId);
-            pathObject["TargetAdapterLowPart"] = static_cast<double>(path.targetAdapterLowPart);
-            pathObject["TargetAdapterHighPart"] = static_cast<double>(path.targetAdapterHighPart);
-            pathObject["TargetId"] = static_cast<double>(path.targetId);
-            pathObject["PositionX"] = static_cast<double>(path.positionX);
-            pathObject["PositionY"] = static_cast<double>(path.positionY);
-            pathObject["Width"] = static_cast<double>(path.width);
-            pathObject["Enabled"] = path.enabled;
-            pathObject["IsPrimary"] = path.isPrimary;
-            displayPaths.push_back(pathObject);
+            displayPaths.push_back(ToJson(path));
         }
         object["DisplayPaths"] = displayPaths;
         return object;
@@ -169,21 +194,7 @@ namespace
                     continue;
                 }
 
-                const auto& pathObject = item.AsObject();
-                MonitorPowerSetup::DisplayPath path;
-                path.displayName = ReadWideString(pathObject, "DisplayName");
-                path.monitorName = ReadWideString(pathObject, "MonitorName");
-                path.sourceAdapterLowPart = static_cast<DWORD>(ReadNumber(pathObject, "SourceAdapterLowPart"));
-                path.sourceAdapterHighPart = static_cast<LONG>(ReadNumber(pathObject, "SourceAdapterHighPart"));
-                path.sourceId = static_cast<UINT>(ReadNumber(pathObject, "SourceId"));
-                path.targetAdapterLowPart = static_cast<DWORD>(ReadNumber(pathObject, "TargetAdapterLowPart"));
-                path.targetAdapterHighPart = static_cast<LONG>(ReadNumber(pathObject, "TargetAdapterHighPart"));
-                path.targetId = static_cast<UINT>(ReadNumber(pathObject, "TargetId"));
-                path.positionX = static_cast<LONG>(ReadNumber(pathObject, "PositionX"));
-                path.positionY = static_cast<LONG>(ReadNumber(pathObject, "PositionY"));
-                path.width = static_cast<UINT>(ReadNumber(pathObject, "Width"));
-                path.enabled = ReadBool(pathObject, "Enabled", true);
-                path.isPrimary = ReadBool(pathObject, "IsPrimary", path.positionX == 0 && path.positionY == 0);
+                auto path = DisplayPathFromJson(item.AsObject());
                 if (!path.displayName.empty())
                 {
                     setup.displayPaths.push_back(std::move(path));
@@ -355,6 +366,36 @@ AppConfiguration ConfigStore::Load() const
             }
         }
 
+        const auto detectedDisplaysIt = object.find("DetectedDisplays");
+        if (detectedDisplaysIt != object.end() && detectedDisplaysIt->second.IsArray())
+        {
+            for (const auto& item : detectedDisplaysIt->second.AsArray())
+            {
+                if (!item.IsObject()) continue;
+                auto path = DisplayPathFromJson(item.AsObject());
+                if (!path.displayName.empty()) config.detectedDisplays.push_back(std::move(path));
+            }
+        }
+        if (config.detectedDisplays.empty())
+        {
+            for (const auto& setup : config.monitorPowerSetups)
+            {
+                for (const auto& path : setup.displayPaths)
+                {
+                    const auto duplicate = std::find_if(
+                        config.detectedDisplays.begin(),
+                        config.detectedDisplays.end(),
+                        [&path](const auto& existing)
+                        {
+                            return existing.targetAdapterLowPart == path.targetAdapterLowPart &&
+                                existing.targetAdapterHighPart == path.targetAdapterHighPart &&
+                                existing.targetId == path.targetId;
+                        });
+                    if (duplicate == config.detectedDisplays.end()) config.detectedDisplays.push_back(path);
+                }
+            }
+        }
+
         const auto watchedIt = object.find("WatchedProcesses");
         if (watchedIt != object.end() && watchedIt->second.IsArray())
         {
@@ -400,6 +441,13 @@ void ConfigStore::Save(const AppConfiguration& configuration) const
         catalogPrograms.push_back(ToJson(program));
     }
     object["CatalogPrograms"] = catalogPrograms;
+
+    Array detectedDisplays;
+    for (const auto& path : configuration.detectedDisplays)
+    {
+        detectedDisplays.push_back(ToJson(path));
+    }
+    object["DetectedDisplays"] = detectedDisplays;
 
     Array monitorPowerSetups;
     for (const auto& setup : configuration.monitorPowerSetups)

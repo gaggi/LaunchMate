@@ -94,6 +94,7 @@ struct AppConfiguration
     bool hasWindowPlacement{false};
     bool startMaximized{false};
     std::vector<CatalogProgram> catalogPrograms;
+    std::vector<MonitorPowerSetup::DisplayPath> detectedDisplays;
     std::vector<MonitorPowerSetup> monitorPowerSetups;
     std::vector<WatchedProcessRule> watchedProcesses;
 

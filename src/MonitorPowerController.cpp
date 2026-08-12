@@ -361,8 +361,8 @@ namespace
 
 bool MonitorPowerController::CaptureSetup(MonitorPowerSetup& setup, std::wstring* errorMessage)
 {
-    setup.displayPaths = DetectCurrentDisplays(errorMessage);
-    if (setup.displayPaths.empty())
+    auto detectedDisplays = DetectCurrentDisplays(errorMessage);
+    if (detectedDisplays.empty())
     {
         if (errorMessage != nullptr && errorMessage->empty())
         {
@@ -370,6 +370,7 @@ bool MonitorPowerController::CaptureSetup(MonitorPowerSetup& setup, std::wstring
         }
         return false;
     }
+    setup.displayPaths = std::move(detectedDisplays);
     return true;
 }
 

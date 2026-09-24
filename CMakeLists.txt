@@ -3,10 +3,23 @@ project(LaunchMate LANGUAGES CXX)
 
 include(CheckIPOSupported)
 
-set(LAUNCHMATE_VERSION_DEFAULT "0.1.1")
+set(LAUNCHMATE_VERSION_DEFAULT "0.2.0")
 set(LAUNCHMATE_VERSION "${LAUNCHMATE_VERSION_DEFAULT}" CACHE STRING "LaunchMate version")
 if(NOT LAUNCHMATE_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+([-.+][0-9A-Za-z.-]+)?$")
     message(FATAL_ERROR "Invalid LAUNCHMATE_VERSION: '${LAUNCHMATE_VERSION}'")
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(LaunchMateCoreTests tests/CoreTests.cpp src/JsonLite.cpp src/ProcessMonitor.cpp)
+    target_include_directories(LaunchMateCoreTests PRIVATE src)
+    target_compile_features(LaunchMateCoreTests PRIVATE cxx_std_20)
+    target_compile_definitions(LaunchMateCoreTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(LaunchMateCoreTests PRIVATE shell32 advapi32 winhttp)
+    if(MSVC)
+        set_property(TARGET LaunchMateCoreTests PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
+    add_test(NAME LaunchMateCoreTests COMMAND LaunchMateCoreTests)
 endif()
 set(LAUNCHMATE_GITHUB_OWNER "gaggi" CACHE STRING "LaunchMate GitHub owner")
 set(LAUNCHMATE_GITHUB_REPOSITORY "LaunchMate" CACHE STRING "LaunchMate GitHub repository")
@@ -20,6 +33,8 @@ add_executable(LaunchMate WIN32
     src/App.cpp
     src/MainWindow.cpp
     src/RuleActionsDialog.cpp
+    src/IRacingPerformance.cpp
+    src/IRacingServices.cpp
     src/MonitorPowerController.cpp
     src/ProcessMonitor.cpp
     src/ConfigStore.cpp
@@ -53,6 +68,12 @@ target_link_libraries(LaunchMate PRIVATE
     dxva2
     gdiplus
     shell32
+    powrprof
+    crypt32
+    advapi32
+    ole32
+    oleaut32
+    taskschd
     shlwapi
     winhttp
 )

@@ -1,6 +1,8 @@
 #include "ProcessMonitor.h"
 
 #include "MonitorPowerController.h"
+#include "IRacingPerformance.h"
+#include "IRacingServices.h"
 #include "Utils.h"
 
 #include <algorithm>
@@ -62,8 +64,52 @@ namespace
         return buffer;
     }
 
-    DWORD LaunchProgramProcess(const LaunchProgram& program)
+    DWORD LaunchProgramProcess(const LaunchProgram& program, std::shared_ptr<void>* launchedProcess = nullptr)
     {
+        HANDLE processToken = nullptr;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &processToken))
+        {
+            TOKEN_ELEVATION elevation{};
+            DWORD size = 0;
+            const bool elevated = GetTokenInformation(processToken, TokenElevation, &elevation, sizeof(elevation), &size) &&
+                elevation.TokenIsElevated;
+            if (elevated)
+            {
+                TOKEN_ELEVATION_TYPE elevationType{};
+                size = 0;
+                const bool elevationTypeKnown = GetTokenInformation(processToken, TokenElevationType,
+                    &elevationType, sizeof(elevationType), &size) != FALSE;
+                TOKEN_LINKED_TOKEN linked{};
+                size = 0;
+                if (GetTokenInformation(processToken, TokenLinkedToken, &linked, sizeof(linked), &size))
+                {
+                    CloseHandle(processToken);
+                    std::wstring command = L"\"" + program.filePath + L"\"";
+                    if (!program.arguments.empty()) command += L" " + program.arguments;
+                    const std::wstring directory = std::filesystem::path(program.filePath).parent_path().wstring();
+                    STARTUPINFOW startup{sizeof(startup)};
+                    startup.wShowWindow = SW_SHOWNORMAL;
+                    startup.dwFlags = STARTF_USESHOWWINDOW;
+                    PROCESS_INFORMATION process{};
+                    const bool started = CreateProcessWithTokenW(linked.LinkedToken, LOGON_WITH_PROFILE,
+                        program.filePath.c_str(), command.data(), 0, nullptr,
+                        directory.empty() ? nullptr : directory.c_str(), &startup, &process) != FALSE;
+                    CloseHandle(linked.LinkedToken);
+                    if (!started) return 0;
+                    const DWORD processId = process.dwProcessId;
+                    CloseHandle(process.hThread);
+                    if (launchedProcess) *launchedProcess = std::shared_ptr<void>(process.hProcess, CloseHandle);
+                    else CloseHandle(process.hProcess);
+                    return processId;
+                }
+                if (!elevationTypeKnown || elevationType != TokenElevationTypeDefault)
+                {
+                    CloseHandle(processToken);
+                    return 0;
+                }
+            }
+            CloseHandle(processToken);
+        }
         SHELLEXECUTEINFOW info{};
         info.cbSize = sizeof(info);
         info.fMask = SEE_MASK_NOCLOSEPROCESS;
@@ -75,30 +121,12 @@ namespace
         if (ShellExecuteExW(&info) && info.hProcess)
         {
             const DWORD processId = GetProcessId(info.hProcess);
-            CloseHandle(info.hProcess);
+            if (launchedProcess) *launchedProcess = std::shared_ptr<void>(info.hProcess, CloseHandle);
+            else CloseHandle(info.hProcess);
             return processId;
         }
 
         return 0;
-    }
-
-    void TryCloseProcess(DWORD processId)
-    {
-        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE, FALSE, processId);
-        if (!process)
-        {
-            return;
-        }
-
-        if (WaitForSingleObject(process, 0) == WAIT_OBJECT_0)
-        {
-            CloseHandle(process);
-            return;
-        }
-
-        TerminateProcess(process, 0);
-        WaitForSingleObject(process, 4000);
-        CloseHandle(process);
     }
 
     struct CloseWindowsContext
@@ -134,8 +162,8 @@ namespace
     {
         const auto processKey = NormalizeProcessKey(action.processName);
         if (processKey.empty()) return false;
-
-        bool matched = false;
+        const auto expectedPath = NormalizePath(action.executablePath);
+        std::vector<std::shared_ptr<void>> processes;
         bool allStopped = true;
         HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (snapshot == INVALID_HANDLE_VALUE) return false;
@@ -145,43 +173,53 @@ namespace
         {
             do
             {
-                if (entry.th32ProcessID == GetCurrentProcessId() || NormalizeProcessKey(entry.szExeFile) != processKey ||
-                    !PathMatchesProcess(entry.th32ProcessID, action.executablePath))
+                if (entry.th32ProcessID == GetCurrentProcessId() ||
+                    NormalizeProcessKey(entry.szExeFile) != processKey) continue;
+                HANDLE handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
+                    FALSE, entry.th32ProcessID);
+                if (!handle) { allStopped = false; continue; }
+                std::shared_ptr<void> process(handle, CloseHandle);
+                if (!expectedPath.empty())
                 {
-                    continue;
+                    const auto actualPath = NormalizePath(QueryProcessImagePath(handle));
+                    if (actualPath.empty() || _wcsicmp(actualPath.c_str(), expectedPath.c_str()) != 0) continue;
                 }
-
-                matched = true;
-                if (action.gracefulCloseFirst)
-                {
-                    CloseWindowsContext context{entry.th32ProcessID};
-                    EnumWindows(CloseProcessWindows, reinterpret_cast<LPARAM>(&context));
-                    const DWORD timeout = static_cast<DWORD>(std::max(0, action.forceAfterMilliseconds));
-                    HANDLE waitHandle = OpenProcess(SYNCHRONIZE, FALSE, entry.th32ProcessID);
-                    if (waitHandle && WaitForSingleObject(waitHandle, timeout) == WAIT_OBJECT_0)
-                    {
-                        CloseHandle(waitHandle);
-                        continue;
-                    }
-                    if (waitHandle) CloseHandle(waitHandle);
-                }
-
-                HANDLE terminateHandle = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, entry.th32ProcessID);
-                if (terminateHandle && TerminateProcess(terminateHandle, 0))
-                {
-                    allStopped = WaitForSingleObject(terminateHandle, 4000) == WAIT_OBJECT_0 && allStopped;
-                    CloseHandle(terminateHandle);
-                }
-                else
-                {
-                    allStopped = false;
-                    if (terminateHandle) CloseHandle(terminateHandle);
-                }
+                processes.push_back(std::move(process));
             }
             while (Process32NextW(snapshot, &entry));
         }
         CloseHandle(snapshot);
-        return matched && allStopped;
+
+        // Hold the original handles throughout: Windows may otherwise reuse a PID.
+        if (action.gracefulCloseFirst)
+        {
+            for (const auto& process : processes)
+            {
+                if (WaitForSingleObject(process.get(), 0) != WAIT_TIMEOUT) continue;
+                CloseWindowsContext context{GetProcessId(process.get())};
+                EnumWindows(CloseProcessWindows, reinterpret_cast<LPARAM>(&context));
+            }
+            const ULONGLONG deadline = GetTickCount64() + static_cast<DWORD>(std::max(0, action.forceAfterMilliseconds));
+            for (const auto& process : processes)
+            {
+                const auto now = GetTickCount64();
+                WaitForSingleObject(process.get(), now < deadline ? static_cast<DWORD>(deadline - now) : 0);
+            }
+        }
+        for (const auto& process : processes)
+        {
+            if (WaitForSingleObject(process.get(), 0) == WAIT_OBJECT_0) continue;
+            if (!TerminateProcess(process.get(), 0) &&
+                WaitForSingleObject(process.get(), 0) != WAIT_OBJECT_0) allStopped = false;
+        }
+        const auto deadline = GetTickCount64() + 4000;
+        for (const auto& process : processes)
+        {
+            const auto now = GetTickCount64();
+            if (WaitForSingleObject(process.get(), now < deadline ? static_cast<DWORD>(deadline - now) : 0)
+                != WAIT_OBJECT_0) allStopped = false;
+        }
+        return !processes.empty() && allStopped;
     }
 
     bool PostWebhook(const HomeAssistantAction& action)
@@ -197,7 +235,7 @@ namespace
         const std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
         std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength);
         if (parts.dwExtraInfoLength > 0) path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
-        HINTERNET session = WinHttpOpen(L"LaunchMate/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0);
+        HINTERNET session = WinHttpOpen(L"LaunchMate/0.2.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0);
         if (!session) return false;
         WinHttpSetTimeouts(session, 5000, 5000, 5000, 10000);
         HINTERNET connection = WinHttpConnect(session, host.c_str(), parts.nPort, 0);
@@ -230,7 +268,8 @@ namespace
 ProcessMonitor::ProcessMonitor(StatusCallback callback)
     : runtimeConfiguration_(std::make_shared<RuntimeConfiguration>()),
       statusCallback_(std::move(callback)),
-      wakeEvent_(CreateEventW(nullptr, FALSE, FALSE, nullptr))
+      wakeEvent_(CreateEventW(nullptr, FALSE, FALSE, nullptr)),
+      stopEvent_(CreateEventW(nullptr, TRUE, FALSE, nullptr))
 {
 }
 
@@ -242,6 +281,7 @@ ProcessMonitor::~ProcessMonitor()
     {
         CloseHandle(wakeEvent_);
     }
+    if (stopEvent_ != nullptr) CloseHandle(stopEvent_);
 }
 
 void ProcessMonitor::UpdateConfiguration(const AppConfiguration& configuration)
@@ -266,6 +306,8 @@ void ProcessMonitor::UpdateConfiguration(const AppConfiguration& configuration)
         runtimeRule.monitorPowerSetupDelayMilliseconds = rule.monitorPowerSetupDelayMilliseconds;
         runtimeRule.restoreMonitorPowerSetupOnExit = rule.restoreMonitorPowerSetupOnExit;
         runtimeRule.restoreMonitorPowerSetupDelayMilliseconds = rule.restoreMonitorPowerSetupDelayMilliseconds;
+        runtimeRule.powerSchemeGuid = rule.powerSchemeGuid;
+        runtimeRule.servicesToStop = rule.servicesToStop;
         const auto monitorSetup = std::find_if(
             configuration.monitorPowerSetups.begin(),
             configuration.monitorPowerSetups.end(),
@@ -303,6 +345,7 @@ void ProcessMonitor::Start()
         return;
     }
 
+    if (stopEvent_) ResetEvent(stopEvent_);
     worker_ = std::thread([this] { WorkerLoop(); });
     statusCallback_(L"Monitoring active.");
 }
@@ -314,6 +357,7 @@ void ProcessMonitor::Stop()
         return;
     }
 
+    if (stopEvent_) SetEvent(stopEvent_);
     WakeWorker();
 
     if (worker_.joinable())
@@ -321,7 +365,27 @@ void ProcessMonitor::Stop()
         worker_.join();
     }
 
-    statusCallback_(L"Monitoring stopped.");
+    for (const auto& [key, rule] : activeRules_) FinishRule(rule);
+    for (const auto& [processKey, previous] : previousPowerSchemes_)
+    {
+        if (!RestorePowerScheme(previous)) statusCallback_(L"Could not restore the previous power plan for " + processKey + L".");
+    }
+    previousPowerSchemes_.clear();
+    serviceOwnerKey_.clear();
+    activeRules_.clear();
+    std::wstring serviceReport;
+    if (!RestoreIRacingServices(serviceReport))
+        statusCallback_(L"Monitoring stopped; Windows services still need restoration: " + serviceReport);
+    else
+        statusCallback_(L"Monitoring stopped.");
+}
+
+void ProcessMonitor::RecoverIRacingServices()
+{
+    if (!HasPendingIRacingServiceRestore()) return;
+    std::wstring report;
+    if (RestoreIRacingServices(report)) statusCallback_(L"Restored Windows services from the previous session.");
+    else statusCallback_(L"Windows services still need restoration. Run LaunchMate as Administrator. " + report);
 }
 
 bool ProcessMonitor::IsRunning() const noexcept
@@ -363,6 +427,7 @@ ProcessMonitor::ProcessSnapshot ProcessMonitor::CaptureProcessSnapshot(
             }
         }
         while (Process32NextW(processSnapshot, &entry));
+        snapshot.valid = GetLastError() == ERROR_NO_MORE_FILES;
     }
 
     CloseHandle(processSnapshot);
@@ -465,7 +530,7 @@ void ProcessMonitor::WorkerLoop()
         }
 
         DWORD waitDurationMs = idlePollIntervalMs_.load();
-        if (!runtimeConfiguration || runtimeConfiguration->watchedRules.empty())
+        if ((!runtimeConfiguration || runtimeConfiguration->watchedRules.empty()) && activeRules_.empty())
         {
             waitDurationMs = INFINITE;
         }
@@ -480,7 +545,7 @@ void ProcessMonitor::WorkerLoop()
         }
         else
         {
-            Sleep(waitDurationMs);
+            Sleep(std::min<DWORD>(waitDurationMs, kMinimumPollIntervalMs));
         }
     }
 }
@@ -493,42 +558,84 @@ void ProcessMonitor::CheckRules()
         runtimeConfiguration = runtimeConfiguration_;
     }
 
-    if (!runtimeConfiguration || runtimeConfiguration->watchedRules.empty())
+    if (!runtimeConfiguration) return;
+    if (runtimeConfiguration->watchedRules.empty() && activeRules_.empty()) return;
+
+    auto keys = runtimeConfiguration->watchedProcessKeys;
+    for (const auto& [key, rule] : activeRules_) keys.insert(key);
+    const auto snapshot = CaptureProcessSnapshot(false, &keys);
+    ApplySnapshot(*runtimeConfiguration, snapshot);
+}
+
+void ProcessMonitor::ApplySnapshot(const RuntimeConfiguration& configuration, const ProcessSnapshot& snapshot)
+{
+    // A failed enumeration is not evidence that a watched program has exited.
+    if (!snapshot.valid) return;
+
+    for (auto it = activeRules_.begin(); it != activeRules_.end();)
     {
-        return;
+        if (!IsProcessRunning(snapshot, it->first))
+        {
+            FinishRule(it->second);
+            it = activeRules_.erase(it);
+        }
+        else ++it;
     }
 
-    const auto snapshot = CaptureProcessSnapshot(false, &runtimeConfiguration->watchedProcessKeys);
-
-    for (const auto& rule : runtimeConfiguration->watchedRules)
+    for (const auto& rule : configuration.watchedRules)
     {
-        const bool detected = IsProcessRunning(snapshot, rule.processKey);
-        const bool alreadyRunning = activeRules_.contains(rule.processKey);
-
-        if (detected && !alreadyRunning)
+        if (!running_.load()) break;
+        if (IsProcessRunning(snapshot, rule.processKey) && !activeRules_.contains(rule.processKey))
         {
-            activeRules_.insert(rule.processKey);
+            activeRules_.emplace(rule.processKey, rule);
             statusCallback_(rule.displayName + L" detected. Running actions.");
             ExecuteStartActions(rule);
-        }
-        else if (!detected && alreadyRunning)
-        {
-            activeRules_.erase(rule.processKey);
-            statusCallback_(rule.displayName + L" exited. Closing started programs.");
-            const ULONGLONG exitTick = GetTickCount64();
-            RestoreMonitorSetupForRule(rule, exitTick);
-            StopProgramsForRule(rule);
-            ExecuteExitActions(rule, exitTick);
         }
     }
 }
 
+void ProcessMonitor::FinishRule(const RuntimeRule& rule)
+{
+    statusCallback_(rule.displayName + L" session ended. Restoring actions.");
+    const ULONGLONG exitTick = GetTickCount64();
+    if (serviceOwnerKey_ == rule.processKey)
+    {
+        if (HasPendingIRacingServiceRestore())
+        {
+            std::wstring report;
+            if (!RestoreIRacingServices(report)) statusCallback_(L"Could not restore Windows services: " + report);
+        }
+        serviceOwnerKey_.clear();
+    }
+    if (const auto previous = previousPowerSchemes_.find(rule.processKey); previous != previousPowerSchemes_.end())
+    {
+        if (RestorePowerScheme(previous->second)) previousPowerSchemes_.erase(previous);
+        else statusCallback_(L"Could not restore the previous power plan.");
+    }
+    RestoreMonitorSetupForRule(rule, exitTick);
+    StopProgramsForRule(rule);
+    ExecuteExitActions(rule, exitTick);
+}
+
 void ProcessMonitor::ExecuteStartActions(const RuntimeRule& rule)
 {
+    if (!rule.powerSchemeGuid.empty())
+    {
+        if (!previousPowerSchemes_.empty())
+        {
+            statusCallback_(L"Power Plan action skipped: another watched rule currently owns the power plan.");
+        }
+        else
+        {
+            GUID previous{};
+            if (ActivatePowerScheme(rule.powerSchemeGuid, previous)) previousPowerSchemes_[rule.processKey] = previous;
+            else statusCallback_(L"Could not activate the selected power plan.");
+        }
+    }
     if (rule.hasMonitorPowerSetup)
     {
         const DWORD applyDelay = static_cast<DWORD>(std::max(0, rule.monitorPowerSetupDelayMilliseconds));
-        if (applyDelay > 0) Sleep(applyDelay);
+        if (!WaitForDelay(applyDelay)) return;
 
         MonitorPowerSetup previousSetup;
         std::wstring errorMessage;
@@ -543,21 +650,22 @@ void ProcessMonitor::ExecuteStartActions(const RuntimeRule& rule)
             }
         }
 
+        if (capturedPrevious)
+        {
+            std::scoped_lock lock(mutex_);
+            previousMonitorSetups_[rule.processKey] = std::move(previousSetup);
+        }
         errorMessage.clear();
         if (!MonitorPowerController::ApplySetup(rule.monitorPowerSetup, {}, &errorMessage))
         {
             statusCallback_(L"Could not apply monitor config " + rule.monitorPowerSetup.name + L": " + errorMessage);
-        }
-        else if (capturedPrevious)
-        {
-            std::scoped_lock lock(mutex_);
-            previousMonitorSetups_[rule.processKey] = std::move(previousSetup);
         }
     }
 
     std::vector<ProcessStopAction> stoppedForRestart;
     for (const auto& action : rule.processesToStop)
     {
+        if (!running_.load()) break;
         if (StopConfiguredProcess(action))
         {
             if (action.restartAfterWatchProcessEnds) stoppedForRestart.push_back(action);
@@ -585,10 +693,23 @@ void ProcessMonitor::ExecuteStartActions(const RuntimeRule& rule)
     {
         const DWORD delay = static_cast<DWORD>(std::max(0, action->waitTimeMilliseconds));
         const ULONGLONG elapsed = GetTickCount64() - startTick;
-        if (elapsed < delay) Sleep(static_cast<DWORD>(delay - elapsed));
+        if (!WaitForDelay(elapsed < delay ? static_cast<DWORD>(delay - elapsed) : 0)) return;
         if (!PostWebhook(*action)) statusCallback_(L"Home Assistant webhook failed: " + action->displayName);
     }
 
+    if (!running_.load()) return;
+    if (!rule.servicesToStop.empty())
+    {
+        if (!serviceOwnerKey_.empty()) statusCallback_(L"Services action skipped: another watched rule currently owns the service state.");
+        else
+        {
+            std::wstring report;
+            if (!ApplyIRacingServices(rule.servicesToStop, report))
+                statusCallback_(L"Windows service action: " + report);
+            // Partial success also leaves services that must be restored at session end.
+            if (HasPendingIRacingServiceRestore()) serviceOwnerKey_ = rule.processKey;
+        }
+    }
     StartProgramsForRule(rule);
 }
 
@@ -605,7 +726,7 @@ void ProcessMonitor::RestoreMonitorSetupForRule(const RuntimeRule& rule, ULONGLO
 
     const DWORD restoreDelay = static_cast<DWORD>(std::max(0, rule.restoreMonitorPowerSetupDelayMilliseconds));
     const ULONGLONG elapsed = GetTickCount64() - exitTick;
-    if (elapsed < restoreDelay) Sleep(static_cast<DWORD>(restoreDelay - elapsed));
+    if (elapsed < restoreDelay) WaitForDelay(static_cast<DWORD>(restoreDelay - elapsed));
 
     std::wstring errorMessage;
     if (!MonitorPowerController::ApplySetup(previousSetup, {}, &errorMessage))
@@ -633,11 +754,12 @@ void ProcessMonitor::ExecuteExitActions(const RuntimeRule& rule, ULONGLONG exitT
     {
         const DWORD delay = static_cast<DWORD>(std::max(0, action.restartDelayMilliseconds));
         const ULONGLONG elapsed = GetTickCount64() - exitTick;
-        if (elapsed < delay) Sleep(static_cast<DWORD>(delay - elapsed));
+        if (elapsed < delay) WaitForDelay(static_cast<DWORD>(delay - elapsed));
 
         const auto processKey = NormalizeProcessKey(action.processName);
         const std::unordered_set<std::wstring> filter{processKey};
         const auto snapshot = CaptureProcessSnapshot(false, &filter);
+        if (!snapshot.valid) continue;
         const auto existing = snapshot.processIdsByName.find(processKey);
         if (existing != snapshot.processIdsByName.end() && std::any_of(existing->second.begin(), existing->second.end(), [&action](DWORD processId)
         {
@@ -680,8 +802,10 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeRule& rule)
 
     for (const auto* scheduledProgram : scheduledPrograms)
     {
+        if (!running_.load()) break;
         const auto& program = *scheduledProgram;
-        if (program.filePath.empty() || !std::filesystem::exists(program.filePath))
+        std::error_code pathError;
+        if (program.filePath.empty() || !std::filesystem::exists(program.filePath, pathError))
         {
             continue;
         }
@@ -690,7 +814,14 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeRule& rule)
         const ULONGLONG elapsedMs = GetTickCount64() - scheduleStartTick;
         if (elapsedMs < scheduledDelayMs)
         {
-            Sleep(static_cast<DWORD>(scheduledDelayMs - elapsedMs));
+            if (!WaitForDelay(static_cast<DWORD>(scheduledDelayMs - elapsedMs))) break;
+        }
+
+        if (!program.closeWhenGameStops)
+        {
+            if (LaunchProgramProcess(program) == 0)
+                statusCallback_(L"Could not launch program: " + program.displayName);
+            continue; // No ownership tracking or settling delay is needed.
         }
 
         const auto normalizedPath = NormalizePath(program.filePath);
@@ -700,13 +831,15 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeRule& rule)
 
         const auto beforeSnapshot = CaptureProcessSnapshot(false, ProcessKeyFilterPointer(processKeyFilter));
         auto existing = FindMatchingProcesses(beforeSnapshot, program.filePath, normalizedPath);
-        const DWORD launchedRootProcessId = LaunchProgramProcess(program);
-        Sleep(kProgramLaunchSettleMs);
+        std::shared_ptr<void> rootProcess;
+        const DWORD launchedRootProcessId = LaunchProgramProcess(program, &rootProcess);
+        if (launchedRootProcessId == 0) continue;
+        WaitForDelay(kProgramLaunchSettleMs);
 
         const auto afterSnapshot = CaptureProcessSnapshot(true, ProcessKeyFilterPointer(processKeyFilter));
         auto after = FindMatchingProcesses(afterSnapshot, program.filePath, normalizedPath);
         std::unordered_set<DWORD> started;
-        for (const auto pid : after)
+        if (beforeSnapshot.valid && afterSnapshot.valid) for (const auto pid : after)
         {
             if (!existing.contains(pid))
             {
@@ -723,7 +856,16 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeRule& rule)
             started.insert(descendants.begin(), descendants.end());
         }
 
-        records.push_back({program, normalizedPath.empty() ? program.filePath : normalizedPath, std::move(existing), std::move(started)});
+        LaunchedProgramRecord record{program, normalizedPath.empty() ? program.filePath : normalizedPath,
+            std::move(existing), std::move(started)};
+        if (rootProcess) record.startedProcessHandles.push_back(std::move(rootProcess));
+        for (const auto pid : record.startedProcessIds)
+        {
+            if (record.existingProcessIds.contains(pid) || pid == GetCurrentProcessId() || pid == launchedRootProcessId) continue;
+            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
+            if (process) record.startedProcessHandles.emplace_back(process, CloseHandle);
+        }
+        records.push_back(std::move(record));
     }
 
     std::scoped_lock lock(mutex_);
@@ -743,16 +885,6 @@ void ProcessMonitor::StopProgramsForRule(const RuntimeRule& rule)
 
         records = std::move(it->second);
         startedPrograms_.erase(it);
-    }
-
-    std::unordered_set<std::wstring> processKeyFilter;
-    processKeyFilter.reserve(records.size());
-    for (const auto& record : records)
-    {
-        if (!record.executablePath.empty())
-        {
-            processKeyFilter.insert(NormalizeProcessKey(std::filesystem::path(record.executablePath).stem().wstring()));
-        }
     }
 
     std::stable_sort(
@@ -776,24 +908,48 @@ void ProcessMonitor::StopProgramsForRule(const RuntimeRule& rule)
         const ULONGLONG elapsedMs = GetTickCount64() - scheduleStartTick;
         if (elapsedMs < scheduledDelayMs)
         {
-            Sleep(static_cast<DWORD>(scheduledDelayMs - elapsedMs));
+            WaitForDelay(static_cast<DWORD>(scheduledDelayMs - elapsedMs));
         }
 
-        const auto snapshot = CaptureProcessSnapshot(true, ProcessKeyFilterPointer(processKeyFilter));
-        auto candidates = FindMatchingProcesses(snapshot, record.executablePath, record.executablePath);
-        for (const auto pid : record.startedProcessIds)
+        // Retained handles pin the original process identities. Include children
+        // created later, but never unrelated instances with the same executable.
+        auto ownedProcesses = record.startedProcessHandles;
+        std::unordered_set<DWORD> ownedIds;
+        for (const auto& process : ownedProcesses) ownedIds.insert(GetProcessId(process.get()));
+        FILETIME captureTime{};
+        GetSystemTimeAsFileTime(&captureTime);
+        const std::unordered_set<std::wstring> noNames;
+        const auto snapshot = CaptureProcessSnapshot(true, &noNames);
+        if (snapshot.valid) for (size_t index = 0; index < ownedProcesses.size(); ++index)
         {
-            candidates.insert(pid);
-            const auto descendants = BuildChildProcessSet(snapshot, pid);
-            candidates.insert(descendants.begin(), descendants.end());
-        }
-
-        for (const auto pid : candidates)
-        {
-            if (!record.existingProcessIds.contains(pid))
+            const auto parent = ownedProcesses[index];
+            FILETIME parentCreated{}, exited{}, kernel{}, user{};
+            if (!GetProcessTimes(parent.get(), &parentCreated, &exited, &kernel, &user)) continue;
+            const auto children = snapshot.childrenByParent.find(GetProcessId(parent.get()));
+            if (children == snapshot.childrenByParent.end()) continue;
+            for (const auto pid : children->second)
             {
-                TryCloseProcess(pid);
+                if (pid == GetCurrentProcessId() || ownedIds.contains(pid) || record.existingProcessIds.contains(pid)) continue;
+                HANDLE handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
+                if (!handle) continue;
+                std::shared_ptr<void> child(handle, CloseHandle);
+                FILETIME created{};
+                if (!GetProcessTimes(handle, &created, &exited, &kernel, &user) ||
+                    CompareFileTime(&created, &parentCreated) < 0 || CompareFileTime(&created, &captureTime) > 0) continue;
+                ownedIds.insert(pid);
+                ownedProcesses.push_back(std::move(child));
             }
+        }
+        for (const auto& process : ownedProcesses)
+        {
+            if (WaitForSingleObject(process.get(), 0) == WAIT_TIMEOUT)
+                TerminateProcess(process.get(), 0);
+        }
+        const auto deadline = GetTickCount64() + 4000;
+        for (const auto& process : ownedProcesses)
+        {
+            const auto now = GetTickCount64();
+            WaitForSingleObject(process.get(), now < deadline ? static_cast<DWORD>(deadline - now) : 0);
         }
     }
 }
@@ -804,4 +960,17 @@ void ProcessMonitor::WakeWorker() noexcept
     {
         SetEvent(wakeEvent_);
     }
+}
+bool ProcessMonitor::WaitForDelay(DWORD milliseconds) const
+{
+    if (!running_.load()) return false;
+    if (stopEvent_) return WaitForSingleObject(stopEvent_, milliseconds) == WAIT_TIMEOUT && running_.load();
+    const auto deadline = GetTickCount64() + milliseconds;
+    while (running_.load())
+    {
+        const auto now = GetTickCount64();
+        if (now >= deadline) return true;
+        Sleep(static_cast<DWORD>(std::min<ULONGLONG>(deadline - now, 50)));
+    }
+    return false;
 }

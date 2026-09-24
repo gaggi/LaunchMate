@@ -17,7 +17,7 @@
 namespace
 {
 #ifndef LAUNCHMATE_VERSION
-#define LAUNCHMATE_VERSION "0.1.1"
+#define LAUNCHMATE_VERSION "0.2.0"
 #endif
 
 #ifndef LAUNCHMATE_GITHUB_OWNER
@@ -201,6 +201,7 @@ namespace
         }
 
         session.reset(WinHttpOpen(L"LaunchMate Update", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
+        if (session) WinHttpSetTimeouts(session.get(), 5000, 5000, 10000, 15000);
         connection.reset(session ? WinHttpConnect(reinterpret_cast<HINTERNET>(session.get()), host.c_str(), components.nPort, 0) : nullptr);
         request.reset(connection
             ? WinHttpOpenRequest(reinterpret_cast<HINTERNET>(connection.get()), L"GET", resource.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, components.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0)
@@ -262,6 +263,12 @@ namespace
             }
 
             const size_t previousSize = body.size();
+            constexpr size_t maxMetadataBytes = 4 * 1024 * 1024;
+            if (availableBytes > maxMetadataBytes - previousSize)
+            {
+                errorMessage = L"The GitHub release response is too large.";
+                return false;
+            }
             body.resize(previousSize + availableBytes);
 
             DWORD downloadedBytes = 0;
@@ -305,7 +312,10 @@ namespace
 
             if (availableBytes == 0)
             {
-                return true;
+                stream.close();
+                if (stream.good()) return true;
+                errorMessage = L"Could not finalize the temporary update file.";
+                break;
             }
 
             const DWORD bytesToRead = std::min<DWORD>(availableBytes, static_cast<DWORD>(buffer.size()));
@@ -493,6 +503,7 @@ bool UpdateChecker::LaunchSelfUpdater(const std::filesystem::path& downloadedPat
     script << L"del /Q \"%~f0\" >nul 2>nul\r\n";
     script << L"endlocal\r\n";
 
+    script.close(); // The helper must be complete and unlocked before it is launched.
     if (!script.good())
     {
         errorMessage = L"Could not finalize the temporary update helper.";

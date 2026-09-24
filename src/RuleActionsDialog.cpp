@@ -1,6 +1,7 @@
 #include "RuleActionsDialog.h"
 
 #include "ListViewHelpers.h"
+#include "IRacingPerformance.h"
 #include "resource.h"
 #include "TabHost.h"
 
@@ -67,7 +68,8 @@ namespace
             GetDlgItem(dialog, IDC_ACTION_MONITOR_DELAY),
             GetDlgItem(dialog, IDC_ACTION_MONITOR_RESTORE),
             GetDlgItem(dialog, IDC_ACTION_MONITOR_RESTORE_DELAY_LABEL),
-            GetDlgItem(dialog, IDC_ACTION_MONITOR_RESTORE_DELAY)});
+            GetDlgItem(dialog, IDC_ACTION_MONITOR_RESTORE_DELAY),
+            GetDlgItem(dialog, IDC_ACTION_IRACING_HINT)});
     }
 
     std::wstring PickExecutable(HWND owner)
@@ -259,7 +261,26 @@ namespace
         const std::vector<MonitorPowerSetup>* monitorSetups{};
         int tab{};
         bool accepted{};
+        HWND performancePane{};
+        HWND servicesPane{};
     };
+
+    void EnsureIRacingPane(HWND dialog, ActionsState& state)
+    {
+        if (state.tab != 4 && state.tab != 5) return;
+        HWND& pane = state.tab == 4 ? state.performancePane : state.servicesPane;
+        if (pane) return;
+        HWND tab = GetDlgItem(dialog, IDC_ACTION_TAB);
+        RECT rect{};
+        GetClientRect(tab, &rect);
+        TabCtrl_AdjustRect(tab, FALSE, &rect);
+        MapWindowPoints(tab, dialog, reinterpret_cast<POINT*>(&rect), 2);
+        pane = state.tab == 4
+            ? CreateIRacingPerformancePane(state.instance, dialog, state.workingRule)
+            : CreateIRacingServicesPane(state.instance, dialog, state.workingRule);
+        if (pane) SetWindowPos(pane, HWND_TOP, rect.left, rect.top,
+            rect.right - rect.left, rect.bottom - rect.top, SWP_NOACTIVATE);
+    }
 
     int SelectedItem(HWND dialog)
     {
@@ -282,7 +303,7 @@ namespace
 
     void ShowTabControls(HWND dialog, const ActionsState& state)
     {
-        const int listCommand = state.tab == 3 ? SW_HIDE : SW_SHOW;
+        const int listCommand = state.tab < 3 ? SW_SHOW : SW_HIDE;
         const int monitorCommand = state.tab == 3 ? SW_SHOW : SW_HIDE;
         for (const int id : {IDC_ACTION_LIST, IDC_ACTION_ADD, IDC_ACTION_EDIT, IDC_ACTION_REMOVE})
         {
@@ -299,6 +320,11 @@ namespace
         {
             ShowWindow(FindActionControl(dialog, id), monitorCommand);
         }
+        ShowWindow(FindActionControl(dialog, IDC_ACTION_IRACING_HINT), SW_HIDE);
+        if (state.performancePane)
+            ShowWindow(state.performancePane, state.tab == 4 ? SW_SHOW : SW_HIDE);
+        if (state.servicesPane)
+            ShowWindow(state.servicesPane, state.tab == 5 ? SW_SHOW : SW_HIDE);
     }
 
     void RefreshActions(HWND dialog, ActionsState& state)
@@ -402,6 +428,8 @@ namespace
             tab.pszText = const_cast<wchar_t*>(L"Stop processes"); TabCtrl_InsertItem(GetDlgItem(dialog, IDC_ACTION_TAB), 1, &tab);
             tab.pszText = const_cast<wchar_t*>(L"Home Assistant"); TabCtrl_InsertItem(GetDlgItem(dialog, IDC_ACTION_TAB), 2, &tab);
             tab.pszText = const_cast<wchar_t*>(L"Monitor config"); TabCtrl_InsertItem(GetDlgItem(dialog, IDC_ACTION_TAB), 3, &tab);
+            tab.pszText = const_cast<wchar_t*>(L"Performance"); TabCtrl_InsertItem(GetDlgItem(dialog, IDC_ACTION_TAB), 4, &tab);
+            tab.pszText = const_cast<wchar_t*>(L"Windows Services"); TabCtrl_InsertItem(GetDlgItem(dialog, IDC_ACTION_TAB), 5, &tab);
             SendDlgItemMessageW(dialog, IDC_ACTION_MONITOR_COMBO, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Do not change displays"));
             int monitorSelection = 0;
             if (state->monitorSetups)
@@ -432,8 +460,12 @@ namespace
             const auto* header = reinterpret_cast<NMHDR*>(lParam);
             if (header->idFrom == IDC_ACTION_TAB && header->code == TCN_SELCHANGE)
             {
+                if (state->tab == 5) SaveIRacingServicesPane(state->servicesPane);
                 state->tab = TabCtrl_GetCurSel(GetDlgItem(dialog, IDC_ACTION_TAB));
+                const bool performanceAlreadyLoaded = state->performancePane != nullptr;
+                EnsureIRacingPane(dialog, *state);
                 RefreshActions(dialog, *state);
+                if (state->tab == 4 && performanceAlreadyLoaded) RefreshIRacingPerformancePane(state->performancePane);
                 return TRUE;
             }
             if (header->idFrom == IDC_ACTION_LIST && header->code == LVN_COLUMNCLICK)
@@ -463,7 +495,7 @@ namespace
             StoreMonitorSettings(dialog, *state);
             return TRUE;
         }
-        if (LOWORD(wParam) == IDOK) { StoreMonitorSettings(dialog, *state); *state->destination = std::move(state->workingRule); state->accepted = true; EndDialog(dialog, IDOK); return TRUE; }
+        if (LOWORD(wParam) == IDOK) { StoreMonitorSettings(dialog, *state); SaveIRacingPerformancePane(state->performancePane); SaveIRacingServicesPane(state->servicesPane); *state->destination = std::move(state->workingRule); state->accepted = true; EndDialog(dialog, IDOK); return TRUE; }
         if (LOWORD(wParam) == IDCANCEL) { EndDialog(dialog, IDCANCEL); return TRUE; }
         return FALSE;
     }

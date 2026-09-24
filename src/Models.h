@@ -77,6 +77,8 @@ struct WatchedProcessRule
     int monitorPowerSetupDelayMilliseconds{0};
     bool restoreMonitorPowerSetupOnExit{true};
     int restoreMonitorPowerSetupDelayMilliseconds{0};
+    std::wstring powerSchemeGuid;
+    std::vector<std::wstring> servicesToStop;
 };
 
 struct AppConfiguration
@@ -84,6 +86,7 @@ struct AppConfiguration
     bool minimizeToTray{true};
     bool closeToTray{true};
     bool startWithWindows{false};
+    bool alwaysRunAsAdministrator{false};
     bool startInTray{false};
     bool startMonitoringOnLaunch{false};
     bool checkForUpdatesOnStartup{true};

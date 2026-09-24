@@ -4,6 +4,8 @@
 #include "MonitorPowerController.h"
 #include "TrayIcon.h"
 #include "UpdateChecker.h"
+#include "BackgroundTask.h"
+#include <array>
 
 #include <windows.h>
 
@@ -44,11 +46,13 @@ private:
         IdSettingsStartInTray,
         IdSettingsStartMonitoringOnLaunch,
         IdSettingsCheckForUpdatesOnStartup,
+        IdSettingsAlwaysRunAsAdministrator,
         IdCatalogSearch,
         IdCatalogList,
         IdWatchedList,
         IdRuleProgramsList,
-        IdSourceTabs
+        IdSourceTabs,
+        IdMpoSettings
     };
 
     static constexpr UINT kTrayCallbackMessage = WM_APP + 1;
@@ -60,8 +64,8 @@ private:
     void CreateControls();
     void PopulateLists();
     void PopulateCatalogPrograms();
-    void CaptureRunningProcesses();
     void PopulateRunningProcesses();
+    void PopulateDetectedProcesses();
     void SwitchSourceTab();
     void SyncCatalogProgramsFromConfiguration();
     void DetectInstalledApps();
@@ -79,6 +83,7 @@ private:
     void AddSelectedCatalogProgram();
     void TransferSelectedSource();
     void AddSelectedRunningProcess();
+    void AddSelectedDetectedProcess();
     void AddCustomCatalogProgram();
     void RemoveSelectedCatalogProgram();
     void AddWatchedProcess();
@@ -95,6 +100,7 @@ private:
     WatchedProcessRule SelectWatchedProcess();
     int SelectedCatalogProgramIndex() const;
     int SelectedRunningProcessIndex() const;
+    int SelectedDetectedProcessIndex() const;
     int SelectedWatchedIndex() const;
 
     App& app_;
@@ -111,6 +117,7 @@ private:
     HWND minimizeToTrayHandle_{nullptr};
     HWND closeToTrayHandle_{nullptr};
     HWND startWithWindowsHandle_{nullptr};
+    HWND alwaysRunAsAdministratorHandle_{nullptr};
     HWND startInTrayHandle_{nullptr};
     HWND startMonitoringHandle_{nullptr};
     HWND checkForUpdatesHandle_{nullptr};
@@ -130,8 +137,34 @@ private:
         bool hasMemoryUsage{};
     };
     std::vector<RunningProcessEntry> runningProcesses_;
+    struct DetectedProcessEntry
+    {
+        std::wstring displayName;
+        std::wstring processName;
+        std::wstring executablePath;
+        std::wstring effect;
+        bool running{};
+        bool verifiedRunningPath{};
+        bool allowStop{};
+    };
+    std::vector<DetectedProcessEntry> detectedProcesses_;
+    struct SourceResult
+    {
+        std::vector<CatalogProgram> programs;
+        std::vector<RunningProcessEntry> running;
+        std::vector<DetectedProcessEntry> detected;
+    };
+    static void CaptureRunningProcesses(SourceResult& result, const std::wstring& watchedProcessName, const std::atomic_bool& cancelled);
+    static void CaptureDetectedProcesses(SourceResult& result, const std::wstring& watchedProcessName, const std::atomic_bool& cancelled);
+    void StartSourceRefresh();
+    void PollSourceRefresh();
+    void SyncSourceRefreshUi();
+    std::array<BackgroundTask<SourceResult>, 3> sourceTasks_;
+    static constexpr UINT_PTR kSourceRefreshTimer = 81;
     int sourceTabIndex_{0};
     bool exitRequested_{false};
     bool updateCheckInProgress_{false};
     bool updateInstallInProgress_{false};
+    bool appliedStartWithWindows_{false};
+    bool appliedAlwaysRunAsAdministrator_{false};
 };

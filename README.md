@@ -12,9 +12,22 @@ LaunchMate is a native Windows desktop app for monitoring processes and automati
 - Configure start, stop, and webhook actions in a compact tabbed editor
 - Detect known companion apps from common install paths and add them quickly to a watched process
 - Optional Windows autostart
+- Optional administrator mode: request UAC on manual launch and use a highest-privilege, interactive logon task for Windows autostart
 - Optional tray mode
 - Optional GitHub update checks on startup
+- Global MPO control in Settings with two registry values and a Windows Default action
 - Store configuration as JSON in the roaming profile
+- Show a rule-wide Performance tab with power plan selection, plus iRacing-specific checks for display refresh rates, RTSS/MSI Afterburner, app.ini, and Defender exclusions
+- Optionally switch power plans for any watched process and restore the prior plan when it exits
+- Show detected cloud-sync apps, game launchers, overlays, communication and work apps with verified executable paths, running status, and a measurement-based potential-effect estimate
+
+For a rule watching `iRacingSim64DX11.exe`, open **Edit actions... → Performance**. The `app.ini` check uses the Windows Documents known folder, including redirected Documents folders. Applying the suggested texture preloading values creates a timestamped backup first and requires iRacing to be closed. Defender exclusions require a separate confirmation and administrator approval; they remain in effect after the session.
+The main window's **Detected Processes** tab lists only supported programs that are running or have a verified executable path. Select a watched rule and a detected process, then double-click the process or click **>** to add a stop action. A single click only selects the process. Trying to add an already-added process, the watched process itself, or NordVPN does nothing and shows no dialog. Stop actions still request a graceful close and force termination after three seconds, which can lose unsaved work in browsers, work apps, or cloud-sync tools. Potential-effect labels are estimates from three short CPU samples, not guaranteed FPS gains; inactive programs show **Unknown**.
+The **Windows Services** tab is available for every watched rule and lets you opt in to the services listed in the community pre-launch script. LaunchMate records their running state and startup type before a session, restores the original state on exit, and keeps recovery information for the next launch if interrupted. Service actions require LaunchMate to run as Administrator; if it is not elevated, LaunchMate reports the failure and leaves the services alone. If two active rules request Power Plan or Services actions concurrently, the second action is skipped to protect the first rule's restoration state. Changes in either tab are saved with the rule when you click **OK**. Existing iRacing configuration keys are read and migrated to generic keys when saved.
+
+**MPO settings...** under the main window's Settings opens a global Windows tweak, not a rule action. The dialog displays both current DWORD values. **Disable MPO** sets `HKLM\SOFTWARE\Microsoft\Windows\Dwm\OverlayTestMode` to `5` and `HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\DisableOverlays` to `1`; **Windows Default** deletes both values. Changes are verified, and LaunchMate attempts to roll back the first value if changing the second fails. There are no confirmation or success dialogs; errors appear in the MPO dialog. Administrator rights and a Windows restart are required for changes to take effect, but LaunchMate does not restart Windows. The `DisableOverlays` value is a community-documented workaround, not a Microsoft-documented setting, and can affect game overlays or some DirectX 12 games. LaunchMate does not change `ForceDisableFrameBuffer` or `OverlayMinFPS`.
+
+In **Settings**, enable **Always run as Administrator** to request UAC when LaunchMate is opened manually. With **Start with Windows** also enabled, LaunchMate registers an interactive, highest-privilege Task Scheduler task for the signed-in administrator account and removes the old Run-key entry. Setting up or removing the task can require one UAC approval; the current LaunchMate session must be restarted to become elevated. Standard Windows accounts cannot enable this mode by supplying another account's credentials, because that would switch the app's per-user configuration and Documents folder. Programs launched from rules use the linked standard-user token when available, so they do not inherit LaunchMate's elevation. Only enable elevated autostart from a trusted, protected executable location; a user-writable executable used by an elevated scheduled task can be replaced by software with access to that location.
 
 ## Build
 
@@ -78,3 +91,14 @@ When `Start with Windows` is enabled, LaunchMate writes an entry under:
 ## Updates
 
 Tagged GitHub releases publish direct `windows-x64.exe` and `windows-x86.exe` assets in addition to the ZIP packages. LaunchMate uses those direct executable assets for its built-in self-update flow.
+
+### Release 0.2.0
+
+After committing and pushing the release changes, create and push the tag:
+
+```powershell
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The release workflow takes the version from the tag and builds both x64 and x86 packages as version `0.2.0`. For an existing local build directory, configure with `-DLAUNCHMATE_VERSION:STRING=0.2.0` to replace any previously cached version.

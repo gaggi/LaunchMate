@@ -46,7 +46,11 @@ App::App(HINSTANCE instanceHandle, AppLaunchOptions launchOptions)
     }
 }
 
-App::~App() = default;
+App::~App()
+{
+    // Stop callbacks before the window and logging mutex are destroyed.
+    monitor_.Stop();
+}
 
 int App::Run(int showCommand)
 {
@@ -58,6 +62,8 @@ int App::Run(int showCommand)
         LogMessage(L"Failed to create main window.");
         return -1;
     }
+
+    monitor_.RecoverIRacingServices();
 
     if (configuration_.startMonitoringOnLaunch)
     {
@@ -128,7 +134,9 @@ void App::LogMessage(const std::wstring& text)
     }
 
     std::scoped_lock lock(logMutex_);
-    std::filesystem::create_directories(logPath_.parent_path());
+    std::error_code directoryError;
+    std::filesystem::create_directories(logPath_.parent_path(), directoryError);
+    if (directoryError) return;
 
     std::ofstream stream(logPath_, std::ios::binary | std::ios::app);
     if (!stream)

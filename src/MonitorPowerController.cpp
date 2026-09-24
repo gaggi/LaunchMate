@@ -190,7 +190,11 @@ namespace
 
     bool SameDisplay(const DISPLAYCONFIG_PATH_INFO& path, const DisplayPath& display)
     {
-        return path.sourceInfo.id == display.sourceId && path.targetInfo.id == display.targetId;
+        return path.sourceInfo.id == display.sourceId && path.targetInfo.id == display.targetId &&
+            path.sourceInfo.adapterId.LowPart == display.sourceAdapterLowPart &&
+            path.sourceInfo.adapterId.HighPart == display.sourceAdapterHighPart &&
+            path.targetInfo.adapterId.LowPart == display.targetAdapterLowPart &&
+            path.targetInfo.adapterId.HighPart == display.targetAdapterHighPart;
     }
 
     bool InProfile(const DISPLAYCONFIG_PATH_INFO& path, const std::vector<DisplayPath>& displays)
@@ -415,16 +419,15 @@ bool MonitorPowerController::ApplySetup(
 
     std::wstring detectError;
     const auto currentDisplays = DetectCurrentDisplays(&detectError);
-    std::unordered_set<UINT> activeTargetIds;
-    for (const auto& display : currentDisplays)
-    {
-        activeTargetIds.insert(display.targetId);
-    }
-
     std::vector<DisplayPath> phaseOne;
     for (const auto& display : targetDisplays)
     {
-        if (display.enabled && activeTargetIds.contains(display.targetId))
+        if (display.enabled && std::any_of(currentDisplays.begin(), currentDisplays.end(), [&display](const auto& active)
+            {
+                return active.targetId == display.targetId &&
+                    active.targetAdapterLowPart == display.targetAdapterLowPart &&
+                    active.targetAdapterHighPart == display.targetAdapterHighPart;
+            }))
         {
             phaseOne.push_back(display);
         }
@@ -455,6 +458,5 @@ bool MonitorPowerController::ApplySetup(
     {
         logger(L"Applying final monitor positions.");
     }
-    ApplyPositions(targetDisplays, &detectError);
-    return true;
+    return ApplyPositions(targetDisplays, errorMessage);
 }

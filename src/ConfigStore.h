@@ -11,7 +11,7 @@ public:
 
     const std::filesystem::path& Path() const noexcept;
     AppConfiguration Load() const;
-    void Save(const AppConfiguration& configuration) const;
+    bool Save(const AppConfiguration& configuration) const;
 
 private:
     std::filesystem::path configPath_;

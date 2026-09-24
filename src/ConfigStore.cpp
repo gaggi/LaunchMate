@@ -1,4 +1,5 @@
 #include "ConfigStore.h"
+#include "AtomicFile.h"
 
 #include "JsonLite.h"
 #include "Utils.h"
@@ -237,6 +238,10 @@ namespace
         object["MonitorPowerSetupDelayMilliseconds"] = static_cast<double>(rule.monitorPowerSetupDelayMilliseconds);
         object["RestoreMonitorPowerSetupOnExit"] = rule.restoreMonitorPowerSetupOnExit;
         object["RestoreMonitorPowerSetupDelayMilliseconds"] = static_cast<double>(rule.restoreMonitorPowerSetupDelayMilliseconds);
+        object["PowerSchemeGuid"] = ToUtf8(rule.powerSchemeGuid);
+        Array servicesToStop;
+        for (const auto& service : rule.servicesToStop) servicesToStop.emplace_back(ToUtf8(service));
+        object["ServicesToStop"] = servicesToStop;
         return object;
     }
 
@@ -251,6 +256,15 @@ namespace
         rule.monitorPowerSetupDelayMilliseconds = ReadInt(object, "MonitorPowerSetupDelayMilliseconds");
         rule.restoreMonitorPowerSetupOnExit = ReadBool(object, "RestoreMonitorPowerSetupOnExit", true);
         rule.restoreMonitorPowerSetupDelayMilliseconds = ReadInt(object, "RestoreMonitorPowerSetupDelayMilliseconds");
+        rule.powerSchemeGuid = ReadWideString(object, "PowerSchemeGuid");
+        if (rule.powerSchemeGuid.empty()) rule.powerSchemeGuid = ReadWideString(object, "IRacingPowerSchemeGuid");
+        auto services = object.find("ServicesToStop");
+        if (services == object.end()) services = object.find("IRacingServicesToStop");
+        if (services != object.end() && services->second.IsArray())
+        {
+            for (const auto& service : services->second.AsArray())
+                if (service.IsString()) rule.servicesToStop.push_back(ToWide(service.AsString()));
+        }
 
         const auto it = object.find("ProgramsToLaunch");
         if (it != object.end() && it->second.IsArray())
@@ -326,6 +340,7 @@ AppConfiguration ConfigStore::Load() const
         config.minimizeToTray = ReadBool(object, "MinimizeToTray", true);
         config.closeToTray = ReadBool(object, "CloseToTray", true);
         config.startWithWindows = ReadBool(object, "StartWithWindows", false);
+        config.alwaysRunAsAdministrator = ReadBool(object, "AlwaysRunAsAdministrator", false);
         config.startInTray = ReadBool(object, "StartInTray", false);
         config.startMonitoringOnLaunch = ReadBool(object, "StartMonitoringOnLaunch", false);
         config.checkForUpdatesOnStartup = ReadBool(object, "CheckForUpdatesOnStartup", true);
@@ -416,12 +431,13 @@ AppConfiguration ConfigStore::Load() const
     }
 }
 
-void ConfigStore::Save(const AppConfiguration& configuration) const
+bool ConfigStore::Save(const AppConfiguration& configuration) const
 {
     Object object;
     object["MinimizeToTray"] = configuration.minimizeToTray;
     object["CloseToTray"] = configuration.closeToTray;
     object["StartWithWindows"] = configuration.startWithWindows;
+    object["AlwaysRunAsAdministrator"] = configuration.alwaysRunAsAdministrator;
     object["StartInTray"] = configuration.startInTray;
     object["StartMonitoringOnLaunch"] = configuration.startMonitoringOnLaunch;
     object["CheckForUpdatesOnStartup"] = configuration.checkForUpdatesOnStartup;
@@ -464,6 +480,5 @@ void ConfigStore::Save(const AppConfiguration& configuration) const
     object["WatchedProcesses"] = watchedProcesses;
 
     const auto text = jsonlite::Serialize(Value(object), 2);
-    std::ofstream stream(configPath_, std::ios::binary | std::ios::trunc);
-    stream.write(text.data(), static_cast<std::streamsize>(text.size()));
+    return WriteFileAtomically(configPath_, text);
 }

@@ -25,9 +25,11 @@ public:
     void SetActivePollInterval(DWORD pollIntervalMs);
     void Start();
     void Stop();
+    void RecoverIRacingServices();
     bool IsRunning() const noexcept;
 
 private:
+    friend struct ProcessMonitorTestAccess;
     struct RuntimeRule
     {
         std::wstring processKey;
@@ -40,6 +42,8 @@ private:
         int monitorPowerSetupDelayMilliseconds{0};
         bool restoreMonitorPowerSetupOnExit{true};
         int restoreMonitorPowerSetupDelayMilliseconds{0};
+        std::wstring powerSchemeGuid;
+        std::vector<std::wstring> servicesToStop;
     };
 
     struct RuntimeConfiguration
@@ -54,16 +58,20 @@ private:
         std::wstring executablePath;
         std::unordered_set<DWORD> existingProcessIds;
         std::unordered_set<DWORD> startedProcessIds;
+        std::vector<std::shared_ptr<void>> startedProcessHandles;
     };
 
     struct ProcessSnapshot
     {
+        bool valid{false};
         std::unordered_map<std::wstring, std::vector<DWORD>> processIdsByName;
         std::unordered_map<DWORD, std::vector<DWORD>> childrenByParent;
     };
 
     void WorkerLoop();
     void CheckRules();
+    void ApplySnapshot(const RuntimeConfiguration& configuration, const ProcessSnapshot& snapshot);
+    void FinishRule(const RuntimeRule& rule);
     void StartProgramsForRule(const RuntimeRule& rule);
     void ExecuteStartActions(const RuntimeRule& rule);
     void RestoreMonitorSetupForRule(const RuntimeRule& rule, ULONGLONG exitTick);
@@ -80,6 +88,7 @@ private:
         const std::wstring& normalizedExecutablePath) const;
     std::unordered_set<DWORD> BuildChildProcessSet(const ProcessSnapshot& snapshot, DWORD rootProcessId) const;
     void WakeWorker() noexcept;
+    bool WaitForDelay(DWORD milliseconds) const;
 
     std::shared_ptr<const RuntimeConfiguration> runtimeConfiguration_;
     StatusCallback statusCallback_;
@@ -87,10 +96,14 @@ private:
     std::atomic<DWORD> idlePollIntervalMs_{1000};
     std::atomic<DWORD> activePollIntervalMs_{10000};
     HANDLE wakeEvent_{nullptr};
+    HANDLE stopEvent_{nullptr};
     std::thread worker_;
     std::mutex mutex_;
-    std::unordered_set<std::wstring> activeRules_;
+    // Keep the settings that actually started a session, even if its rule is edited/deleted.
+    std::unordered_map<std::wstring, RuntimeRule> activeRules_;
     std::map<std::wstring, std::vector<LaunchedProgramRecord>> startedPrograms_;
     std::map<std::wstring, std::vector<ProcessStopAction>> stoppedProcesses_;
     std::map<std::wstring, MonitorPowerSetup> previousMonitorSetups_;
+    std::map<std::wstring, GUID> previousPowerSchemes_;
+    std::wstring serviceOwnerKey_;
 };

@@ -1,8 +1,10 @@
 #include "MainWindow.h"
 
 #include "CatalogPaths.h"
+#include "DetectedProcessCatalog.h"
 #include "ListViewHelpers.h"
 #include "RuleActionsDialog.h"
+#include "IRacingPerformance.h"
 #include "StartupRegistration.h"
 #include "TabHost.h"
 #include "resource.h"
@@ -13,12 +15,14 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <psapi.h>
+#include <objbase.h>
 #include <cwchar>
 #include <cwctype>
 #include <filesystem>
 #include <memory>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace
@@ -893,6 +897,78 @@ namespace
         return loweredHaystack.find(loweredNeedle) != std::wstring::npos;
     }
 
+    struct InstalledAppRecord
+    {
+        std::wstring name;
+        std::wstring location;
+        std::wstring icon;
+    };
+
+    std::wstring ReadRegistryText(HKEY key, const wchar_t* valueName)
+    {
+        wchar_t buffer[2048]{};
+        DWORD size = sizeof(buffer);
+        if (RegGetValueW(key, nullptr, valueName, RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+            nullptr, buffer, &size) != ERROR_SUCCESS) return {};
+        return ExpandEnvironmentPath(buffer);
+    }
+
+    std::vector<InstalledAppRecord> EnumerateInstalledApps()
+    {
+        std::vector<InstalledAppRecord> apps;
+        constexpr const wchar_t* uninstall = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
+        for (const auto& [root, view] : {
+            std::pair{HKEY_CURRENT_USER, REGSAM(0)},
+            std::pair{HKEY_LOCAL_MACHINE, REGSAM(KEY_WOW64_64KEY)},
+            std::pair{HKEY_LOCAL_MACHINE, REGSAM(KEY_WOW64_32KEY)}})
+        {
+            HKEY parent{};
+            if (RegOpenKeyExW(root, uninstall, 0, KEY_ENUMERATE_SUB_KEYS | view, &parent) != ERROR_SUCCESS) continue;
+            for (DWORD index = 0;; ++index)
+            {
+                wchar_t name[512]{};
+                DWORD length = static_cast<DWORD>(std::size(name));
+                const LONG result = RegEnumKeyExW(parent, index, name, &length, nullptr, nullptr, nullptr, nullptr);
+                if (result == ERROR_NO_MORE_ITEMS) break;
+                if (result != ERROR_SUCCESS) continue;
+                HKEY item{};
+                if (RegOpenKeyExW(parent, name, 0, KEY_QUERY_VALUE | view, &item) != ERROR_SUCCESS) continue;
+                InstalledAppRecord app{ReadRegistryText(item, L"DisplayName"),
+                    ReadRegistryText(item, L"InstallLocation"), ReadRegistryText(item, L"DisplayIcon")};
+                RegCloseKey(item);
+                if (!app.name.empty()) apps.push_back(std::move(app));
+            }
+            RegCloseKey(parent);
+        }
+        return apps;
+    }
+
+    std::wstring InstalledExecutablePath(const std::vector<InstalledAppRecord>& apps,
+        const DetectedProcessCandidate& candidate)
+    {
+        for (const auto& app : apps)
+        {
+            if (!ContainsInsensitive(app.name, candidate.name)) continue;
+            std::error_code error;
+            if (!app.location.empty())
+            {
+                const auto path = std::filesystem::path(app.location) / candidate.executable;
+                if (std::filesystem::is_regular_file(path, error)) return path.wstring();
+            }
+            std::wstring icon = app.icon;
+            if (!icon.empty() && icon.front() == L'"')
+            {
+                const auto end = icon.find(L'"', 1);
+                if (end != std::wstring::npos) icon = icon.substr(1, end - 1);
+            }
+            else if (const auto comma = icon.rfind(L','); comma != std::wstring::npos)
+                icon.resize(comma);
+            if (_wcsicmp(std::filesystem::path(icon).filename().c_str(), candidate.executable) == 0 &&
+                std::filesystem::is_regular_file(icon, error)) return icon;
+        }
+        return {};
+    }
+
     bool TryAppendCatalogProgram(
         std::vector<CatalogProgram>& programs,
         std::unordered_set<std::wstring>& seenPaths,
@@ -981,7 +1057,10 @@ bool MainWindow::Create(int showCommand)
     PopulateLists();
     UpdateSettingsUi();
     RestoreWindowPlacement(app_.Configuration().startInTray ? SW_HIDE : showCommand);
-    StartupRegistration::Apply(app_.Configuration().startWithWindows);
+    if (!app_.Configuration().alwaysRunAsAdministrator)
+        StartupRegistration::Apply(app_.Configuration().startWithWindows, false);
+    appliedStartWithWindows_ = app_.Configuration().startWithWindows;
+    appliedAlwaysRunAsAdministrator_ = app_.Configuration().alwaysRunAsAdministrator;
 
     trayIcon_.Create(
         windowHandle_,
@@ -1046,8 +1125,9 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         case IdMonitorPowerSetups: ManageMonitorPowerSetups(); return 0;
         case IdSaveConfig: SaveConfiguration(); return 0;
         case IdCheckForUpdates: StartUpdateCheck(true); return 0;
+        case IdMpoSettings: ShowMpoSettingsDialog(app_.InstanceHandle(), windowHandle_); return 0;
         case IdDetectInstalledApps:
-            if (sourceTabIndex_ == 0) DetectInstalledApps(); else { CaptureRunningProcesses(); PopulateRunningProcesses(); }
+            StartSourceRefresh();
             return 0;
         case IdTransferCatalogProgram: TransferSelectedSource(); return 0;
         case IdAddCatalogProgram: AddCustomCatalogProgram(); return 0;
@@ -1057,7 +1137,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         case IdRemoveRuleAction: RemoveSelectedRuleAction(); return 0;
         case IdEditRuleActions: EditRuleActions(); return 0;
         default:
-            if (controlId >= IdSettingsMinimizeToTray && controlId <= IdSettingsCheckForUpdatesOnStartup)
+            if (controlId >= IdSettingsMinimizeToTray && controlId <= IdSettingsAlwaysRunAsAdministrator)
             {
                 UpdateSettingsFromUi();
                 return 0;
@@ -1129,7 +1209,12 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         break;
+    case WM_TIMER:
+        if (wParam == kSourceRefreshTimer) { PollSourceRefresh(); return 0; }
+        break;
     case WM_DESTROY:
+        KillTimer(windowHandle_, kSourceRefreshTimer);
+        for (auto& task : sourceTasks_) task.Cancel();
         UnregisterMonitorHotkeys();
         PostQuitMessage(0);
         return 0;
@@ -1287,12 +1372,14 @@ void MainWindow::CreateControls()
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_FIXEDWIDTH,
         24, 14, 530, 536, windowHandle_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdSourceTabs)), nullptr, nullptr);
     SendMessageW(sourceTabsHandle_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
-    TabCtrl_SetItemSize(sourceTabsHandle_, 180, 26);
+    TabCtrl_SetItemSize(sourceTabsHandle_, 170, 26);
     TCITEMW sourceTab{TCIF_TEXT};
     sourceTab.pszText = const_cast<wchar_t*>(L"Detected apps");
     TabCtrl_InsertItem(sourceTabsHandle_, 0, &sourceTab);
     sourceTab.pszText = const_cast<wchar_t*>(L"Running processes");
     TabCtrl_InsertItem(sourceTabsHandle_, 1, &sourceTab);
+    sourceTab.pszText = const_cast<wchar_t*>(L"Detected Processes");
+    TabCtrl_InsertItem(sourceTabsHandle_, 2, &sourceTab);
     detectSourceButtonHandle_ = CreateButtonControl(windowHandle_, IdDetectInstalledApps, L"Detect installed apps", kGlobalListX, 52, 150, 28, uiFont_);
     addCatalogButtonHandle_ = CreateButtonControl(windowHandle_, IdAddCatalogProgram, L"+", globalButtonsRight - (kActionButtonWidth * 2) - kActionButtonGap, 52, kActionButtonWidth, 28, uiFont_);
     removeCatalogButtonHandle_ = CreateButtonControl(windowHandle_, IdRemoveCatalogProgram, L"-", globalButtonsRight - kActionButtonWidth, 52, kActionButtonWidth, 28, uiFont_);
@@ -1339,10 +1426,12 @@ void MainWindow::CreateControls()
     closeToTrayHandle_ = CreateCheckbox(windowHandle_, IdSettingsCloseToTray, L"Close to tray", 24, 624, 320, 24, uiFont_);
     startInTrayHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartInTray, L"Start in tray", 24, 654, 320, 24, uiFont_);
     startWithWindowsHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartWithWindows, L"Start with Windows", 360, 594, 320, 24, uiFont_);
+    alwaysRunAsAdministratorHandle_ = CreateCheckbox(windowHandle_, IdSettingsAlwaysRunAsAdministrator, L"Always run as Administrator", 700, 594, 320, 24, uiFont_);
     startMonitoringHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartMonitoringOnLaunch, L"Start monitoring on launch", 360, 624, 320, 24, uiFont_);
     checkForUpdatesHandle_ = CreateCheckbox(windowHandle_, IdSettingsCheckForUpdatesOnStartup, L"Check for updates on startup", 360, 654, 360, 24, uiFont_);
-    CreateButtonControl(windowHandle_, IdCheckForUpdates, L"Check for updates", 840, 620, 190, 34, uiFont_);
-    CreateButtonControl(windowHandle_, IdSaveConfig, L"Save", 1040, 620, 140, 34, uiFont_);
+    CreateButtonControl(windowHandle_, IdCheckForUpdates, L"Check for updates", 840, 644, 190, 34, uiFont_);
+    CreateButtonControl(windowHandle_, IdMpoSettings, L"MPO settings...", 720, 644, 110, 34, uiFont_);
+    CreateButtonControl(windowHandle_, IdSaveConfig, L"Save", 1040, 644, 140, 34, uiFont_);
 }
 
 void MainWindow::PopulateLists()
@@ -1377,57 +1466,97 @@ void MainWindow::SyncCatalogProgramsFromConfiguration()
 
 void MainWindow::DetectInstalledApps()
 {
-    std::vector<CatalogProgram> detectedPrograms;
-    std::unordered_set<std::wstring> seenPaths;
-    int removedPrograms = 0;
-    int addedPrograms = 0;
+    StartSourceRefresh();
+}
 
-    for (const auto& program : app_.Configuration().catalogPrograms)
+void MainWindow::SyncSourceRefreshUi()
+{
+    const bool busy = sourceTasks_[sourceTabIndex_].Running();
+    SetWindowTextW(detectSourceButtonHandle_, busy ? L"Loading..." :
+        sourceTabIndex_ == 0 ? L"Detect installed apps" : L"Refresh processes");
+    EnableWindow(detectSourceButtonHandle_, !busy);
+    EnableWindow(addCatalogButtonHandle_, sourceTabIndex_ == 0 && !sourceTasks_[0].Running());
+    EnableWindow(removeCatalogButtonHandle_, sourceTabIndex_ == 0 && !sourceTasks_[0].Running());
+}
+
+void MainWindow::StartSourceRefresh()
+{
+    const int source = sourceTabIndex_;
+    if (sourceTasks_[source].Running()) { SyncSourceRefreshUi(); return; }
+    std::wstring watched;
+    const int selected = SelectedWatchedIndex();
+    if (selected >= 0 && selected < static_cast<int>(app_.Configuration().watchedProcesses.size()))
+        watched = app_.Configuration().watchedProcesses[selected].processName;
+    auto catalog = app_.Configuration().catalogPrograms;
+    if (!SetTimer(windowHandle_, kSourceRefreshTimer, 100, nullptr))
     {
-        if (!program.filePath.empty() && std::filesystem::exists(program.filePath))
-        {
-            TryAppendCatalogProgram(detectedPrograms, seenPaths, program.displayName, program.filePath);
-        }
+        SetWindowTextW(detectSourceButtonHandle_, L"Retry refresh");
+        return;
+    }
+    const bool started = sourceTasks_[source].Start(
+        [source, watched = std::move(watched), catalog = std::move(catalog)](const std::atomic_bool& cancelled)
+    {
+        SourceResult result;
+        if (source == 1) CaptureRunningProcesses(result, watched, cancelled);
+        else if (source == 2) CaptureDetectedProcesses(result, watched, cancelled);
         else
         {
-            ++removedPrograms;
+            std::unordered_set<std::wstring> seen;
+            for (const auto& program : catalog)
+            {
+                if (cancelled) return result;
+                std::error_code error;
+                if (!program.filePath.empty() && std::filesystem::exists(program.filePath, error))
+                    TryAppendCatalogProgram(result.programs, seen, program.displayName, program.filePath);
+            }
+            for (const auto& candidate : kCatalogPathCandidates)
+            {
+                if (cancelled) return result;
+                const auto path = ExpandEnvironmentPath(candidate.path);
+                std::error_code error;
+                if (!path.empty() && std::filesystem::exists(path, error))
+                    TryAppendCatalogProgram(result.programs, seen, candidate.displayName, path);
+            }
         }
-    }
+        return result;
+    });
+    SyncSourceRefreshUi();
+    if (!started) SetWindowTextW(detectSourceButtonHandle_, L"Retry refresh");
+}
 
-    for (const auto& candidate : kCatalogPathCandidates)
+void MainWindow::PollSourceRefresh()
+{
+    for (int source = 0; source < 3; ++source)
     {
-        const auto expandedPath = ExpandEnvironmentPath(candidate.path);
-        if (expandedPath.empty() || !std::filesystem::exists(expandedPath))
+        std::optional<SourceResult> result;
+        if (!sourceTasks_[source].Poll(result)) continue;
+        if (result)
         {
-            continue;
+            if (source == 0)
+            {
+                app_.Configuration().catalogPrograms = std::move(result->programs);
+                SyncCatalogProgramsFromConfiguration();
+                SaveConfiguration();
+            }
+            else if (source == 1) runningProcesses_ = std::move(result->running);
+            else detectedProcesses_ = std::move(result->detected);
+            if (sourceTabIndex_ == source) PopulateCatalogPrograms();
         }
-
-        if (TryAppendCatalogProgram(detectedPrograms, seenPaths, candidate.displayName, expandedPath))
-        {
-            ++addedPrograms;
-        }
+        SyncSourceRefreshUi();
+        if (!result && source == sourceTabIndex_)
+            SetWindowTextW(detectSourceButtonHandle_, L"Retry refresh");
     }
-
-    app_.Configuration().catalogPrograms = std::move(detectedPrograms);
-    SyncCatalogProgramsFromConfiguration();
-    PopulateCatalogPrograms();
-    SaveConfiguration();
-
-    std::wstring message = L"Detection finished.\n\nFound apps: " + std::to_wstring(app_.Configuration().catalogPrograms.size());
-    if (addedPrograms > 0)
-    {
-        message += L"\nNew apps added: " + std::to_wstring(addedPrograms);
-    }
-    if (removedPrograms > 0)
-    {
-        message += L"\nMissing apps removed: " + std::to_wstring(removedPrograms);
-    }
-
-    MessageBoxW(windowHandle_, message.c_str(), L"LaunchMate", MB_OK | MB_ICONINFORMATION);
+    if (std::none_of(sourceTasks_.begin(), sourceTasks_.end(), [](const auto& task) { return task.Running(); }))
+        KillTimer(windowHandle_, kSourceRefreshTimer);
 }
 
 void MainWindow::PopulateCatalogPrograms()
 {
+    if (sourceTabIndex_ == 2)
+    {
+        PopulateDetectedProcesses();
+        return;
+    }
     if (sourceTabIndex_ == 1)
     {
         PopulateRunningProcesses();
@@ -1505,12 +1634,28 @@ void MainWindow::PopulateRulePrograms()
         }
         AddListViewRow(ruleProgramsListHandle_, {L"Monitor config", rule.monitorPowerSetupName, details});
     }
+    if (!rule.powerSchemeGuid.empty())
+    {
+        std::wstring name = L"Unavailable power plan";
+        for (const auto& scheme : EnumeratePowerSchemes())
+        {
+            wchar_t guid[40]{};
+            StringFromGUID2(scheme.id, guid, static_cast<int>(std::size(guid)));
+            if (_wcsicmp(guid, rule.powerSchemeGuid.c_str()) == 0) { name = scheme.name; break; }
+        }
+        AddListViewRow(ruleProgramsListHandle_, {L"Power Plan", name, L"Restore previous plan after exit"});
+    }
+    if (!rule.servicesToStop.empty())
+    {
+        AddListViewRow(ruleProgramsListHandle_, {L"Services", std::to_wstring(rule.servicesToStop.size()) + L" selected", L"Restore original state after exit"});
+    }
 }
 
-void MainWindow::CaptureRunningProcesses()
+void MainWindow::CaptureRunningProcesses(SourceResult& result, const std::wstring& watchedProcessName, const std::atomic_bool& cancelled)
 {
+    auto& runningProcesses_ = result.running;
     runningProcesses_.clear();
-    std::unordered_set<std::wstring> seenProcesses;
+    std::unordered_map<std::wstring, size_t> seenProcesses;
     seenProcesses.reserve(128);
     if (runningProcesses_.capacity() < 128) runningProcesses_.reserve(128);
 
@@ -1527,13 +1672,6 @@ void MainWindow::CaptureRunningProcesses()
     LARGE_INTEGER frequency{};
     QueryPerformanceFrequency(&frequency);
 
-    std::wstring watchedProcessName;
-    const int watchedIndex = SelectedWatchedIndex();
-    if (watchedIndex >= 0 && watchedIndex < static_cast<int>(app_.Configuration().watchedProcesses.size()))
-    {
-        watchedProcessName = app_.Configuration().watchedProcesses[static_cast<size_t>(watchedIndex)].processName;
-    }
-
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) return;
 
@@ -1543,6 +1681,7 @@ void MainWindow::CaptureRunningProcesses()
     {
         do
         {
+            if (cancelled) break;
             const std::wstring processName = entry.szExeFile;
             if (entry.th32ProcessID == 0 || entry.th32ProcessID == GetCurrentProcessId() ||
                 IsProtectedProcessName(processName) ||
@@ -1568,12 +1707,6 @@ void MainWindow::CaptureRunningProcesses()
             {
                 return static_cast<wchar_t>(std::towlower(character));
             });
-            if (!seenProcesses.insert(key).second)
-            {
-                if (process) CloseHandle(process);
-                continue;
-            }
-
             RunningProcessEntry item;
             item.displayName = std::filesystem::path(processName).stem().wstring();
             item.processName = processName;
@@ -1590,8 +1723,15 @@ void MainWindow::CaptureRunningProcesses()
                 }
             }
 
-            const size_t processIndex = runningProcesses_.size();
-            runningProcesses_.push_back(std::move(item));
+            const auto [existing, inserted] = seenProcesses.emplace(key, runningProcesses_.size());
+            const size_t processIndex = existing->second;
+            if (inserted) runningProcesses_.push_back(std::move(item));
+            else
+            {
+                auto& combined = runningProcesses_[processIndex];
+                combined.memoryUsageBytes += item.memoryUsageBytes;
+                combined.hasMemoryUsage = combined.hasMemoryUsage || item.hasMemoryUsage;
+            }
 
             if (process)
             {
@@ -1644,7 +1784,7 @@ void MainWindow::CaptureRunningProcesses()
             {
                 auto& item = runningProcesses_[sample.processIndex];
                 const double processSeconds = static_cast<double>(finalTime - sample.initialTime) / 10000000.0;
-                item.cpuUsagePercent = std::clamp(
+                item.cpuUsagePercent += std::clamp(
                     (processSeconds / elapsedSeconds / processorCount) * 100.0,
                     0.0,
                     100.0);
@@ -1687,27 +1827,140 @@ void MainWindow::PopulateRunningProcesses()
     }
 }
 
+void MainWindow::CaptureDetectedProcesses(SourceResult& result, const std::wstring& watchedProcessName, const std::atomic_bool& cancelled)
+{
+    auto& runningProcesses_ = result.running;
+    auto& detectedProcesses_ = result.detected;
+    struct Measurements { double cpuTotal{}; unsigned count{}; unsigned long long memory{}; };
+    std::unordered_map<std::wstring, Measurements> measurements;
+    // Three separate process-time intervals reduce the chance of rating a single idle instant.
+    for (int sample = 0; sample < 3; ++sample)
+    {
+        if (cancelled) return;
+        CaptureRunningProcesses(result, watchedProcessName, cancelled);
+        for (const auto& process : runningProcesses_)
+        {
+            std::wstring key = process.processName + L"|" + process.executablePath;
+            std::transform(key.begin(), key.end(), key.begin(), ::towlower);
+            auto& value = measurements[key];
+            if (process.hasCpuUsage) { value.cpuTotal += process.cpuUsagePercent; ++value.count; }
+            if (process.hasMemoryUsage) value.memory = process.memoryUsageBytes;
+        }
+    }
+
+    detectedProcesses_.clear();
+    if (cancelled) return;
+    const auto installedApps = EnumerateInstalledApps();
+    std::unordered_set<std::wstring> foundNames;
+    for (const auto& candidate : kDetectedProcessCandidates)
+    {
+        if (cancelled) return;
+        const auto running = std::find_if(runningProcesses_.begin(), runningProcesses_.end(), [&candidate](const RunningProcessEntry& item)
+        {
+            return _wcsicmp(item.processName.c_str(), candidate.executable) == 0;
+        });
+        std::wstring path = running == runningProcesses_.end() ? L"" : running->executablePath;
+        if (path.empty())
+        {
+            for (HKEY root : {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE})
+            {
+                const std::wstring key = std::wstring(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\") + candidate.executable;
+                wchar_t registryPath[2048]{};
+                DWORD size = sizeof(registryPath);
+                if (RegGetValueW(root, key.c_str(), nullptr, RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+                    nullptr, registryPath, &size) == ERROR_SUCCESS)
+                {
+                    std::error_code error;
+                    const auto expanded = ExpandEnvironmentPath(registryPath);
+                    if (std::filesystem::is_regular_file(expanded, error)) { path = expanded; break; }
+                }
+            }
+        }
+        if (path.empty() && candidate.fallbackPath[0] != L'\0')
+        {
+            const auto fallback = ExpandEnvironmentPath(candidate.fallbackPath);
+            std::error_code error;
+            if (std::filesystem::is_regular_file(fallback, error)) path = fallback;
+        }
+        if (path.empty()) path = InstalledExecutablePath(installedApps, candidate);
+        if (running == runningProcesses_.end() && path.empty()) continue;
+        std::wstring nameKey = candidate.name;
+        std::transform(nameKey.begin(), nameKey.end(), nameKey.begin(), ::towlower);
+        if (!foundNames.insert(nameKey).second) continue;
+
+        DetectedProcessEntry item;
+        item.displayName = candidate.name;
+        item.processName = candidate.executable;
+        item.executablePath = path;
+        item.running = running != runningProcesses_.end();
+        item.verifiedRunningPath = item.running && !running->executablePath.empty();
+        item.allowStop = candidate.allowStop;
+        item.effect = L"Unknown - no measurements";
+        if (!item.allowStop) item.effect = L"Unknown - VPN connection";
+        else if (item.running)
+        {
+            std::wstring processKey = running->processName + L"|" + running->executablePath;
+            std::transform(processKey.begin(), processKey.end(), processKey.begin(), ::towlower);
+            const auto measurement = measurements.find(processKey);
+            if (measurement != measurements.end() && measurement->second.count >= 2)
+            {
+                const double cpu = measurement->second.cpuTotal / measurement->second.count;
+                if (cpu >= 3.0) item.effect = L"High - CPU active";
+                else if (cpu >= 0.5) item.effect = L"Medium - CPU active";
+                else if (cpu >= 0.1 && std::wstring(candidate.category) == L"Overlay") item.effect = L"Medium - overlay active";
+                else item.effect = L"Low - CPU currently quiet";
+            }
+        }
+        detectedProcesses_.push_back(std::move(item));
+    }
+}
+
+void MainWindow::PopulateDetectedProcesses()
+{
+    ListView_DeleteAllItems(catalogListHandle_);
+    wchar_t searchBuffer[256]{};
+    GetWindowTextW(catalogSearchHandle_, searchBuffer, static_cast<int>(std::size(searchBuffer)));
+    const std::wstring searchText(searchBuffer);
+    for (size_t index = 0; index < detectedProcesses_.size(); ++index)
+    {
+        const auto& process = detectedProcesses_[index];
+        if (!ContainsInsensitive(process.displayName, searchText) &&
+            !ContainsInsensitive(process.executablePath, searchText)) continue;
+        AddListViewRow(catalogListHandle_, {process.displayName,
+            process.executablePath.empty() ? L"Path unavailable" : process.executablePath,
+            process.running ? L"Running" : L"Installed, inactive", process.effect}, static_cast<LPARAM>(index));
+    }
+}
+
 void MainWindow::SwitchSourceTab()
 {
     sourceTabIndex_ = TabCtrl_GetCurSel(sourceTabsHandle_);
     const bool runningProcesses = sourceTabIndex_ == 1;
-    SetWindowTextW(detectSourceButtonHandle_, runningProcesses ? L"Refresh processes" : L"Detect installed apps");
-    EnableWindow(addCatalogButtonHandle_, !runningProcesses);
-    EnableWindow(removeCatalogButtonHandle_, !runningProcesses);
+    SetWindowTextW(detectSourceButtonHandle_, sourceTabIndex_ == 0 ? L"Detect installed apps" : L"Refresh processes");
+    SetWindowTextW(GetDlgItem(windowHandle_, IdTransferCatalogProgram), L">");
+    EnableWindow(addCatalogButtonHandle_, sourceTabIndex_ == 0);
+    EnableWindow(removeCatalogButtonHandle_, sourceTabIndex_ == 0);
     SendMessageW(catalogSearchHandle_, EM_SETCUEBANNER, FALSE,
-        reinterpret_cast<LPARAM>(runningProcesses ? L"Search processes" : L"Search apps"));
+        reinterpret_cast<LPARAM>(sourceTabIndex_ == 0 ? L"Search apps" : L"Search processes"));
 
     if (runningProcesses)
     {
         ConfigureListView(catalogListHandle_, {{L"Name", 2}, {L"Path", 5}, {L"CPU", 1}, {L"Memory", 2}});
-        CaptureRunningProcesses();
         PopulateRunningProcesses();
+        StartSourceRefresh();
+    }
+    else if (sourceTabIndex_ == 2)
+    {
+        ConfigureListView(catalogListHandle_, {{L"Name", 2}, {L"Path", 4}, {L"Status", 2}, {L"Potential effect", 3}});
+        PopulateDetectedProcesses();
+        StartSourceRefresh();
     }
     else
     {
         ConfigureListView(catalogListHandle_, {{L"Name", 2}, {L"Path", 5}});
         PopulateCatalogPrograms();
     }
+    SyncSourceRefreshUi();
 }
 
 void MainWindow::ToggleMonitoring()
@@ -1841,11 +2094,54 @@ bool MainWindow::ApplyMonitorPowerSetup(size_t index, bool interactive)
 void MainWindow::SaveConfiguration()
 {
     UpdateSettingsFromUi();
+    auto& config = app_.Configuration();
+    const bool startupChanged = config.startWithWindows != appliedStartWithWindows_ ||
+        config.alwaysRunAsAdministrator != appliedAlwaysRunAsAdministrator_;
+    if (startupChanged)
+    {
+        if (config.alwaysRunAsAdministrator && !appliedAlwaysRunAsAdministrator_)
+        {
+            if (!StartupRegistration::IsElevated() && !StartupRegistration::CanElevateCurrentUser())
+            {
+                MessageBoxW(windowHandle_, L"This setting requires the signed-in Windows account to be an administrator. Elevating with a different account would use that account's settings.", L"LaunchMate", MB_OK | MB_ICONWARNING);
+                config.startWithWindows = appliedStartWithWindows_;
+                config.alwaysRunAsAdministrator = appliedAlwaysRunAsAdministrator_;
+                UpdateSettingsUi();
+                return;
+            }
+            if (MessageBoxW(windowHandle_, L"LaunchMate will request administrator approval on manual launches. With Windows autostart, a scheduled task will run this executable with highest privileges at sign-in. Only use this with a trusted, protected executable path; replacing that file would also give the replacement administrator rights. Continue?", L"Always run as Administrator", MB_YESNO | MB_ICONWARNING) != IDYES)
+            {
+                config.startWithWindows = appliedStartWithWindows_;
+                config.alwaysRunAsAdministrator = appliedAlwaysRunAsAdministrator_;
+                UpdateSettingsUi();
+                return;
+            }
+        }
+        if (!StartupRegistration::Apply(config.startWithWindows, config.alwaysRunAsAdministrator))
+        {
+            MessageBoxW(windowHandle_, L"Windows startup settings could not be applied. The previous settings were kept. Check the UAC prompt and Task Scheduler permissions.", L"LaunchMate", MB_OK | MB_ICONERROR);
+            config.startWithWindows = appliedStartWithWindows_;
+            config.alwaysRunAsAdministrator = appliedAlwaysRunAsAdministrator_;
+            UpdateSettingsUi();
+            return;
+        }
+        appliedStartWithWindows_ = config.startWithWindows;
+        appliedAlwaysRunAsAdministrator_ = config.alwaysRunAsAdministrator;
+    }
     CaptureWindowPlacement();
-    app_.Config().Save(app_.Configuration());
+    if (!app_.Config().Save(config))
+    {
+        MessageBoxW(windowHandle_, L"The settings could not be saved. The previous configuration file has been preserved.",
+            L"LaunchMate", MB_OK | MB_ICONERROR);
+        return;
+    }
     RegisterMonitorHotkeys();
-    app_.Monitor().UpdateConfiguration(app_.Configuration());
-    StartupRegistration::Apply(app_.Configuration().startWithWindows);
+    app_.Monitor().UpdateConfiguration(config);
+    if (startupChanged && config.alwaysRunAsAdministrator != StartupRegistration::IsElevated())
+        MessageBoxW(windowHandle_, config.alwaysRunAsAdministrator
+            ? L"Administrator mode will take effect after LaunchMate is restarted. The current session is still running without elevation."
+            : L"Administrator mode has been disabled for future launches. The current session remains elevated until LaunchMate is restarted.",
+            L"LaunchMate", MB_OK | MB_ICONINFORMATION);
 }
 
 void MainWindow::CaptureWindowPlacement()
@@ -2022,7 +2318,11 @@ void MainWindow::EditRuleActions()
 
 void MainWindow::TransferSelectedSource()
 {
-    if (sourceTabIndex_ == 1)
+    if (sourceTabIndex_ == 2)
+    {
+        AddSelectedDetectedProcess();
+    }
+    else if (sourceTabIndex_ == 1)
     {
         AddSelectedRunningProcess();
     }
@@ -2077,6 +2377,36 @@ void MainWindow::AddSelectedRunningProcess()
     action.displayName = selected.displayName;
     action.processName = selected.processName;
     action.executablePath = selected.executablePath;
+    rule.processesToStop.push_back(std::move(action));
+    PopulateRulePrograms();
+    SaveConfiguration();
+}
+
+void MainWindow::AddSelectedDetectedProcess()
+{
+    const int watchedIndex = SelectedWatchedIndex();
+    if (watchedIndex < 0) return;
+    const int processIndex = SelectedDetectedProcessIndex();
+    if (processIndex < 0 || processIndex >= static_cast<int>(detectedProcesses_.size())) return;
+    const auto& selected = detectedProcesses_[static_cast<size_t>(processIndex)];
+    if (!selected.allowStop) return;
+    auto& rule = app_.Configuration().watchedProcesses[static_cast<size_t>(watchedIndex)];
+    if (_wcsicmp(std::filesystem::path(selected.processName).stem().c_str(),
+        std::filesystem::path(rule.processName).stem().c_str()) == 0)
+        return;
+    const auto duplicate = std::find_if(rule.processesToStop.begin(), rule.processesToStop.end(), [&selected](const ProcessStopAction& action)
+    {
+        return _wcsicmp(std::filesystem::path(action.processName).stem().c_str(),
+            std::filesystem::path(selected.processName).stem().c_str()) == 0;
+    });
+    if (duplicate != rule.processesToStop.end()) return;
+    ProcessStopAction action;
+    action.displayName = selected.displayName;
+    action.processName = selected.processName;
+    action.executablePath = selected.verifiedRunningPath || !selected.running ? selected.executablePath : L"";
+    action.gracefulCloseFirst = true;
+    action.forceAfterMilliseconds = 3000;
+    action.restartAfterWatchProcessEnds = false;
     rule.processesToStop.push_back(std::move(action));
     PopulateRulePrograms();
     SaveConfiguration();
@@ -2247,6 +2577,7 @@ void MainWindow::UpdateSettingsFromUi()
     config.minimizeToTray = SendMessageW(minimizeToTrayHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
     config.closeToTray = SendMessageW(closeToTrayHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
     config.startWithWindows = SendMessageW(startWithWindowsHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    config.alwaysRunAsAdministrator = SendMessageW(alwaysRunAsAdministratorHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
     config.startInTray = SendMessageW(startInTrayHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
     config.startMonitoringOnLaunch = SendMessageW(startMonitoringHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
     config.checkForUpdatesOnStartup = SendMessageW(checkForUpdatesHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -2258,6 +2589,7 @@ void MainWindow::UpdateSettingsUi()
     SendMessageW(minimizeToTrayHandle_, BM_SETCHECK, config.minimizeToTray ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(closeToTrayHandle_, BM_SETCHECK, config.closeToTray ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(startWithWindowsHandle_, BM_SETCHECK, config.startWithWindows ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(alwaysRunAsAdministratorHandle_, BM_SETCHECK, config.alwaysRunAsAdministrator ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(startInTrayHandle_, BM_SETCHECK, config.startInTray ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(startMonitoringHandle_, BM_SETCHECK, config.startMonitoringOnLaunch ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(checkForUpdatesHandle_, BM_SETCHECK, config.checkForUpdatesOnStartup ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -2304,6 +2636,12 @@ int MainWindow::SelectedRunningProcessIndex() const
         return -1;
     }
     return index;
+}
+
+int MainWindow::SelectedDetectedProcessIndex() const
+{
+    const int index = SelectedListViewRow(catalogListHandle_);
+    return index >= 0 && index < static_cast<int>(detectedProcesses_.size()) ? index : -1;
 }
 
 int MainWindow::SelectedWatchedIndex() const

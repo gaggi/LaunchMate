@@ -87,6 +87,7 @@ struct AppConfiguration
     bool closeToTray{true};
     bool startWithWindows{false};
     bool startAsAdministrator{false};
+    bool useEtw{false};
     bool startInTray{false};
     bool startMonitoringOnLaunch{false};
     bool checkForUpdatesOnStartup{true};

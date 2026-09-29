@@ -1261,8 +1261,12 @@ bool MainWindow::Create(int showCommand)
     PopulateLists();
     UpdateSettingsUi();
     RestoreWindowPlacement(app_.Configuration().startInTray ? SW_HIDE : showCommand);
-    StartupRegistration::Apply(app_.Configuration().startWithWindows);
+    // Refresh an older normal logon task once this instance has already been
+    // elevated.  This is the one-time migration to a highest-privilege task.
+    if (app_.Configuration().startWithWindows && app_.Configuration().startAsAdministrator)
+        StartupRegistration::Apply(true, true);
     appliedStartWithWindows_ = app_.Configuration().startWithWindows;
+    appliedStartAsAdministrator_ = app_.Configuration().startAsAdministrator;
 
     trayIcon_.Create(
         windowHandle_,
@@ -1648,7 +1652,8 @@ void MainWindow::CreateControls()
     startWithWindowsHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartWithWindows, L"Start with Windows", 360, 594, 320, 24, uiFont_);
     startMonitoringHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartMonitoringOnLaunch, L"Start monitoring on launch", 360, 624, 320, 24, uiFont_);
     checkForUpdatesHandle_ = CreateCheckbox(windowHandle_, IdSettingsCheckForUpdatesOnStartup, L"Check for updates on startup", 360, 654, 360, 24, uiFont_);
-    startAsAdministratorHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartAsAdministrator, L"Start as Administrator", 720, 594, 260, 24, uiFont_);
+    startAsAdministratorHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartAsAdministrator, L"Start as Administrator", 720, 594, 230, 24, uiFont_);
+    useEtwHandle_ = CreateCheckbox(windowHandle_, IdSettingsUseEtw, L"Use ETW", 970, 594, 210, 24, uiFont_);
     CreateButtonControl(windowHandle_, IdCheckForUpdates, L"Check for updates", 840, 644, 190, 34, uiFont_);
     CreateButtonControl(windowHandle_, IdMpoSettings, L"MPO settings...", 720, 644, 110, 34, uiFont_);
     CreateButtonControl(windowHandle_, IdSaveConfig, L"Save", 1040, 644, 140, 34, uiFont_);
@@ -2388,18 +2393,24 @@ void MainWindow::SaveConfiguration()
 {
     UpdateSettingsFromUi();
     auto& config = app_.Configuration();
-    const bool startupChanged = config.startWithWindows != appliedStartWithWindows_;
-    if (startupChanged)
+    // Changing administrator mode only affects the task when the task exists.
+    // For a manually launched app it is just a saved application preference.
+    const bool startupTaskChanged = config.startWithWindows != appliedStartWithWindows_ ||
+        ((config.startWithWindows || appliedStartWithWindows_) &&
+            config.startAsAdministrator != appliedStartAsAdministrator_);
+    if (startupTaskChanged)
     {
-        if (!StartupRegistration::Apply(config.startWithWindows))
+        if (!StartupRegistration::Apply(config.startWithWindows, config.startAsAdministrator))
         {
             MessageBoxW(windowHandle_, L"Windows startup settings could not be applied. The previous settings were kept.", L"LaunchMate", MB_OK | MB_ICONERROR);
             config.startWithWindows = appliedStartWithWindows_;
+            config.startAsAdministrator = appliedStartAsAdministrator_;
             UpdateSettingsUi();
             return;
         }
-        appliedStartWithWindows_ = config.startWithWindows;
     }
+    appliedStartWithWindows_ = config.startWithWindows;
+    appliedStartAsAdministrator_ = config.startAsAdministrator;
     CaptureWindowPlacement();
     if (!app_.Config().Save(config))
     {
@@ -2869,6 +2880,12 @@ void MainWindow::UpdateSettingsFromUi()
     config.closeToTray = SendMessageW(closeToTrayHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
     config.startWithWindows = SendMessageW(startWithWindowsHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
     config.startAsAdministrator = SendMessageW(startAsAdministratorHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    config.useEtw = SendMessageW(useEtwHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    if (config.useEtw)
+    {
+        config.startAsAdministrator = true;
+        SendMessageW(startAsAdministratorHandle_, BM_SETCHECK, BST_CHECKED, 0);
+    }
     config.startInTray = SendMessageW(startInTrayHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
     config.startMonitoringOnLaunch = SendMessageW(startMonitoringHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
     config.checkForUpdatesOnStartup = SendMessageW(checkForUpdatesHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -2881,6 +2898,7 @@ void MainWindow::UpdateSettingsUi()
     SendMessageW(closeToTrayHandle_, BM_SETCHECK, config.closeToTray ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(startWithWindowsHandle_, BM_SETCHECK, config.startWithWindows ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(startAsAdministratorHandle_, BM_SETCHECK, config.startAsAdministrator ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(useEtwHandle_, BM_SETCHECK, config.useEtw ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(startInTrayHandle_, BM_SETCHECK, config.startInTray ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(startMonitoringHandle_, BM_SETCHECK, config.startMonitoringOnLaunch ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(checkForUpdatesHandle_, BM_SETCHECK, config.checkForUpdatesOnStartup ? BST_CHECKED : BST_UNCHECKED, 0);

@@ -270,7 +270,13 @@ ProcessMonitor::ProcessMonitor(StatusCallback callback)
     : runtimeConfiguration_(std::make_shared<RuntimeConfiguration>()),
       statusCallback_(std::move(callback)),
       wakeEvent_(CreateEventW(nullptr, FALSE, FALSE, nullptr)),
-      stopEvent_(CreateEventW(nullptr, TRUE, FALSE, nullptr))
+      stopEvent_(CreateEventW(nullptr, TRUE, FALSE, nullptr)),
+      etwProcessListener_([this](EtwProcessListener::ProcessEvent event)
+      {
+          std::scoped_lock lock(etwEventsMutex_);
+          pendingEtwEvents_.push_back(std::move(event));
+          if (running_.load()) WakeWorker();
+      })
 {
 }
 
@@ -288,6 +294,7 @@ ProcessMonitor::~ProcessMonitor()
 void ProcessMonitor::UpdateConfiguration(const AppConfiguration& configuration)
 {
     auto prepared = std::make_shared<RuntimeConfiguration>();
+    prepared->useEtw = configuration.useEtw;
     prepared->watchedRules.reserve(configuration.watchedProcesses.size());
     prepared->watchedProcessKeys.reserve(configuration.watchedProcesses.size());
 
@@ -329,6 +336,8 @@ void ProcessMonitor::UpdateConfiguration(const AppConfiguration& configuration)
         cachedProcessStates_.clear();
         cachedProcessStatesKnown_ = false;
     }
+    etwInitialSnapshotComplete_ = false;
+    if (usingEtw_.load()) etwProcessListener_.UpdateWatchedProcessKeys(runtimeConfiguration_->watchedProcessKeys);
     WakeWorker();
 }
 
@@ -352,6 +361,27 @@ void ProcessMonitor::Start()
     }
 
     if (stopEvent_) ResetEvent(stopEvent_);
+    std::shared_ptr<const RuntimeConfiguration> runtimeConfiguration;
+    {
+        std::scoped_lock lock(mutex_);
+        runtimeConfiguration = runtimeConfiguration_;
+    }
+    if (runtimeConfiguration && runtimeConfiguration->useEtw)
+    {
+        std::wstring error;
+        if (etwProcessListener_.Start(runtimeConfiguration->watchedProcessKeys, error))
+        {
+            usingEtw_.store(true);
+            etwInitialSnapshotComplete_ = false;
+            etwProcessIds_.clear();
+            statusCallback_(L"ETW process monitoring active.");
+        }
+        else
+        {
+            usingEtw_.store(false);
+            statusCallback_(L"ETW could not start; using process polling. " + error);
+        }
+    }
     worker_ = std::thread([this] { WorkerLoop(); });
     statusCallback_(L"Monitoring active.");
 }
@@ -364,11 +394,19 @@ void ProcessMonitor::Stop()
     }
 
     if (stopEvent_) SetEvent(stopEvent_);
+    etwProcessListener_.Stop();
+    usingEtw_.store(false);
     WakeWorker();
 
     if (worker_.joinable())
     {
         worker_.join();
+    }
+    etwProcessIds_.clear();
+    etwInitialSnapshotComplete_ = false;
+    {
+        std::scoped_lock lock(etwEventsMutex_);
+        pendingEtwEvents_.clear();
     }
 
     for (const auto& [key, rule] : activeRules_) FinishRule(rule);
@@ -421,6 +459,11 @@ std::vector<std::wstring> ProcessMonitor::GetProcessStates(const std::vector<Wat
                 const auto state = cachedProcessStates_.find(key);
                 states.push_back(state != cachedProcessStates_.end() && state->second ? L"Running" : L"Stopped");
             }
+            return states;
+        }
+        if (usingEtw_.load())
+        {
+            states.assign(rules.size(), L"Unknown");
             return states;
         }
     }
@@ -560,7 +603,14 @@ void ProcessMonitor::WorkerLoop()
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     while (running_.load())
     {
-        CheckRules();
+        if (usingEtw_.load())
+        {
+            // One snapshot covers processes that were already running when ETW
+            // was enabled. From then on, ETW PIDs are the source of truth.
+            if (!etwInitialSnapshotComplete_.load()) CheckRules();
+            ProcessEtwEvents();
+        }
+        else CheckRules();
 
         if (!running_.load())
         {
@@ -575,6 +625,10 @@ void ProcessMonitor::WorkerLoop()
 
         DWORD waitDurationMs = idlePollIntervalMs_.load();
         if ((!runtimeConfiguration || runtimeConfiguration->watchedRules.empty()) && activeRules_.empty())
+        {
+            waitDurationMs = INFINITE;
+        }
+        else if (usingEtw_.load())
         {
             waitDurationMs = INFINITE;
         }
@@ -619,6 +673,18 @@ void ProcessMonitor::ApplySnapshot(const RuntimeConfiguration& configuration, co
 
     CacheProcessStates(configuration, snapshot);
 
+    if (usingEtw_.load() && !etwInitialSnapshotComplete_.load())
+    {
+        etwProcessIds_.clear();
+        for (const auto& rule : configuration.watchedRules)
+        {
+            const auto found = snapshot.processIdsByName.find(rule.processKey);
+            if (found != snapshot.processIdsByName.end())
+                etwProcessIds_[rule.processKey].insert(found->second.begin(), found->second.end());
+        }
+        etwInitialSnapshotComplete_.store(true);
+    }
+
     for (auto it = activeRules_.begin(); it != activeRules_.end();)
     {
         if (!IsProcessRunning(snapshot, it->first))
@@ -639,6 +705,65 @@ void ProcessMonitor::ApplySnapshot(const RuntimeConfiguration& configuration, co
             ExecuteStartActions(rule);
         }
     }
+}
+
+void ProcessMonitor::ProcessEtwEvents()
+{
+    std::vector<EtwProcessListener::ProcessEvent> events;
+    {
+        std::scoped_lock lock(etwEventsMutex_);
+        events.swap(pendingEtwEvents_);
+    }
+    if (events.empty()) return;
+
+    std::shared_ptr<const RuntimeConfiguration> configuration;
+    {
+        std::scoped_lock lock(mutex_);
+        configuration = runtimeConfiguration_;
+    }
+    if (!configuration) return;
+
+    for (const auto& event : events)
+    {
+        if (!configuration->watchedProcessKeys.contains(event.imageName)) continue;
+        auto& processIds = etwProcessIds_[event.imageName];
+        const bool wasRunning = !processIds.empty();
+        if (event.processStopped) processIds.erase(event.processId);
+        else processIds.insert(event.processId);
+        const bool isRunning = !processIds.empty();
+        statusCallback_(L"ETW " + std::wstring(event.processStopped ? L"stop" : L"start") + L": " +
+            event.imageName + L" (PID " + std::to_wstring(event.processId) + L", " +
+            std::to_wstring(processIds.size()) + L" tracked instance(s)).");
+        CacheProcessState(event.imageName, isRunning);
+
+        if (!wasRunning && isRunning)
+        {
+            const auto rule = std::find_if(configuration->watchedRules.begin(), configuration->watchedRules.end(),
+                [&event](const auto& candidate) { return candidate.processKey == event.imageName; });
+            if (rule != configuration->watchedRules.end() && !activeRules_.contains(event.imageName))
+            {
+                activeRules_.emplace(event.imageName, *rule);
+                statusCallback_(rule->displayName + L" detected. Running actions.");
+                ExecuteStartActions(*rule);
+            }
+        }
+        else if (wasRunning && !isRunning)
+        {
+            const auto active = activeRules_.find(event.imageName);
+            if (active != activeRules_.end())
+            {
+                FinishRule(active->second);
+                activeRules_.erase(active);
+            }
+        }
+    }
+}
+
+void ProcessMonitor::CacheProcessState(const std::wstring& processKey, bool running)
+{
+    std::scoped_lock lock(processStatesMutex_);
+    cachedProcessStates_[processKey] = running;
+    cachedProcessStatesKnown_ = true;
 }
 
 void ProcessMonitor::CacheProcessStates(const RuntimeConfiguration& configuration, const ProcessSnapshot& snapshot)

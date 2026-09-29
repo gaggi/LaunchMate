@@ -27,7 +27,7 @@ The **Windows Services** tab is available for every watched rule and lets you op
 
 **MPO settings...** under the main window's Settings opens a global Windows tweak, not a rule action. The dialog displays both current DWORD values. **Disable MPO** sets `HKLM\SOFTWARE\Microsoft\Windows\Dwm\OverlayTestMode` to `5` and `HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\DisableOverlays` to `1`; **Windows Default** deletes both values. Changes are verified, and LaunchMate attempts to roll back the first value if changing the second fails. There are no confirmation or success dialogs; errors appear in the MPO dialog. Administrator rights and a Windows restart are required for changes to take effect, but LaunchMate does not restart Windows. The `DisableOverlays` value is a community-documented workaround, not a Microsoft-documented setting, and can affect game overlays or some DirectX 12 games. LaunchMate does not change `ForceDisableFrameBuffer` or `OverlayMinFPS`.
 
-**Start with Windows** uses the current user's normal Run key, so LaunchMate always starts without elevated rights. System changes such as Windows Services, MPO settings, and Defender exclusions request administrator approval only when you invoke them.
+**Start with Windows** uses a logon task for the current user. When **Start as Administrator** (or ETW) is enabled, LaunchMate creates that task with the highest privileges, so it starts elevated at logon without a UAC prompt. Windows requests approval only once when this startup setting is saved or changed.
 
 ## Build
 
@@ -84,9 +84,7 @@ Optional runtime flags:
 
 ## Autostart
 
-When `Start with Windows` is enabled, LaunchMate writes an entry under:
-
-`HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`
+When `Start with Windows` is enabled, LaunchMate creates a current-user logon task rather than a Run-key entry.
 
 ## Updates
 

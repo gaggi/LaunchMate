@@ -46,6 +46,7 @@ private:
         IdSettingsCloseToTray,
         IdSettingsStartWithWindows,
         IdSettingsStartAsAdministrator,
+        IdSettingsUseEtw,
         IdSettingsStartInTray,
         IdSettingsStartMonitoringOnLaunch,
         IdSettingsCheckForUpdatesOnStartup,
@@ -119,6 +120,7 @@ private:
     HWND closeToTrayHandle_{nullptr};
     HWND startWithWindowsHandle_{nullptr};
     HWND startAsAdministratorHandle_{nullptr};
+    HWND useEtwHandle_{nullptr};
     HWND startInTrayHandle_{nullptr};
     HWND startMonitoringHandle_{nullptr};
     HWND checkForUpdatesHandle_{nullptr};
@@ -172,4 +174,5 @@ private:
     bool updateCheckInProgress_{false};
     bool updateInstallInProgress_{false};
     bool appliedStartWithWindows_{false};
+    bool appliedStartAsAdministrator_{false};
 };

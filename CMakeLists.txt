@@ -11,11 +11,11 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(LaunchMateCoreTests tests/CoreTests.cpp src/JsonLite.cpp src/ProcessMonitor.cpp)
+    add_executable(LaunchMateCoreTests tests/CoreTests.cpp src/JsonLite.cpp src/EtwProcessListener.cpp src/ProcessMonitor.cpp)
     target_include_directories(LaunchMateCoreTests PRIVATE src)
     target_compile_features(LaunchMateCoreTests PRIVATE cxx_std_20)
     target_compile_definitions(LaunchMateCoreTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(LaunchMateCoreTests PRIVATE shell32 advapi32 winhttp ole32 oleaut32 uuid)
+    target_link_libraries(LaunchMateCoreTests PRIVATE shell32 advapi32 tdh winhttp ole32 oleaut32 uuid)
     if(MSVC)
         set_property(TARGET LaunchMateCoreTests PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
@@ -36,6 +36,7 @@ add_executable(LaunchMate WIN32
     src/IRacingPerformance.cpp
     src/IRacingServices.cpp
     src/MonitorPowerController.cpp
+    src/EtwProcessListener.cpp
     src/ProcessMonitor.cpp
     src/ConfigStore.cpp
     src/TrayIcon.cpp
@@ -71,6 +72,7 @@ target_link_libraries(LaunchMate PRIVATE
     powrprof
     crypt32
     advapi32
+    tdh
     ole32
     oleaut32
     shlwapi

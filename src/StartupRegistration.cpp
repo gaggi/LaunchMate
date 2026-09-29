@@ -5,6 +5,7 @@
 #include <vector>
 #include <windows.h>
 #include <sddl.h>
+#include <shellapi.h>
 
 namespace
 {
@@ -56,7 +57,18 @@ namespace
         return L"\"" + value + L"\"";
     }
 
-    bool ApplyLogonTask(bool enabled)
+    bool IsElevated()
+    {
+        HANDLE token = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+        TOKEN_ELEVATION elevation{};
+        DWORD bytes = 0;
+        const bool read = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &bytes) != FALSE;
+        CloseHandle(token);
+        return read && elevation.TokenIsElevated != 0;
+    }
+
+    bool ApplyLogonTask(bool enabled, bool startAsAdministrator)
     {
         const auto sid = CurrentUserSid();
         if (sid.empty()) return false;
@@ -71,8 +83,11 @@ namespace
         const DWORD length = GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path)));
         if (!length || length == std::size(path)) return false;
         const auto command = L"\"" + std::wstring(path, length) + L"\"";
-        return RunSchtasks(L"/Create /TN " + QuoteArgument(taskName) + L" /TR " +
-            QuoteArgument(command) + L" /SC ONLOGON /F");
+        std::wstring parameters = L"/Create /TN " + QuoteArgument(taskName) + L" /TR " +
+            QuoteArgument(command) + L" /SC ONLOGON";
+        if (startAsAdministrator) parameters += L" /RL HIGHEST";
+        parameters += L" /F";
+        return RunSchtasks(parameters);
     }
 
     void RemoveLegacyElevatedStartupTask()
@@ -81,11 +96,45 @@ namespace
         if (sid.empty()) return;
         RunSchtasks(L"/Delete /TN " + QuoteArgument(L"LaunchMate Elevated Startup " + sid) + L" /F");
     }
+
+    bool RunElevatedStartupConfiguration(bool startWithWindows, bool startAsAdministrator)
+    {
+        wchar_t path[MAX_PATH]{};
+        const DWORD length = GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path)));
+        const auto sid = CurrentUserSid();
+        if (!length || length == std::size(path) || sid.empty()) return false;
+
+        const std::wstring parameters = L"--launchmate-configure-startup " +
+            std::wstring(startWithWindows ? L"1" : L"0") + L" " +
+            std::wstring(startAsAdministrator ? L"1" : L"0") + L" " + QuoteArgument(sid);
+        SHELLEXECUTEINFOW execute{sizeof(execute)};
+        execute.fMask = SEE_MASK_NOCLOSEPROCESS;
+        execute.lpVerb = L"runas";
+        execute.lpFile = path;
+        execute.lpParameters = parameters.c_str();
+        execute.nShow = SW_HIDE;
+        if (!ShellExecuteExW(&execute) || !execute.hProcess) return false;
+        WaitForSingleObject(execute.hProcess, 60000);
+        DWORD result = 1;
+        GetExitCodeProcess(execute.hProcess, &result);
+        CloseHandle(execute.hProcess);
+        return result == 0;
+    }
 }
 
-bool StartupRegistration::Apply(bool startWithWindows)
+bool StartupRegistration::Apply(bool startWithWindows, bool startAsAdministrator)
 {
-    RemoveLegacyElevatedStartupTask();
+    if (!IsElevated()) return RunElevatedStartupConfiguration(startWithWindows, startAsAdministrator);
     if (!RemoveRunKey()) return false;
-    return ApplyLogonTask(startWithWindows);
+    RemoveLegacyElevatedStartupTask();
+    return ApplyLogonTask(startWithWindows, startAsAdministrator);
+}
+
+bool StartupRegistration::ConfigureElevatedStartup(bool startWithWindows, bool startAsAdministrator,
+    const std::wstring& expectedUserSid)
+{
+    if (!IsElevated() || expectedUserSid.empty() || expectedUserSid != CurrentUserSid()) return false;
+    if (!RemoveRunKey()) return false;
+    RemoveLegacyElevatedStartupTask();
+    return ApplyLogonTask(startWithWindows, startAsAdministrator);
 }

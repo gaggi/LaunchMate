@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Models.h"
+#include "EtwProcessListener.h"
 
 #include <atomic>
 #include <functional>
@@ -51,6 +52,7 @@ private:
     {
         std::vector<RuntimeRule> watchedRules;
         std::unordered_set<std::wstring> watchedProcessKeys;
+        bool useEtw{false};
     };
 
     struct LaunchedProgramRecord
@@ -73,6 +75,8 @@ private:
     void WorkerLoop();
     void CheckRules();
     void ApplySnapshot(const RuntimeConfiguration& configuration, const ProcessSnapshot& snapshot);
+    void ProcessEtwEvents();
+    void CacheProcessState(const std::wstring& processKey, bool running);
     void CacheProcessStates(const RuntimeConfiguration& configuration, const ProcessSnapshot& snapshot);
     void FinishRule(const RuntimeRule& rule);
     void StartProgramsForRule(const RuntimeRule& rule);
@@ -98,8 +102,14 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<DWORD> idlePollIntervalMs_{1000};
     std::atomic<DWORD> activePollIntervalMs_{1000};
+    std::atomic<bool> usingEtw_{false};
     HANDLE wakeEvent_{nullptr};
     HANDLE stopEvent_{nullptr};
+    EtwProcessListener etwProcessListener_;
+    std::mutex etwEventsMutex_;
+    std::vector<EtwProcessListener::ProcessEvent> pendingEtwEvents_;
+    std::unordered_map<std::wstring, std::unordered_set<DWORD>> etwProcessIds_;
+    std::atomic<bool> etwInitialSnapshotComplete_{false};
     std::thread worker_;
     std::mutex mutex_;
     // The UI reads the same snapshot that drives rule transitions.  Keeping this

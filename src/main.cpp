@@ -2,6 +2,7 @@
 #include "ConfigStore.h"
 #include "IRacingServices.h"
 #include "MainWindow.h"
+#include "StartupRegistration.h"
 
 #include <algorithm>
 #include <commctrl.h>
@@ -21,7 +22,7 @@ namespace
     constexpr DWORD kMinimumPollIntervalMs = 100;
     constexpr DWORD kMaximumPollIntervalMs = 300000;
 
-    int RunElevatedServiceCommand()
+    int RunElevatedCommand()
     {
         int argc = 0;
         LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -40,6 +41,13 @@ namespace
             else if (command == L"--launchmate-restore-services")
             {
                 result = RestoreIRacingServices(report) ? 0 : 1;
+            }
+            else if (command == L"--launchmate-configure-startup" && argc == 5)
+            {
+                const bool startWithWindows = std::wstring(argv[2]) == L"1";
+                const bool startAsAdministrator = std::wstring(argv[3]) == L"1";
+                result = StartupRegistration::ConfigureElevatedStartup(startWithWindows,
+                    startAsAdministrator, argv[4]) ? 0 : 1;
             }
         }
         LocalFree(argv);
@@ -67,6 +75,24 @@ namespace
         SHELLEXECUTEINFOW info{sizeof(info)};
         info.lpVerb = L"runas";
         info.lpFile = executable;
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        std::wstring parameters;
+        if (argv != nullptr)
+        {
+            for (int index = 1; index < argc; ++index)
+            {
+                if (!parameters.empty()) parameters += L" ";
+                // CommandLineToArgvW already supplies individual arguments.  The
+                // launch options used by LaunchMate contain no embedded quotes;
+                // retaining them here preserves flags such as --log.
+                const std::wstring argument = argv[index];
+                parameters += argument.find_first_of(L" \t") == std::wstring::npos
+                    ? argument : L"\"" + argument + L"\"";
+            }
+            LocalFree(argv);
+        }
+        info.lpParameters = parameters.empty() ? nullptr : parameters.c_str();
         info.nShow = SW_SHOWNORMAL;
         return ShellExecuteExW(&info) != FALSE;
     }
@@ -146,8 +172,8 @@ namespace
 
 int WINAPI wWinMain(HINSTANCE instanceHandle, HINSTANCE, PWSTR, int showCommand)
 {
-    const int serviceCommandResult = RunElevatedServiceCommand();
-    if (serviceCommandResult >= 0) return serviceCommandResult;
+    const int elevatedCommandResult = RunElevatedCommand();
+    if (elevatedCommandResult >= 0) return elevatedCommandResult;
 
     if (RestoreExistingInstance()) return 0;
 

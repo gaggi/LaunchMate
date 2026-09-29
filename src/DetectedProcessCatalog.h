@@ -33,5 +33,5 @@ inline constexpr DetectedProcessCandidate kDetectedProcessCandidates[] = {
     {L"PDF24", L"pdf24.exe", L"%ProgramFiles%\\PDF24\\pdf24.exe", L"Work app", true},
     {L"Adobe Creative Cloud", L"Creative Cloud.exe", L"%ProgramFiles%\\Adobe\\Adobe Creative Cloud\\ACC\\Creative Cloud.exe", L"Work app", true},
     {L"Codex", L"Codex.exe", L"", L"Work app", true},
-    {L"NordVPN", L"NordVPN.exe", L"%ProgramFiles%\\NordVPN\\NordVPN.exe", L"VPN", false},
+    {L"NordVPN", L"NordVPN.exe", L"%ProgramFiles%\\NordVPN\\NordVPN.exe", L"VPN", true},
 };

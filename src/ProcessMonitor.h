@@ -27,6 +27,7 @@ public:
     void Stop();
     void RecoverIRacingServices();
     bool IsRunning() const noexcept;
+    std::vector<std::wstring> GetProcessStates(const std::vector<WatchedProcessRule>& rules) const;
 
 private:
     friend struct ProcessMonitorTestAccess;
@@ -59,6 +60,7 @@ private:
         std::unordered_set<DWORD> existingProcessIds;
         std::unordered_set<DWORD> startedProcessIds;
         std::vector<std::shared_ptr<void>> startedProcessHandles;
+        FILETIME launchTime{};
     };
 
     struct ProcessSnapshot

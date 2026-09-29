@@ -511,3 +511,8 @@ bool ShowRuleActionsDialog(
     DialogBoxParamW(instanceHandle, MAKEINTRESOURCEW(IDD_RULE_ACTIONS), owner, ActionsProc, reinterpret_cast<LPARAM>(&state));
     return state.accepted;
 }
+
+bool ShowStopProcessActionDialog(HINSTANCE instanceHandle, HWND owner, ProcessStopAction& action)
+{
+    return ShowItemDialog(instanceHandle, owner, IDD_STOP_ACTION, StopActionProc, action);
+}

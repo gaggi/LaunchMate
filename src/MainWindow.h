@@ -46,7 +46,6 @@ private:
         IdSettingsStartInTray,
         IdSettingsStartMonitoringOnLaunch,
         IdSettingsCheckForUpdatesOnStartup,
-        IdSettingsAlwaysRunAsAdministrator,
         IdCatalogSearch,
         IdCatalogList,
         IdWatchedList,
@@ -63,6 +62,8 @@ private:
     void CreateFonts();
     void CreateControls();
     void PopulateLists();
+    void RefreshProcessStates();
+    static constexpr UINT_PTR kProcessStateTimer = 82;
     void PopulateCatalogPrograms();
     void PopulateRunningProcesses();
     void PopulateDetectedProcesses();
@@ -98,9 +99,6 @@ private:
     void UpdateSettingsUi();
     LaunchProgram SelectLaunchProgram();
     WatchedProcessRule SelectWatchedProcess();
-    int SelectedCatalogProgramIndex() const;
-    int SelectedRunningProcessIndex() const;
-    int SelectedDetectedProcessIndex() const;
     int SelectedWatchedIndex() const;
 
     App& app_;
@@ -117,7 +115,6 @@ private:
     HWND minimizeToTrayHandle_{nullptr};
     HWND closeToTrayHandle_{nullptr};
     HWND startWithWindowsHandle_{nullptr};
-    HWND alwaysRunAsAdministratorHandle_{nullptr};
     HWND startInTrayHandle_{nullptr};
     HWND startMonitoringHandle_{nullptr};
     HWND checkForUpdatesHandle_{nullptr};
@@ -166,5 +163,4 @@ private:
     bool updateCheckInProgress_{false};
     bool updateInstallInProgress_{false};
     bool appliedStartWithWindows_{false};
-    bool appliedAlwaysRunAsAdministrator_{false};
 };

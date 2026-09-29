@@ -6,6 +6,7 @@
 #include "IRacingPerformance.h"
 #include "IRacingServices.h"
 #include "MonitorPowerController.h"
+#include "Utils.h"
 
 #include <fstream>
 #include <iostream>
@@ -42,6 +43,106 @@ bool MonitorPowerController::ApplySetup(const MonitorPowerSetup&, const std::fun
 
 struct ProcessMonitorTestAccess
 {
+    static void TestDetectionAndLaunch()
+    {
+        wchar_t executable[32768]{};
+        Require(GetModuleFileNameW(nullptr, executable, 32768) != 0, "Test executable unavailable");
+        const auto directory = std::filesystem::temp_directory_path() /
+            (L"LaunchMate-launch-test-" + std::to_wstring(GetCurrentProcessId()));
+        std::filesystem::create_directory(directory);
+        const auto childPath = directory / L"LaunchMateTestChild.exe";
+        std::filesystem::copy_file(executable, childPath, std::filesystem::copy_options::overwrite_existing);
+        struct Cleanup
+        {
+            std::filesystem::path file, directory;
+            ~Cleanup() { std::error_code error; std::filesystem::remove(file, error); std::filesystem::remove(directory, error); }
+        } cleanup{childPath, directory};
+        std::wstring lastStatus;
+        ProcessMonitor monitor([&](const auto& status) { lastStatus = status; });
+        AppConfiguration config;
+        WatchedProcessRule rule;
+        rule.processName = L"  \"" + std::wstring(executable) + L"\"  ";
+        rule.executablePath = executable;
+        LaunchProgram child;
+        child.filePath = childPath.wstring();
+        child.arguments = L"--idle-child-check-directory";
+        rule.programsToLaunch.push_back(child);
+        config.watchedProcesses.push_back(rule);
+        WatchedProcessRule absent;
+        absent.processName = L"launchmate-nonexistent-regression-test.exe";
+        config.watchedProcesses.push_back(absent);
+        const auto states = monitor.GetProcessStates(config.watchedProcesses);
+        Require(states[0] == L"Running" && states[1] == L"Stopped", "Live process detection failed");
+        monitor.UpdateConfiguration(config);
+        monitor.running_ = true;
+        monitor.CheckRules();
+        Require(monitor.activeRules_.size() == 1, "Real snapshot failed to activate watched rule");
+        Require(monitor.startedPrograms_.size() == 1, "Launch ownership missing");
+        const auto& records = monitor.startedPrograms_.begin()->second;
+        if (records.size() != 1 || records[0].startedProcessHandles.empty())
+            throw std::runtime_error("Program did not launch: " + ToUtf8(lastStatus));
+        const auto owned = records[0].startedProcessHandles.front();
+        if (WaitForSingleObject(owned.get(), 0) != WAIT_TIMEOUT)
+        {
+            DWORD exitCode = 0;
+            GetExitCodeProcess(owned.get(), &exitCode);
+            throw std::runtime_error("Launched child exited: " + std::to_string(exitCode));
+        }
+        HANDLE childToken = nullptr;
+        Require(OpenProcessToken(owned.get(), TOKEN_QUERY, &childToken) != FALSE, "Cannot inspect launched child token");
+        TOKEN_ELEVATION childElevation{};
+        DWORD tokenSize = 0;
+        const bool tokenRead = GetTokenInformation(childToken, TokenElevation, &childElevation,
+            sizeof(childElevation), &tokenSize) != FALSE;
+        CloseHandle(childToken);
+        Require(tokenRead && !childElevation.TokenIsElevated, "Launched child unexpectedly has administrator rights");
+        monitor.Stop();
+        Require(WaitForSingleObject(owned.get(), 0) == WAIT_OBJECT_0, "Launched child was not cleaned up");
+        std::cout << "Real snapshot detection, launch, and owned-child cleanup passed.\n";
+    }
+
+    static void TestHandoffOwnership()
+    {
+        wchar_t executable[32768]{};
+        Require(GetModuleFileNameW(nullptr, executable, 32768) != 0, "Test executable unavailable");
+        const auto directory = std::filesystem::temp_directory_path() /
+            (L"LaunchMate-handoff-test-" + std::to_wstring(GetCurrentProcessId()));
+        std::filesystem::create_directory(directory);
+        const auto childPath = directory / L"LaunchMateHandoffChild.exe";
+        std::filesystem::copy_file(executable, childPath, std::filesystem::copy_options::overwrite_existing);
+        struct Cleanup
+        {
+            std::filesystem::path file, directory;
+            ~Cleanup() { std::error_code error; std::filesystem::remove(file, error); std::filesystem::remove(directory, error); }
+        } cleanup{childPath, directory};
+
+        ProcessMonitor monitor([](const auto&) {});
+        WatchedProcessRule rule;
+        rule.processName = std::filesystem::path(executable).filename().wstring();
+        rule.executablePath = executable;
+        LaunchProgram program;
+        program.displayName = L"handoff child";
+        program.filePath = std::filesystem::path(std::getenv("ComSpec")).wstring();
+        program.arguments = L"/c \"\"" + childPath.wstring() + L"\" --idle-child-window\"";
+        rule.programsToLaunch.push_back(program);
+        AppConfiguration config;
+        config.watchedProcesses.push_back(rule);
+        monitor.UpdateConfiguration(config);
+        monitor.running_ = true;
+        monitor.CheckRules();
+        Require(!monitor.startedPrograms_.empty(), "Handoff launch record missing");
+        const auto& records = monitor.startedPrograms_.begin()->second;
+        Require(records.size() == 1 && !records[0].startedProcessHandles.empty(),
+            "Handoff child was not discovered after its starter exited");
+        const auto childIt = std::find_if(records[0].startedProcessHandles.begin(), records[0].startedProcessHandles.end(),
+            [](const auto& process) { return WaitForSingleObject(process.get(), 0) == WAIT_TIMEOUT; });
+        Require(childIt != records[0].startedProcessHandles.end(), "Handoff child is not running");
+        const auto child = *childIt;
+        monitor.Stop();
+        Require(WaitForSingleObject(child.get(), 0) == WAIT_OBJECT_0, "Handoff child was not closed");
+        std::cout << "Launcher handoff ownership and cleanup passed.\n";
+    }
+
     static void TestBatchStop()
     {
         wchar_t executable[32768]{};
@@ -74,6 +175,20 @@ struct ProcessMonitorTestAccess
         Require(WaitForSingleObject(children.front().get(), 0) == WAIT_OBJECT_0, "Owned process was not stopped");
         for (size_t i = 1; i < children.size(); ++i)
             Require(WaitForSingleObject(children[i].get(), 0) == WAIT_TIMEOUT, "Unrelated same-executable process was stopped");
+        // Simulate a shell launch whose PID was unavailable during the initial scan.
+        ProcessMonitor::LaunchedProgramRecord late;
+        late.executablePath = executable;
+        FILETIME exited{}, kernel{}, user{};
+        Require(GetProcessTimes(children[1].get(), &late.launchTime, &exited, &kernel, &user) != FALSE,
+            "Cannot read late-launch creation time");
+        for (size_t i = 2; i < children.size(); ++i) late.existingProcessIds.insert(GetProcessId(children[i].get()));
+        monitor.startedPrograms_[rule.processKey].push_back(std::move(late));
+        monitor.StopProgramsForRule(rule);
+        Require(WaitForSingleObject(children[1].get(), 0) == WAIT_OBJECT_0,
+            "Exit-time lookup failed to close a late/unreported process");
+        for (size_t i = 2; i < children.size(); ++i)
+            Require(WaitForSingleObject(children[i].get(), 0) == WAIT_TIMEOUT,
+                "Exit-time lookup stopped a pre-existing process");
         ProcessStopAction action;
         action.processName = std::filesystem::path(executable).filename().wstring();
         action.executablePath = executable;
@@ -261,6 +376,29 @@ void TestAtomicFile()
 
 int main(int argc, char** argv)
 {
+    if (argc == 2 && std::string(argv[1]) == "--idle-child-window")
+    {
+        const wchar_t className[] = L"LaunchMateCoreTestWindow";
+        WNDCLASSW windowClass{};
+        windowClass.lpfnWndProc = DefWindowProcW;
+        windowClass.hInstance = GetModuleHandleW(nullptr);
+        windowClass.lpszClassName = className;
+        RegisterClassW(&windowClass);
+        const HWND window = CreateWindowExW(0, className, L"LaunchMate test child", WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT, CW_USEDEFAULT, 320, 200, nullptr, nullptr, windowClass.hInstance, nullptr);
+        if (!window) return 2;
+        ShowWindow(window, SW_SHOW);
+        Sleep(60000);
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--idle-child-check-directory")
+    {
+        wchar_t executable[32768]{};
+        if (!GetModuleFileNameW(nullptr, executable, 32768) ||
+            std::filesystem::current_path() != std::filesystem::path(executable).parent_path()) return 2;
+        Sleep(60000);
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--idle-child") { Sleep(60000); return 0; }
     try
     {
@@ -269,6 +407,8 @@ int main(int argc, char** argv)
         TestAtomicFile();
         ProcessMonitorTestAccess::Run();
         ProcessMonitorTestAccess::TestBatchStop();
+        ProcessMonitorTestAccess::TestDetectionAndLaunch();
+        ProcessMonitorTestAccess::TestHandoffOwnership();
         std::cout << "JSON, atomic persistence, and monitor session regression tests passed.\n";
         return 0;
     }

@@ -340,7 +340,6 @@ AppConfiguration ConfigStore::Load() const
         config.minimizeToTray = ReadBool(object, "MinimizeToTray", true);
         config.closeToTray = ReadBool(object, "CloseToTray", true);
         config.startWithWindows = ReadBool(object, "StartWithWindows", false);
-        config.alwaysRunAsAdministrator = ReadBool(object, "AlwaysRunAsAdministrator", false);
         config.startInTray = ReadBool(object, "StartInTray", false);
         config.startMonitoringOnLaunch = ReadBool(object, "StartMonitoringOnLaunch", false);
         config.checkForUpdatesOnStartup = ReadBool(object, "CheckForUpdatesOnStartup", true);
@@ -437,7 +436,6 @@ bool ConfigStore::Save(const AppConfiguration& configuration) const
     object["MinimizeToTray"] = configuration.minimizeToTray;
     object["CloseToTray"] = configuration.closeToTray;
     object["StartWithWindows"] = configuration.startWithWindows;
-    object["AlwaysRunAsAdministrator"] = configuration.alwaysRunAsAdministrator;
     object["StartInTray"] = configuration.startInTray;
     object["StartMonitoringOnLaunch"] = configuration.startMonitoringOnLaunch;
     object["CheckForUpdatesOnStartup"] = configuration.checkForUpdatesOnStartup;

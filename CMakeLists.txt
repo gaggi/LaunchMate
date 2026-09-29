@@ -15,7 +15,7 @@ if(BUILD_TESTING)
     target_include_directories(LaunchMateCoreTests PRIVATE src)
     target_compile_features(LaunchMateCoreTests PRIVATE cxx_std_20)
     target_compile_definitions(LaunchMateCoreTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(LaunchMateCoreTests PRIVATE shell32 advapi32 winhttp)
+    target_link_libraries(LaunchMateCoreTests PRIVATE shell32 advapi32 winhttp ole32 oleaut32 uuid)
     if(MSVC)
         set_property(TARGET LaunchMateCoreTests PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
@@ -73,9 +73,9 @@ target_link_libraries(LaunchMate PRIVATE
     advapi32
     ole32
     oleaut32
-    taskschd
     shlwapi
     winhttp
+    uuid
 )
 
 check_ipo_supported(RESULT launchmate_ipo_supported OUTPUT launchmate_ipo_error)

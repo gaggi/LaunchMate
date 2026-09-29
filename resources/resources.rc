@@ -108,7 +108,7 @@ BEGIN
     CONTROL "Bluetooth Support", IDC_IRACING_SERVICE_FIRST + 7, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 14, 206, 542, 14
     CONTROL "Xbox Live Auth", IDC_IRACING_SERVICE_FIRST + 8, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 14, 228, 542, 14
     CONTROL "Backblaze", IDC_IRACING_SERVICE_FIRST + 9, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 14, 250, 542, 14
-    LTEXT "Administrator rights are required when the watched process starts and ends.", -1, 8, 289, 548, 10
+    LTEXT "Windows asks for administrator approval only when these actions run.", -1, 8, 289, 548, 10
     PUSHBUTTON "Select all", IDC_IRACING_SERVICE_ALL, 8, 320, 70, 18
 END
 

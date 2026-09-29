@@ -4,6 +4,7 @@
 #include <array>
 #include <vector>
 #include <windows.h>
+#include <shellapi.h>
 
 namespace
 {
@@ -119,6 +120,46 @@ namespace
     {
         return RegSetValueExW(key, name, 0, REG_BINARY, reinterpret_cast<const BYTE*>(&snapshot), sizeof(snapshot)) == ERROR_SUCCESS;
     }
+
+    std::wstring QuoteArgument(const std::wstring& value)
+    {
+        return L"\"" + value + L"\"";
+    }
+
+    bool RunElevatedServiceAction(const std::wstring& action, const std::vector<std::wstring>& services, std::wstring& report)
+    {
+        wchar_t executable[MAX_PATH]{};
+        const DWORD length = GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)));
+        if (!length || length == std::size(executable))
+        {
+            report = L"Could not locate LaunchMate for the administrator request.";
+            return false;
+        }
+        std::wstring parameters = action;
+        for (const auto& service : services) parameters += L" " + QuoteArgument(service);
+        SHELLEXECUTEINFOW info{sizeof(info)};
+        info.fMask = SEE_MASK_NOCLOSEPROCESS;
+        info.lpVerb = L"runas";
+        info.lpFile = executable;
+        info.lpParameters = parameters.c_str();
+        info.nShow = SW_HIDE;
+        if (!ShellExecuteExW(&info) || !info.hProcess)
+        {
+            report = GetLastError() == ERROR_CANCELLED ? L"Administrator approval was cancelled." :
+                L"Could not request administrator approval for Windows service actions.";
+            return false;
+        }
+        const DWORD wait = WaitForSingleObject(info.hProcess, 60000);
+        DWORD exitCode = 1;
+        const bool completed = wait == WAIT_OBJECT_0 && GetExitCodeProcess(info.hProcess, &exitCode);
+        CloseHandle(info.hProcess);
+        if (!completed || exitCode != 0)
+        {
+            report = L"Windows service action could not be completed with administrator rights.";
+            return false;
+        }
+        return true;
+    }
 }
 
 const std::vector<IRacingServiceOption>& IRacingServiceOptions()
@@ -194,6 +235,7 @@ bool HasPendingIRacingServiceRestore()
 
 bool RestoreIRacingServices(std::wstring& report)
 {
+    if (!CanManageIRacingServices()) return RunElevatedServiceAction(L"--launchmate-restore-services", {}, report);
     HKEY key = OpenRecoveryKey(false);
     if (!key) return true;
     SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
@@ -224,8 +266,7 @@ bool ApplyIRacingServices(const std::vector<std::wstring>& selected, std::wstrin
     if (selected.empty()) return true;
     if (!CanManageIRacingServices())
     {
-        report = L"Windows service actions need LaunchMate to run as Administrator.";
-        return false;
+        return RunElevatedServiceAction(L"--launchmate-apply-services", selected, report);
     }
     if (HasPendingIRacingServiceRestore())
     {

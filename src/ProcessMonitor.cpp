@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <windows.h>
 #include <shellapi.h>
+#include <objbase.h>
 #include <winhttp.h>
 
 namespace
@@ -18,6 +19,7 @@ namespace
     constexpr DWORD kProgramLaunchSettleMs = 1200;
     constexpr DWORD kMinimumPollIntervalMs = 100;
     constexpr DWORD kMaximumPollIntervalMs = 300000;
+    thread_local const wchar_t* launchStage = L"launch";
 
     std::wstring NormalizePath(const std::wstring& path)
     {
@@ -38,6 +40,10 @@ namespace
 
     std::wstring NormalizeProcessKey(std::wstring processName)
     {
+        const auto first = processName.find_first_not_of(L" \t\r\n\"");
+        if (first == std::wstring::npos) return {};
+        processName = processName.substr(first, processName.find_last_not_of(L" \t\r\n\"") - first + 1);
+        processName = std::filesystem::path(processName).filename().wstring();
         for (auto& character : processName)
         {
             character = static_cast<wchar_t>(std::towlower(character));
@@ -64,69 +70,60 @@ namespace
         return buffer;
     }
 
-    DWORD LaunchProgramProcess(const LaunchProgram& program, std::shared_ptr<void>* launchedProcess = nullptr)
+    struct WindowOwnerSearch
     {
-        HANDLE processToken = nullptr;
-        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &processToken))
+        DWORD processId{};
+        bool found{};
+    };
+
+    BOOL CALLBACK FindVisibleTopLevelWindow(HWND window, LPARAM parameter)
+    {
+        auto& search = *reinterpret_cast<WindowOwnerSearch*>(parameter);
+        DWORD processId = 0;
+        GetWindowThreadProcessId(window, &processId);
+        if (processId == search.processId && GetWindow(window, GW_OWNER) == nullptr && IsWindowVisible(window))
         {
-            TOKEN_ELEVATION elevation{};
-            DWORD size = 0;
-            const bool elevated = GetTokenInformation(processToken, TokenElevation, &elevation, sizeof(elevation), &size) &&
-                elevation.TokenIsElevated;
-            if (elevated)
-            {
-                TOKEN_ELEVATION_TYPE elevationType{};
-                size = 0;
-                const bool elevationTypeKnown = GetTokenInformation(processToken, TokenElevationType,
-                    &elevationType, sizeof(elevationType), &size) != FALSE;
-                TOKEN_LINKED_TOKEN linked{};
-                size = 0;
-                if (GetTokenInformation(processToken, TokenLinkedToken, &linked, sizeof(linked), &size))
-                {
-                    CloseHandle(processToken);
-                    std::wstring command = L"\"" + program.filePath + L"\"";
-                    if (!program.arguments.empty()) command += L" " + program.arguments;
-                    const std::wstring directory = std::filesystem::path(program.filePath).parent_path().wstring();
-                    STARTUPINFOW startup{sizeof(startup)};
-                    startup.wShowWindow = SW_SHOWNORMAL;
-                    startup.dwFlags = STARTF_USESHOWWINDOW;
-                    PROCESS_INFORMATION process{};
-                    const bool started = CreateProcessWithTokenW(linked.LinkedToken, LOGON_WITH_PROFILE,
-                        program.filePath.c_str(), command.data(), 0, nullptr,
-                        directory.empty() ? nullptr : directory.c_str(), &startup, &process) != FALSE;
-                    CloseHandle(linked.LinkedToken);
-                    if (!started) return 0;
-                    const DWORD processId = process.dwProcessId;
-                    CloseHandle(process.hThread);
-                    if (launchedProcess) *launchedProcess = std::shared_ptr<void>(process.hProcess, CloseHandle);
-                    else CloseHandle(process.hProcess);
-                    return processId;
-                }
-                if (!elevationTypeKnown || elevationType != TokenElevationTypeDefault)
-                {
-                    CloseHandle(processToken);
-                    return 0;
-                }
-            }
-            CloseHandle(processToken);
+            search.found = true;
+            return FALSE;
         }
+        return TRUE;
+    }
+
+    bool HasVisibleTopLevelWindow(DWORD processId)
+    {
+        WindowOwnerSearch search{processId};
+        EnumWindows(FindVisibleTopLevelWindow, reinterpret_cast<LPARAM>(&search));
+        return search.found;
+    }
+
+    struct ProgramLaunchResult
+    {
+        bool success{};
+        DWORD processId{};
+    };
+    ProgramLaunchResult LaunchProgramProcess(const LaunchProgram& program, std::shared_ptr<void>* launchedProcess = nullptr)
+    {
         SHELLEXECUTEINFOW info{};
+        launchStage = L"shell execute";
         info.cbSize = sizeof(info);
         info.fMask = SEE_MASK_NOCLOSEPROCESS;
         info.lpFile = program.filePath.c_str();
         info.lpParameters = program.arguments.empty() ? nullptr : program.arguments.c_str();
         info.nShow = SW_SHOWNORMAL;
         info.lpVerb = L"open";
+        const auto directory = std::filesystem::path(program.filePath).parent_path().wstring();
+        info.lpDirectory = directory.empty() ? nullptr : directory.c_str();
 
-        if (ShellExecuteExW(&info) && info.hProcess)
+        if (ShellExecuteExW(&info))
         {
+            if (!info.hProcess) return {true, 0};
             const DWORD processId = GetProcessId(info.hProcess);
             if (launchedProcess) *launchedProcess = std::shared_ptr<void>(info.hProcess, CloseHandle);
             else CloseHandle(info.hProcess);
-            return processId;
+            return {true, processId};
         }
 
-        return 0;
+        return {};
     }
 
     struct CloseWindowsContext
@@ -177,7 +174,11 @@ namespace
                     NormalizeProcessKey(entry.szExeFile) != processKey) continue;
                 HANDLE handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
                     FALSE, entry.th32ProcessID);
-                if (!handle) { allStopped = false; continue; }
+                if (!handle)
+                {
+                    if (expectedPath.empty()) allStopped = false;
+                    continue;
+                }
                 std::shared_ptr<void> process(handle, CloseHandle);
                 if (!expectedPath.empty())
                 {
@@ -292,13 +293,13 @@ void ProcessMonitor::UpdateConfiguration(const AppConfiguration& configuration)
 
     for (const auto& rule : configuration.watchedProcesses)
     {
-        if (!rule.enabled || rule.processName.empty())
+        if (!rule.enabled || (rule.processName.empty() && rule.executablePath.empty()))
         {
             continue;
         }
 
         RuntimeRule runtimeRule;
-        runtimeRule.processKey = NormalizeProcessKey(rule.processName);
+        runtimeRule.processKey = NormalizeProcessKey(rule.processName.empty() ? rule.executablePath : rule.processName);
         runtimeRule.displayName = rule.displayName.empty() ? rule.processName : rule.displayName;
         runtimeRule.programsToLaunch = rule.programsToLaunch;
         runtimeRule.processesToStop = rule.processesToStop;
@@ -373,11 +374,15 @@ void ProcessMonitor::Stop()
     previousPowerSchemes_.clear();
     serviceOwnerKey_.clear();
     activeRules_.clear();
-    std::wstring serviceReport;
-    if (!RestoreIRacingServices(serviceReport))
-        statusCallback_(L"Monitoring stopped; Windows services still need restoration: " + serviceReport);
-    else
-        statusCallback_(L"Monitoring stopped.");
+    if (HasPendingIRacingServiceRestore())
+    {
+        std::wstring serviceReport;
+        if (!RestoreIRacingServices(serviceReport))
+            statusCallback_(L"Monitoring stopped; Windows services still need restoration: " + serviceReport);
+        else
+            statusCallback_(L"Monitoring stopped.");
+    }
+    else statusCallback_(L"Monitoring stopped.");
 }
 
 void ProcessMonitor::RecoverIRacingServices()
@@ -391,6 +396,18 @@ void ProcessMonitor::RecoverIRacingServices()
 bool ProcessMonitor::IsRunning() const noexcept
 {
     return running_.load();
+}
+
+std::vector<std::wstring> ProcessMonitor::GetProcessStates(const std::vector<WatchedProcessRule>& rules) const
+{
+    const auto snapshot = CaptureProcessSnapshot(false);
+    std::vector<std::wstring> states;
+    for (const auto& rule : rules)
+    {
+        const auto key = NormalizeProcessKey(rule.processName.empty() ? rule.executablePath : rule.processName);
+        states.push_back(!snapshot.valid ? L"Unknown" : IsProcessRunning(snapshot, key) ? L"Running" : L"Stopped");
+    }
+    return states;
 }
 
 ProcessMonitor::ProcessSnapshot ProcessMonitor::CaptureProcessSnapshot(
@@ -514,6 +531,7 @@ std::unordered_set<DWORD> ProcessMonitor::BuildChildProcessSet(
 
 void ProcessMonitor::WorkerLoop()
 {
+    const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     while (running_.load())
     {
         CheckRules();
@@ -548,6 +566,7 @@ void ProcessMonitor::WorkerLoop()
             Sleep(std::min<DWORD>(waitDurationMs, kMinimumPollIntervalMs));
         }
     }
+    if (SUCCEEDED(comResult)) CoUninitialize();
 }
 
 void ProcessMonitor::CheckRules()
@@ -772,10 +791,12 @@ void ProcessMonitor::ExecuteExitActions(const RuntimeRule& rule, ULONGLONG exitT
         LaunchProgram program;
         program.displayName = action.displayName;
         program.filePath = action.executablePath;
-        if (LaunchProgramProcess(program) == 0)
+        if (!LaunchProgramProcess(program).success)
         {
-            statusCallback_(L"Could not restart process: " + action.displayName);
+            statusCallback_(L"Could not restart process: " + action.displayName +
+                L" (Windows error " + std::to_wstring(GetLastError()) + L"; " + launchStage + L")");
         }
+        else statusCallback_(L"Restarted process: " + action.displayName + L".");
     }
 }
 
@@ -807,6 +828,7 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeRule& rule)
         std::error_code pathError;
         if (program.filePath.empty() || !std::filesystem::exists(program.filePath, pathError))
         {
+            statusCallback_(L"Program file not found: " + program.filePath);
             continue;
         }
 
@@ -819,8 +841,9 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeRule& rule)
 
         if (!program.closeWhenGameStops)
         {
-            if (LaunchProgramProcess(program) == 0)
-                statusCallback_(L"Could not launch program: " + program.displayName);
+            if (!LaunchProgramProcess(program).success)
+                statusCallback_(L"Could not launch program: " + program.displayName +
+                    L" (Windows error " + std::to_wstring(GetLastError()) + L"; " + launchStage + L")");
             continue; // No ownership tracking or settling delay is needed.
         }
 
@@ -829,14 +852,24 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeRule& rule)
         const std::unordered_set<std::wstring> processKeyFilter =
             processKey.empty() ? std::unordered_set<std::wstring>{} : std::unordered_set<std::wstring>{processKey};
 
-        const auto beforeSnapshot = CaptureProcessSnapshot(false, ProcessKeyFilterPointer(processKeyFilter));
+        // A shell or packaged-app launcher may hand off to a different executable.
+        // Keep a complete before/after snapshot so that process can be owned too.
+        const auto beforeSnapshot = CaptureProcessSnapshot(false);
         auto existing = FindMatchingProcesses(beforeSnapshot, program.filePath, normalizedPath);
+        FILETIME launchTime{};
+        GetSystemTimeAsFileTime(&launchTime);
         std::shared_ptr<void> rootProcess;
-        const DWORD launchedRootProcessId = LaunchProgramProcess(program, &rootProcess);
-        if (launchedRootProcessId == 0) continue;
+        const auto launch = LaunchProgramProcess(program, &rootProcess);
+        const DWORD launchedRootProcessId = launch.processId;
+        if (!launch.success)
+        {
+            statusCallback_(L"Could not launch program: " + program.displayName +
+                L" (Windows error " + std::to_wstring(GetLastError()) + L"; " + launchStage + L")");
+            continue;
+        }
         WaitForDelay(kProgramLaunchSettleMs);
 
-        const auto afterSnapshot = CaptureProcessSnapshot(true, ProcessKeyFilterPointer(processKeyFilter));
+        const auto afterSnapshot = CaptureProcessSnapshot(true);
         auto after = FindMatchingProcesses(afterSnapshot, program.filePath, normalizedPath);
         std::unordered_set<DWORD> started;
         if (beforeSnapshot.valid && afterSnapshot.valid) for (const auto pid : after)
@@ -849,6 +882,27 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeRule& rule)
             }
         }
 
+        // For hand-offs, only retain a newly-created process if it owns a visible
+        // top-level window. Direct and child processes are handled separately below.
+        if (beforeSnapshot.valid && afterSnapshot.valid)
+        {
+            for (const auto& [name, processIds] : afterSnapshot.processIdsByName)
+            {
+                const auto before = beforeSnapshot.processIdsByName.find(name);
+                for (const auto pid : processIds)
+                {
+                    const bool existed = before != beforeSnapshot.processIdsByName.end() &&
+                        std::find(before->second.begin(), before->second.end(), pid) != before->second.end();
+                    if (!existed && pid != GetCurrentProcessId() && HasVisibleTopLevelWindow(pid))
+                    {
+                        started.insert(pid);
+                        const auto descendants = BuildChildProcessSet(afterSnapshot, pid);
+                        started.insert(descendants.begin(), descendants.end());
+                    }
+                }
+            }
+        }
+
         if (launchedRootProcessId != 0)
         {
             started.insert(launchedRootProcessId);
@@ -858,6 +912,7 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeRule& rule)
 
         LaunchedProgramRecord record{program, normalizedPath.empty() ? program.filePath : normalizedPath,
             std::move(existing), std::move(started)};
+        record.launchTime = launchTime;
         if (rootProcess) record.startedProcessHandles.push_back(std::move(rootProcess));
         for (const auto pid : record.startedProcessIds)
         {
@@ -865,6 +920,13 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeRule& rule)
             HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
             if (process) record.startedProcessHandles.emplace_back(process, CloseHandle);
         }
+        const auto liveCount = std::count_if(record.startedProcessHandles.begin(), record.startedProcessHandles.end(),
+            [](const auto& process) { return WaitForSingleObject(process.get(), 0) == WAIT_TIMEOUT; });
+        statusCallback_(L"Started " + program.displayName + L"; tracking " + std::to_wstring(liveCount) +
+            L" running process(es) for closing.");
+        if (liveCount == 0)
+            statusCallback_(L"Cannot track the running app for " + program.displayName +
+                L". Its launcher may have handed off to another process; automatic closing is unavailable.");
         records.push_back(std::move(record));
     }
 
@@ -918,8 +980,27 @@ void ProcessMonitor::StopProgramsForRule(const RuntimeRule& rule)
         for (const auto& process : ownedProcesses) ownedIds.insert(GetProcessId(process.get()));
         FILETIME captureTime{};
         GetSystemTimeAsFileTime(&captureTime);
-        const std::unordered_set<std::wstring> noNames;
-        const auto snapshot = CaptureProcessSnapshot(true, &noNames);
+        const std::unordered_set<std::wstring> names{
+            NormalizeProcessKey(std::filesystem::path(record.executablePath).filename().wstring())};
+        const auto snapshot = CaptureProcessSnapshot(true, &names);
+        // Restore the exit-time lookup: a launcher may have returned before the
+        // real executable appeared, or the application may have restarted itself.
+        if (snapshot.valid && (record.launchTime.dwHighDateTime || record.launchTime.dwLowDateTime))
+        {
+            for (const auto pid : FindMatchingProcesses(snapshot, record.executablePath, record.executablePath))
+            {
+                if (pid == GetCurrentProcessId() || ownedIds.contains(pid) || record.existingProcessIds.contains(pid)) continue;
+                HANDLE handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
+                if (!handle) continue;
+                std::shared_ptr<void> candidate(handle, CloseHandle);
+                FILETIME created{}, exited{}, kernel{}, user{};
+                if (!GetProcessTimes(handle, &created, &exited, &kernel, &user) ||
+                    CompareFileTime(&created, &record.launchTime) < 0 || CompareFileTime(&created, &captureTime) > 0 ||
+                    !PathMatchesProcess(pid, record.executablePath)) continue;
+                ownedIds.insert(pid);
+                ownedProcesses.push_back(std::move(candidate));
+            }
+        }
         if (snapshot.valid) for (size_t index = 0; index < ownedProcesses.size(); ++index)
         {
             const auto parent = ownedProcesses[index];
@@ -943,13 +1024,20 @@ void ProcessMonitor::StopProgramsForRule(const RuntimeRule& rule)
         for (const auto& process : ownedProcesses)
         {
             if (WaitForSingleObject(process.get(), 0) == WAIT_TIMEOUT)
-                TerminateProcess(process.get(), 0);
+            {
+                if (!TerminateProcess(process.get(), 0))
+                    statusCallback_(L"Could not close " + record.program.displayName +
+                        L" (PID " + std::to_wstring(GetProcessId(process.get())) + L", Windows error " +
+                        std::to_wstring(GetLastError()) + L").");
+            }
         }
         const auto deadline = GetTickCount64() + 4000;
         for (const auto& process : ownedProcesses)
         {
             const auto now = GetTickCount64();
-            WaitForSingleObject(process.get(), now < deadline ? static_cast<DWORD>(deadline - now) : 0);
+            if (WaitForSingleObject(process.get(), now < deadline ? static_cast<DWORD>(deadline - now) : 0) != WAIT_OBJECT_0)
+                statusCallback_(L"Process has not exited: " + record.program.displayName +
+                    L" (PID " + std::to_wstring(GetProcessId(process.get())) + L").");
         }
     }
 }

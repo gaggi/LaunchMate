@@ -524,6 +524,33 @@ namespace
         return true;
     }
 
+    std::wstring MpoPowerShellScript(bool disable)
+    {
+        const std::wstring apply = disable
+            ? L"New-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\Dwm' -Force | Out-Null; "
+              L"New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\Dwm' -Name 'OverlayTestMode' -PropertyType DWord -Value 5 -Force | Out-Null; "
+              L"New-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers' -Name 'DisableOverlays' -PropertyType DWord -Value 1 -Force | Out-Null; "
+              L"if ((Get-ItemPropertyValue -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\Dwm' -Name 'OverlayTestMode') -ne 5 -or (Get-ItemPropertyValue -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers' -Name 'DisableOverlays') -ne 1) { exit 2 }"
+            : L"Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\Dwm' -Name 'OverlayTestMode' -ErrorAction SilentlyContinue; "
+              L"Remove-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers' -Name 'DisableOverlays' -ErrorAction SilentlyContinue;";
+        return L"$ErrorActionPreference='Stop'; try { " + apply + L"; exit 0 } catch { exit 1 }";
+    }
+
+    bool ApplyMpoSettingsWithElevation(bool disable, std::wstring& error)
+    {
+        if (CanManageIRacingServices()) return ApplyMpoSettings(disable, error);
+
+        const DWORD result = RunElevatedPowerShell(MpoPowerShellScript(disable));
+        if (result != 0)
+        {
+            error = result == DWORD(-1)
+                ? L"Administrator approval was cancelled or could not be requested."
+                : L"Windows could not apply the MPO settings with administrator rights.";
+            return false;
+        }
+        return ApplyMpoSettings(disable, error);
+    }
+
     std::wstring DescribeMpoRegistryValue(const MpoRegistryValue& state)
     {
         if (!state.readable) return L"Unreadable or not a DWORD";
@@ -559,7 +586,7 @@ namespace
         case IDC_MPO_RESTORE:
         {
             std::wstring error;
-            ApplyMpoSettings(LOWORD(wParam) == IDC_MPO_DISABLE, error);
+            ApplyMpoSettingsWithElevation(LOWORD(wParam) == IDC_MPO_DISABLE, error);
             RefreshMpoStatus(dialog, error);
             return TRUE;
         }
@@ -673,7 +700,7 @@ namespace
             summary += L" (X3D: consider a Balanced plan; compare frame times)";
         summary += L"\r\nWindows services selected: " + std::to_wstring(rule.servicesToStop.size());
         if (!rule.servicesToStop.empty() && !CanManageIRacingServices())
-            summary += L" (run LaunchMate as Administrator for service actions)";
+            summary += L" (administrator approval is requested when the rule runs)";
         if (HasPendingIRacingServiceRestore()) summary += L"\r\nService restoration is pending.";
         if (!IsIRacingRule(rule))
         {

@@ -6,8 +6,10 @@
 #include "UpdateChecker.h"
 #include "BackgroundTask.h"
 #include <array>
+#include <unordered_map>
 
 #include <windows.h>
+#include <commctrl.h>
 
 class MainWindow
 {
@@ -43,6 +45,7 @@ private:
         IdSettingsMinimizeToTray,
         IdSettingsCloseToTray,
         IdSettingsStartWithWindows,
+        IdSettingsStartAsAdministrator,
         IdSettingsStartInTray,
         IdSettingsStartMonitoringOnLaunch,
         IdSettingsCheckForUpdatesOnStartup,
@@ -115,11 +118,15 @@ private:
     HWND minimizeToTrayHandle_{nullptr};
     HWND closeToTrayHandle_{nullptr};
     HWND startWithWindowsHandle_{nullptr};
+    HWND startAsAdministratorHandle_{nullptr};
     HWND startInTrayHandle_{nullptr};
     HWND startMonitoringHandle_{nullptr};
     HWND checkForUpdatesHandle_{nullptr};
     HFONT titleFont_{nullptr};
     HFONT uiFont_{nullptr};
+    HIMAGELIST programIconList_{nullptr};
+    std::unordered_map<std::wstring, int> programIconIndexes_;
+    int defaultProgramIconIndex_{-1};
     TrayIcon trayIcon_;
     std::vector<CatalogProgram> detectedPrograms_;
     struct RunningProcessEntry
@@ -156,6 +163,8 @@ private:
     void StartSourceRefresh();
     void PollSourceRefresh();
     void SyncSourceRefreshUi();
+    void InitializeProgramIcons();
+    int ProgramIconIndex(const std::wstring& executablePath);
     std::array<BackgroundTask<SourceResult>, 3> sourceTasks_;
     static constexpr UINT_PTR kSourceRefreshTimer = 81;
     int sourceTabIndex_{0};

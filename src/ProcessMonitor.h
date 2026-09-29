@@ -73,6 +73,7 @@ private:
     void WorkerLoop();
     void CheckRules();
     void ApplySnapshot(const RuntimeConfiguration& configuration, const ProcessSnapshot& snapshot);
+    void CacheProcessStates(const RuntimeConfiguration& configuration, const ProcessSnapshot& snapshot);
     void FinishRule(const RuntimeRule& rule);
     void StartProgramsForRule(const RuntimeRule& rule);
     void ExecuteStartActions(const RuntimeRule& rule);
@@ -96,11 +97,16 @@ private:
     StatusCallback statusCallback_;
     std::atomic<bool> running_{false};
     std::atomic<DWORD> idlePollIntervalMs_{1000};
-    std::atomic<DWORD> activePollIntervalMs_{10000};
+    std::atomic<DWORD> activePollIntervalMs_{1000};
     HANDLE wakeEvent_{nullptr};
     HANDLE stopEvent_{nullptr};
     std::thread worker_;
     std::mutex mutex_;
+    // The UI reads the same snapshot that drives rule transitions.  Keeping this
+    // cache avoids a second Toolhelp process enumeration just for the status column.
+    mutable std::mutex processStatesMutex_;
+    std::unordered_map<std::wstring, bool> cachedProcessStates_;
+    bool cachedProcessStatesKnown_{false};
     // Keep the settings that actually started a session, even if its rule is edited/deleted.
     std::unordered_map<std::wstring, RuntimeRule> activeRules_;
     std::map<std::wstring, std::vector<LaunchedProgramRecord>> startedPrograms_;

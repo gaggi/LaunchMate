@@ -57,15 +57,21 @@ inline void ConfigureListView(HWND list, std::initializer_list<std::pair<const w
     GetClientRect(list, &rect);
     const int availableWidth = std::max(100, static_cast<int>(rect.right - rect.left) - GetSystemMetrics(SM_CXVSCROLL) - 4);
     int totalWeight = 0;
-    for (const auto& column : columns) totalWeight += column.second;
+    int fixedWidth = 0;
+    for (const auto& column : columns)
+    {
+        if (column.second == 0) fixedWidth += 24; // compact icon column
+        else totalWeight += column.second;
+    }
 
     int index = 0;
     int usedWidth = 0;
+    int remainingWidth = std::max(0, availableWidth - fixedWidth);
+    int remainingWeight = totalWeight;
     for (const auto& column : columns)
     {
-        const int width = index + 1 == static_cast<int>(columns.size())
-            ? availableWidth - usedWidth
-            : (availableWidth * column.second) / totalWeight;
+        const int width = column.second == 0 ? 24 :
+            (remainingWeight == column.second ? remainingWidth : (remainingWidth * column.second) / remainingWeight);
         LVCOLUMNW item{};
         item.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
         item.pszText = const_cast<wchar_t*>(column.first);
@@ -73,15 +79,25 @@ inline void ConfigureListView(HWND list, std::initializer_list<std::pair<const w
         item.fmt = LVCFMT_LEFT;
         ListView_InsertColumn(list, index++, &item);
         usedWidth += width;
+        if (column.second != 0)
+        {
+            remainingWidth -= width;
+            remainingWeight -= column.second;
+        }
     }
 }
 
-inline int AddListViewRow(HWND list, std::initializer_list<std::wstring> values, LPARAM itemData = -1)
+inline int AddListViewRow(HWND list, std::initializer_list<std::wstring> values, LPARAM itemData = -1, int imageIndex = -1)
 {
     if (values.size() == 0) return -1;
     auto value = values.begin();
     LVITEMW item{};
     item.mask = LVIF_TEXT | LVIF_PARAM;
+    if (imageIndex >= 0)
+    {
+        item.mask |= LVIF_IMAGE;
+        item.iImage = imageIndex;
+    }
     item.iItem = ListView_GetItemCount(list);
     item.lParam = itemData >= 0 ? itemData : item.iItem;
     item.pszText = const_cast<wchar_t*>(value->c_str());

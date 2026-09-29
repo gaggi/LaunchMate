@@ -324,6 +324,11 @@ void ProcessMonitor::UpdateConfiguration(const AppConfiguration& configuration)
 
     std::scoped_lock lock(mutex_);
     runtimeConfiguration_ = std::move(prepared);
+    {
+        std::scoped_lock stateLock(processStatesMutex_);
+        cachedProcessStates_.clear();
+        cachedProcessStatesKnown_ = false;
+    }
     WakeWorker();
 }
 
@@ -400,8 +405,29 @@ bool ProcessMonitor::IsRunning() const noexcept
 
 std::vector<std::wstring> ProcessMonitor::GetProcessStates(const std::vector<WatchedProcessRule>& rules) const
 {
-    const auto snapshot = CaptureProcessSnapshot(false);
     std::vector<std::wstring> states;
+    states.reserve(rules.size());
+
+    // While monitoring, this is the exact snapshot that was used to decide
+    // whether start or exit actions must run.  Do not enumerate processes again.
+    if (running_.load())
+    {
+        std::scoped_lock lock(processStatesMutex_);
+        if (cachedProcessStatesKnown_)
+        {
+            for (const auto& rule : rules)
+            {
+                const auto key = NormalizeProcessKey(rule.processName.empty() ? rule.executablePath : rule.processName);
+                const auto state = cachedProcessStates_.find(key);
+                states.push_back(state != cachedProcessStates_.end() && state->second ? L"Running" : L"Stopped");
+            }
+            return states;
+        }
+    }
+
+    // Monitoring is off (or its first snapshot has not arrived yet), so status
+    // remains useful without starting a worker or executing any actions.
+    const auto snapshot = CaptureProcessSnapshot(false);
     for (const auto& rule : rules)
     {
         const auto key = NormalizeProcessKey(rule.processName.empty() ? rule.executablePath : rule.processName);
@@ -591,6 +617,8 @@ void ProcessMonitor::ApplySnapshot(const RuntimeConfiguration& configuration, co
     // A failed enumeration is not evidence that a watched program has exited.
     if (!snapshot.valid) return;
 
+    CacheProcessStates(configuration, snapshot);
+
     for (auto it = activeRules_.begin(); it != activeRules_.end();)
     {
         if (!IsProcessRunning(snapshot, it->first))
@@ -611,6 +639,18 @@ void ProcessMonitor::ApplySnapshot(const RuntimeConfiguration& configuration, co
             ExecuteStartActions(rule);
         }
     }
+}
+
+void ProcessMonitor::CacheProcessStates(const RuntimeConfiguration& configuration, const ProcessSnapshot& snapshot)
+{
+    std::unordered_map<std::wstring, bool> states;
+    states.reserve(configuration.watchedRules.size());
+    for (const auto& rule : configuration.watchedRules)
+        states.emplace(rule.processKey, IsProcessRunning(snapshot, rule.processKey));
+
+    std::scoped_lock lock(processStatesMutex_);
+    cachedProcessStates_ = std::move(states);
+    cachedProcessStatesKnown_ = true;
 }
 
 void ProcessMonitor::FinishRule(const RuntimeRule& rule)

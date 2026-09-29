@@ -1,4 +1,5 @@
 #include "App.h"
+#include "ConfigStore.h"
 #include "IRacingServices.h"
 #include "MainWindow.h"
 
@@ -43,6 +44,31 @@ namespace
         }
         LocalFree(argv);
         return result;
+    }
+
+    bool IsElevated()
+    {
+        HANDLE token = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+        TOKEN_ELEVATION elevation{};
+        DWORD bytes = 0;
+        const bool elevated = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &bytes) != FALSE &&
+            elevation.TokenIsElevated != FALSE;
+        CloseHandle(token);
+        return elevated;
+    }
+
+    bool RelaunchAsAdministrator()
+    {
+        wchar_t executable[MAX_PATH]{};
+        const DWORD length = GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)));
+        if (!length || length == std::size(executable)) return false;
+
+        SHELLEXECUTEINFOW info{sizeof(info)};
+        info.lpVerb = L"runas";
+        info.lpFile = executable;
+        info.nShow = SW_SHOWNORMAL;
+        return ShellExecuteExW(&info) != FALSE;
     }
 
     DWORD ParsePollIntervalArgument(const wchar_t* value, DWORD fallback)
@@ -124,6 +150,11 @@ int WINAPI wWinMain(HINSTANCE instanceHandle, HINSTANCE, PWSTR, int showCommand)
     if (serviceCommandResult >= 0) return serviceCommandResult;
 
     if (RestoreExistingInstance()) return 0;
+
+    // This uses the same Shell "runas" verb as Explorer's "Run as administrator".
+    // Do it before creating the mutex so the elevated replacement can become the primary instance.
+    if (!IsElevated() && ConfigStore().Load().startAsAdministrator)
+        return RelaunchAsAdministrator() ? 0 : 1;
 
     const auto instanceMutex = CreateMutexW(nullptr, FALSE, kSingleInstanceMutexName);
     if (!instanceMutex)

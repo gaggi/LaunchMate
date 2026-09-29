@@ -14,7 +14,9 @@ class MainWindow;
 struct AppLaunchOptions
 {
     DWORD pollIntervalMs{1000};
-    DWORD activePollIntervalMs{10000};
+    // Once a watched process is active, prompt exit handling matters more than
+    // minimizing a small filtered process snapshot.
+    DWORD activePollIntervalMs{1000};
     bool loggingEnabled{false};
 };
 

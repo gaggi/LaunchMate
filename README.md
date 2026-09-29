@@ -79,7 +79,7 @@ By default, LaunchMate checks the latest GitHub release on startup. That behavio
 Optional runtime flags:
 
 - `--poll-interval <value>` sets the idle polling interval in milliseconds
-- `--active-poll-interval <value>` sets the polling interval in milliseconds while at least one watched process is active
+- `--active-poll-interval <value>` sets the polling interval in milliseconds while at least one watched process is active (default: 1000 ms)
 - `--log` enables logging to `%APPDATA%\\LaunchMate\\launchmate.log`
 
 ## Autostart

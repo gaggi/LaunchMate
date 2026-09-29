@@ -18,6 +18,7 @@
 #include <objbase.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <shellapi.h>
 #include <cwchar>
 #include <cwctype>
 #include <filesystem>
@@ -906,6 +907,12 @@ namespace
         std::wstring icon;
     };
 
+    struct AppPathRecord
+    {
+        std::wstring executableName;
+        std::wstring executablePath;
+    };
+
     struct StartMenuProgram
     {
         std::wstring name;
@@ -927,6 +934,18 @@ namespace
         if (left.empty() || right.empty()) return 0;
         if (left == right) return 100;
         if (left.find(right) != std::wstring::npos || right.find(left) != std::wstring::npos) return 60;
+        // Product names and executable names often differ only by a vendor prefix
+        // (for example, "Microsoft Edge" versus "msedge.exe").
+        for (size_t leftStart = 0; leftStart < left.size(); ++leftStart)
+        {
+            for (size_t rightStart = 0; rightStart < right.size(); ++rightStart)
+            {
+                size_t length = 0;
+                while (leftStart + length < left.size() && rightStart + length < right.size() &&
+                    left[leftStart + length] == right[rightStart + length]) ++length;
+                if (length >= 4) return 60;
+            }
+        }
         size_t matching = 0;
         for (const wchar_t character : left)
             if (right.find(character) != std::wstring::npos) ++matching;
@@ -986,6 +1005,31 @@ namespace
         return ExpandEnvironmentPath(buffer);
     }
 
+    std::wstring ExtractExecutablePath(std::wstring value)
+    {
+        while (!value.empty() && std::iswspace(value.front())) value.erase(value.begin());
+        while (!value.empty() && std::iswspace(value.back())) value.pop_back();
+        if (value.empty()) return {};
+        if (value.front() == L'\"')
+        {
+            const auto quote = value.find(L'\"', 1);
+            value = quote == std::wstring::npos ? std::wstring{} : value.substr(1, quote - 1);
+        }
+        else if (const auto comma = value.find_last_of(L','); comma != std::wstring::npos)
+        {
+            const auto suffix = value.substr(comma + 1);
+            const bool iconIndex = !suffix.empty() && std::all_of(suffix.begin(), suffix.end(), [](wchar_t ch)
+            {
+                return std::iswspace(ch) || ch == L'-' || std::iswdigit(ch);
+            });
+            if (iconIndex) value.resize(comma);
+        }
+        std::error_code error;
+        const auto path = ExpandEnvironmentPath(value);
+        return _wcsicmp(std::filesystem::path(path).extension().c_str(), L".exe") == 0 &&
+            std::filesystem::is_regular_file(path, error) ? path : std::wstring{};
+    }
+
     std::vector<InstalledAppRecord> EnumerateInstalledApps()
     {
         std::vector<InstalledAppRecord> apps;
@@ -1016,6 +1060,35 @@ namespace
         return apps;
     }
 
+    std::vector<AppPathRecord> EnumerateAppPaths()
+    {
+        std::vector<AppPathRecord> paths;
+        constexpr const wchar_t* appPaths = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths";
+        for (const auto& [root, view] : {
+            std::pair{HKEY_CURRENT_USER, REGSAM(0)},
+            std::pair{HKEY_LOCAL_MACHINE, REGSAM(KEY_WOW64_64KEY)},
+            std::pair{HKEY_LOCAL_MACHINE, REGSAM(KEY_WOW64_32KEY)}})
+        {
+            HKEY parent{};
+            if (RegOpenKeyExW(root, appPaths, 0, KEY_ENUMERATE_SUB_KEYS | view, &parent) != ERROR_SUCCESS) continue;
+            for (DWORD index = 0;; ++index)
+            {
+                wchar_t name[512]{};
+                DWORD length = static_cast<DWORD>(std::size(name));
+                const LONG result = RegEnumKeyExW(parent, index, name, &length, nullptr, nullptr, nullptr, nullptr);
+                if (result == ERROR_NO_MORE_ITEMS) break;
+                if (result != ERROR_SUCCESS) continue;
+                HKEY item{};
+                if (RegOpenKeyExW(parent, name, 0, KEY_QUERY_VALUE | view, &item) != ERROR_SUCCESS) continue;
+                const auto path = ExtractExecutablePath(ReadRegistryText(item, nullptr));
+                RegCloseKey(item);
+                if (!path.empty()) paths.push_back({name, path});
+            }
+            RegCloseKey(parent);
+        }
+        return paths;
+    }
+
     std::wstring InstalledExecutablePath(const std::vector<InstalledAppRecord>& apps,
         const DetectedProcessCandidate& candidate)
     {
@@ -1028,14 +1101,7 @@ namespace
                 const auto path = std::filesystem::path(app.location) / candidate.executable;
                 if (std::filesystem::is_regular_file(path, error)) return path.wstring();
             }
-            std::wstring icon = app.icon;
-            if (!icon.empty() && icon.front() == L'"')
-            {
-                const auto end = icon.find(L'"', 1);
-                if (end != std::wstring::npos) icon = icon.substr(1, end - 1);
-            }
-            else if (const auto comma = icon.rfind(L','); comma != std::wstring::npos)
-                icon.resize(comma);
+            const auto icon = ExtractExecutablePath(app.icon);
             if (_wcsicmp(std::filesystem::path(icon).filename().c_str(), candidate.executable) == 0 &&
                 std::filesystem::is_regular_file(icon, error)) return icon;
         }
@@ -1043,33 +1109,33 @@ namespace
     }
 
     std::wstring InstalledAppExecutablePath(const InstalledAppRecord& app,
-        const std::vector<StartMenuProgram>& startMenuPrograms)
+        const std::vector<StartMenuProgram>& startMenuPrograms, const std::vector<AppPathRecord>& appPaths)
     {
-        std::wstring icon = app.icon;
-        if (!icon.empty() && icon.front() == L'"')
-        {
-            const auto end = icon.find(L'"', 1);
-            if (end != std::wstring::npos) icon = icon.substr(1, end - 1);
-            else icon.clear();
-        }
-        else if (const auto comma = icon.rfind(L','); comma != std::wstring::npos)
-        {
-            icon.resize(comma);
-        }
+        const auto icon = ExtractExecutablePath(app.icon);
         std::error_code error;
-        if (!icon.empty() && _wcsicmp(std::filesystem::path(icon).extension().c_str(), L".exe") == 0 &&
-            std::filesystem::is_regular_file(icon, error)) return icon;
+        if (!icon.empty()) return icon;
 
         int bestScore = 0;
         std::wstring bestPath;
         for (const auto& program : startMenuPrograms)
         {
-            const int score = ProgramNameScore(program.name, app.name);
+            int score = ProgramNameScore(program.name, app.name);
+            if (!app.location.empty() && ToLowerCopy(program.path).starts_with(ToLowerCopy(app.location))) score += 50;
             if (score > bestScore) { bestScore = score; bestPath = program.path; }
         }
         if (bestScore >= 60) return bestPath;
 
+        for (const auto& appPath : appPaths)
+        {
+            int score = ProgramNameScore(appPath.executableName, app.name);
+            if (!app.location.empty() && ToLowerCopy(appPath.executablePath).starts_with(ToLowerCopy(app.location))) score += 50;
+            if (score > bestScore) { bestScore = score; bestPath = appPath.executablePath; }
+        }
+        if (bestScore >= 60) return bestPath;
+
         if (app.location.empty() || !std::filesystem::is_directory(app.location, error)) return {};
+        size_t usableExecutables = 0;
+        std::wstring onlyExecutable;
         for (std::filesystem::recursive_directory_iterator it(app.location,
                 std::filesystem::directory_options::skip_permission_denied, error), end;
             !error && it != end; it.increment(error))
@@ -1080,10 +1146,13 @@ namespace
             int score = ProgramNameScore(stem, app.name);
             const auto lower = ToLowerCopy(stem);
             if (lower.find(L"unins") != std::wstring::npos || lower.find(L"uninstall") != std::wstring::npos ||
-                lower.find(L"updat") != std::wstring::npos || lower.find(L"setup") != std::wstring::npos) score -= 100;
+                lower.find(L"updat") != std::wstring::npos || lower.find(L"setup") != std::wstring::npos) continue;
+            ++usableExecutables;
+            onlyExecutable = it->path().wstring();
             if (score > bestScore) { bestScore = score; bestPath = it->path().wstring(); }
         }
-        return bestScore >= 25 ? bestPath : std::wstring{};
+        if (bestScore >= 25) return bestPath;
+        return usableExecutables == 1 ? onlyExecutable : std::wstring{};
     }
 
     bool TryAppendCatalogProgram(
@@ -1131,6 +1200,7 @@ MainWindow::MainWindow(App& app)
 
 MainWindow::~MainWindow()
 {
+    if (programIconList_) ImageList_Destroy(programIconList_);
     if (titleFont_) DeleteObject(titleFont_);
     if (uiFont_) DeleteObject(uiFont_);
 }
@@ -1538,7 +1608,8 @@ void MainWindow::CreateControls()
         kGlobalListX, kGlobalListY, kGlobalListWidth, kGlobalListHeight, windowHandle_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdCatalogList)), nullptr, nullptr);
     SendMessageW(catalogListHandle_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
     InitializeReportListView(catalogListHandle_);
-    ConfigureListView(catalogListHandle_, {{L"Name", 2}, {L"Path", 5}});
+    InitializeProgramIcons();
+    ConfigureListView(catalogListHandle_, {{L"", 0}, {L"Name", 2}, {L"Path", 5}});
     HostControlsInTab(windowHandle_, sourceTabsHandle_, {
         detectSourceButtonHandle_,
         addCatalogButtonHandle_,
@@ -1554,7 +1625,7 @@ void MainWindow::CreateControls()
         kWatchedListX, kWatchedListY, kWatchedListWidth, kWatchedListHeight, windowHandle_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdWatchedList)), nullptr, nullptr);
     SendMessageW(watchedListHandle_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
     InitializeReportListView(watchedListHandle_);
-    ConfigureListView(watchedListHandle_, {{L"Status", 2}, {L"Name", 3}, {L"Path", 4}});
+    ConfigureListView(watchedListHandle_, {{L"", 0}, {L"Status", 2}, {L"Name", 3}, {L"Path", 4}});
 
     CreateLabel(windowHandle_, L"Actions", 620, 328, 240, 22, uiFont_);
     CreateButtonControl(windowHandle_, IdTransferCatalogProgram, L">", transferButtonX, transferButtonY, kTransferButtonWidth, kTransferButtonHeight, uiFont_);
@@ -1567,7 +1638,8 @@ void MainWindow::CreateControls()
         kRuleListX, kRuleListY, kRuleListWidth, kRuleListHeight, windowHandle_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdRuleProgramsList)), nullptr, nullptr);
     SendMessageW(ruleProgramsListHandle_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
     InitializeReportListView(ruleProgramsListHandle_);
-    ConfigureListView(ruleProgramsListHandle_, {{L"Type", 2}, {L"Name", 3}, {L"Details", 6}});
+    ConfigureListView(ruleProgramsListHandle_, {{L"", 0}, {L"Type", 2}, {L"Name", 3}, {L"Details", 6}});
+    InitializeProgramIcons();
 
     CreateLabel(windowHandle_, L"Settings", 24, 560, 180, 22, uiFont_);
     minimizeToTrayHandle_ = CreateCheckbox(windowHandle_, IdSettingsMinimizeToTray, L"Minimize to tray", 24, 594, 320, 24, uiFont_);
@@ -1576,9 +1648,44 @@ void MainWindow::CreateControls()
     startWithWindowsHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartWithWindows, L"Start with Windows", 360, 594, 320, 24, uiFont_);
     startMonitoringHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartMonitoringOnLaunch, L"Start monitoring on launch", 360, 624, 320, 24, uiFont_);
     checkForUpdatesHandle_ = CreateCheckbox(windowHandle_, IdSettingsCheckForUpdatesOnStartup, L"Check for updates on startup", 360, 654, 360, 24, uiFont_);
+    startAsAdministratorHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartAsAdministrator, L"Start as Administrator", 720, 594, 260, 24, uiFont_);
     CreateButtonControl(windowHandle_, IdCheckForUpdates, L"Check for updates", 840, 644, 190, 34, uiFont_);
     CreateButtonControl(windowHandle_, IdMpoSettings, L"MPO settings...", 720, 644, 110, 34, uiFont_);
     CreateButtonControl(windowHandle_, IdSaveConfig, L"Save", 1040, 644, 140, 34, uiFont_);
+}
+
+void MainWindow::InitializeProgramIcons()
+{
+    if (!programIconList_)
+    {
+        programIconList_ = ImageList_Create(16, 16, ILC_COLOR32 | ILC_MASK, 32, 32);
+        if (!programIconList_) return;
+        defaultProgramIconIndex_ = ProgramIconIndex(L"");
+    }
+    for (const HWND list : {catalogListHandle_, watchedListHandle_, ruleProgramsListHandle_})
+        if (list) ListView_SetImageList(list, programIconList_, LVSIL_SMALL);
+}
+
+int MainWindow::ProgramIconIndex(const std::wstring& executablePath)
+{
+    if (!programIconList_) return -1;
+    const std::wstring key = executablePath.empty() ? L"<default>" : ToLowerCopy(executablePath);
+    if (const auto existing = programIconIndexes_.find(key); existing != programIconIndexes_.end()) return existing->second;
+
+    SHFILEINFOW info{};
+    const DWORD_PTR result = executablePath.empty()
+        ? SHGetFileInfoW(L".exe", FILE_ATTRIBUTE_NORMAL, &info, sizeof(info),
+            SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES)
+        : SHGetFileInfoW(executablePath.c_str(), FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), SHGFI_ICON | SHGFI_SMALLICON);
+    int index = defaultProgramIconIndex_;
+    if (result != 0 && info.hIcon)
+    {
+        index = ImageList_AddIcon(programIconList_, info.hIcon);
+        DestroyIcon(info.hIcon);
+    }
+    if (index < 0) index = 0;
+    programIconIndexes_.emplace(key, index);
+    return index;
 }
 
 void MainWindow::PopulateLists()
@@ -1590,10 +1697,11 @@ void MainWindow::PopulateLists()
     {
         const auto& rule = app_.Configuration().watchedProcesses[index];
         AddListViewRow(watchedListHandle_, {
+            L"",
             L"Unknown",
             rule.displayName,
             rule.executablePath.empty() ? L"Path unavailable" : rule.executablePath},
-            static_cast<LPARAM>(index));
+            static_cast<LPARAM>(index), ProgramIconIndex(rule.executablePath));
     }
 
     RefreshProcessStates();
@@ -1615,7 +1723,7 @@ void MainWindow::RefreshProcessStates()
         const auto index = static_cast<size_t>(item.lParam);
         auto text = states[index];
         if (!rules[index].enabled) text += L" (disabled)";
-        ListView_SetItemText(watchedListHandle_, row, 0, text.data());
+        ListView_SetItemText(watchedListHandle_, row, 1, text.data());
     }
 }
 
@@ -1671,6 +1779,7 @@ void MainWindow::StartSourceRefresh()
         {
             std::unordered_set<std::wstring> seen;
             const auto startMenuPrograms = EnumerateStartMenuPrograms(cancelled);
+            const auto appPaths = EnumerateAppPaths();
             if (cancelled) return result;
             for (const auto& program : catalog)
             {
@@ -1690,7 +1799,8 @@ void MainWindow::StartSourceRefresh()
             for (const auto& app : EnumerateInstalledApps())
             {
                 if (cancelled) return result;
-                TryAppendCatalogProgram(result.programs, seen, app.name, InstalledAppExecutablePath(app, startMenuPrograms));
+                TryAppendCatalogProgram(result.programs, seen, app.name,
+                    InstalledAppExecutablePath(app, startMenuPrograms, appPaths));
             }
         }
         return result;
@@ -1752,7 +1862,9 @@ void MainWindow::PopulateCatalogPrograms()
             continue;
         }
 
-        AddListViewRow(catalogListHandle_, {program.displayName, program.filePath}, static_cast<LPARAM>(index));
+        AddListViewRow(catalogListHandle_, {L"", program.displayName,
+            program.filePath.empty() ? L"Path unavailable" : program.filePath},
+            static_cast<LPARAM>(index), ProgramIconIndex(program.filePath));
     }
 }
 
@@ -1776,9 +1888,10 @@ void MainWindow::PopulateRulePrograms()
         details += L"Start delay: " + std::to_wstring(program.waitTimeMilliseconds) +
             L" ms; Stop delay: " + std::to_wstring(program.closeDelayMilliseconds) + L" ms";
         AddListViewRow(ruleProgramsListHandle_, {
+            L"",
             L"Start",
             program.displayName.empty() ? FileNameWithoutExtension(program.filePath) : program.displayName,
-            details});
+            details}, -1, ProgramIconIndex(program.filePath));
     }
     for (const auto& action : rule.processesToStop)
     {
@@ -1788,16 +1901,18 @@ void MainWindow::PopulateRulePrograms()
             details += L"; Restart after exit: " + std::to_wstring(action.restartDelayMilliseconds) + L" ms";
         }
         AddListViewRow(ruleProgramsListHandle_, {
+            L"",
             L"Stop",
             action.displayName.empty() ? action.processName : action.displayName,
-            details});
+            details}, -1, ProgramIconIndex(action.executablePath));
     }
     for (const auto& action : rule.homeAssistantActions)
     {
         AddListViewRow(ruleProgramsListHandle_, {
+            L"",
             L"Home Assistant",
             action.displayName,
-            L"Delay: " + std::to_wstring(action.waitTimeMilliseconds) + L" ms"});
+            L"Delay: " + std::to_wstring(action.waitTimeMilliseconds) + L" ms"}, -1, ProgramIconIndex(L""));
     }
     if (!rule.monitorPowerSetupName.empty())
     {
@@ -1807,7 +1922,7 @@ void MainWindow::PopulateRulePrograms()
             details += L"; Restore after exit: " +
                 std::to_wstring(rule.restoreMonitorPowerSetupDelayMilliseconds) + L" ms";
         }
-        AddListViewRow(ruleProgramsListHandle_, {L"Monitor config", rule.monitorPowerSetupName, details});
+        AddListViewRow(ruleProgramsListHandle_, {L"", L"Monitor config", rule.monitorPowerSetupName, details}, -1, ProgramIconIndex(L""));
     }
     if (!rule.powerSchemeGuid.empty())
     {
@@ -1818,11 +1933,11 @@ void MainWindow::PopulateRulePrograms()
             StringFromGUID2(scheme.id, guid, static_cast<int>(std::size(guid)));
             if (_wcsicmp(guid, rule.powerSchemeGuid.c_str()) == 0) { name = scheme.name; break; }
         }
-        AddListViewRow(ruleProgramsListHandle_, {L"Power Plan", name, L"Restore previous plan after exit"});
+        AddListViewRow(ruleProgramsListHandle_, {L"", L"Power Plan", name, L"Restore previous plan after exit"}, -1, ProgramIconIndex(L""));
     }
     if (!rule.servicesToStop.empty())
     {
-        AddListViewRow(ruleProgramsListHandle_, {L"Services", std::to_wstring(rule.servicesToStop.size()) + L" selected", L"Restore original state after exit"});
+        AddListViewRow(ruleProgramsListHandle_, {L"", L"Services", std::to_wstring(rule.servicesToStop.size()) + L" selected", L"Restore original state after exit"}, -1, ProgramIconIndex(L""));
     }
 }
 
@@ -1994,11 +2109,12 @@ void MainWindow::PopulateRunningProcesses()
         }
 
         AddListViewRow(catalogListHandle_, {
+            L"",
             process.displayName,
             process.executablePath.empty() ? L"Path unavailable" : process.executablePath,
             FormatCpuUsage(process.cpuUsagePercent, process.hasCpuUsage),
             FormatMemoryUsage(process.memoryUsageBytes, process.hasMemoryUsage)},
-            static_cast<LPARAM>(index));
+            static_cast<LPARAM>(index), ProgramIconIndex(process.executablePath));
     }
 }
 
@@ -2101,9 +2217,11 @@ void MainWindow::PopulateDetectedProcesses()
         const auto& process = detectedProcesses_[index];
         if (!ContainsInsensitive(process.displayName, searchText) &&
             !ContainsInsensitive(process.executablePath, searchText)) continue;
-        AddListViewRow(catalogListHandle_, {process.displayName,
+        AddListViewRow(catalogListHandle_, {L"",
+            process.displayName,
             process.executablePath.empty() ? L"Path unavailable" : process.executablePath,
-            process.running ? L"Running" : L"Installed, inactive", process.effect}, static_cast<LPARAM>(index));
+            process.running ? L"Running" : L"Installed, inactive", process.effect},
+            static_cast<LPARAM>(index), ProgramIconIndex(process.executablePath));
     }
 }
 
@@ -2120,19 +2238,19 @@ void MainWindow::SwitchSourceTab()
 
     if (runningProcesses)
     {
-        ConfigureListView(catalogListHandle_, {{L"Name", 2}, {L"Path", 5}, {L"CPU", 1}, {L"Memory", 2}});
+        ConfigureListView(catalogListHandle_, {{L"", 0}, {L"Name", 2}, {L"Path", 5}, {L"CPU", 1}, {L"Memory", 2}});
         PopulateRunningProcesses();
         StartSourceRefresh();
     }
     else if (sourceTabIndex_ == 2)
     {
-        ConfigureListView(catalogListHandle_, {{L"Name", 2}, {L"Path", 4}, {L"Status", 2}, {L"Potential effect", 3}});
+        ConfigureListView(catalogListHandle_, {{L"", 0}, {L"Name", 2}, {L"Path", 4}, {L"Status", 2}, {L"Potential effect", 3}});
         PopulateDetectedProcesses();
         StartSourceRefresh();
     }
     else
     {
-        ConfigureListView(catalogListHandle_, {{L"Name", 2}, {L"Path", 5}});
+        ConfigureListView(catalogListHandle_, {{L"", 0}, {L"Name", 2}, {L"Path", 5}});
         PopulateCatalogPrograms();
     }
     SyncSourceRefreshUi();
@@ -2750,6 +2868,7 @@ void MainWindow::UpdateSettingsFromUi()
     config.minimizeToTray = SendMessageW(minimizeToTrayHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
     config.closeToTray = SendMessageW(closeToTrayHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
     config.startWithWindows = SendMessageW(startWithWindowsHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    config.startAsAdministrator = SendMessageW(startAsAdministratorHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
     config.startInTray = SendMessageW(startInTrayHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
     config.startMonitoringOnLaunch = SendMessageW(startMonitoringHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
     config.checkForUpdatesOnStartup = SendMessageW(checkForUpdatesHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -2761,6 +2880,7 @@ void MainWindow::UpdateSettingsUi()
     SendMessageW(minimizeToTrayHandle_, BM_SETCHECK, config.minimizeToTray ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(closeToTrayHandle_, BM_SETCHECK, config.closeToTray ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(startWithWindowsHandle_, BM_SETCHECK, config.startWithWindows ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(startAsAdministratorHandle_, BM_SETCHECK, config.startAsAdministrator ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(startInTrayHandle_, BM_SETCHECK, config.startInTray ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(startMonitoringHandle_, BM_SETCHECK, config.startMonitoringOnLaunch ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(checkForUpdatesHandle_, BM_SETCHECK, config.checkForUpdatesOnStartup ? BST_CHECKED : BST_UNCHECKED, 0);

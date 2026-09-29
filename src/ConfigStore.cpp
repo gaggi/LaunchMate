@@ -113,6 +113,7 @@ namespace
         Object object;
         object["DisplayName"] = ToUtf8(program.displayName);
         object["FilePath"] = ToUtf8(program.filePath);
+        object["ManuallyAdded"] = program.manuallyAdded;
         return object;
     }
 
@@ -121,6 +122,7 @@ namespace
         CatalogProgram program;
         program.displayName = ReadWideString(object, "DisplayName");
         program.filePath = ReadWideString(object, "FilePath");
+        program.manuallyAdded = ReadBool(object, "ManuallyAdded", false);
         return program;
     }
 

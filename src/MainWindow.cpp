@@ -934,22 +934,7 @@ namespace
         if (left.empty() || right.empty()) return 0;
         if (left == right) return 100;
         if (left.find(right) != std::wstring::npos || right.find(left) != std::wstring::npos) return 60;
-        // Product names and executable names often differ only by a vendor prefix
-        // (for example, "Microsoft Edge" versus "msedge.exe").
-        for (size_t leftStart = 0; leftStart < left.size(); ++leftStart)
-        {
-            for (size_t rightStart = 0; rightStart < right.size(); ++rightStart)
-            {
-                size_t length = 0;
-                while (leftStart + length < left.size() && rightStart + length < right.size() &&
-                    left[leftStart + length] == right[rightStart + length]) ++length;
-                if (length >= 4) return 60;
-            }
-        }
-        size_t matching = 0;
-        for (const wchar_t character : left)
-            if (right.find(character) != std::wstring::npos) ++matching;
-        return matching * 2 >= std::min(left.size(), right.size()) ? 25 : 0;
+        return 0;
     }
 
     std::wstring ResolveShortcutTarget(const std::filesystem::path& shortcut)
@@ -1113,7 +1098,8 @@ namespace
     {
         const auto icon = ExtractExecutablePath(app.icon);
         std::error_code error;
-        if (!icon.empty()) return icon;
+        if (!icon.empty() && ProgramNameScore(std::filesystem::path(icon).stem().wstring(), app.name) >= 60)
+            return icon;
 
         int bestScore = 0;
         std::wstring bestPath;
@@ -1134,8 +1120,6 @@ namespace
         if (bestScore >= 60) return bestPath;
 
         if (app.location.empty() || !std::filesystem::is_directory(app.location, error)) return {};
-        size_t usableExecutables = 0;
-        std::wstring onlyExecutable;
         for (std::filesystem::recursive_directory_iterator it(app.location,
                 std::filesystem::directory_options::skip_permission_denied, error), end;
             !error && it != end; it.increment(error))
@@ -1147,21 +1131,19 @@ namespace
             const auto lower = ToLowerCopy(stem);
             if (lower.find(L"unins") != std::wstring::npos || lower.find(L"uninstall") != std::wstring::npos ||
                 lower.find(L"updat") != std::wstring::npos || lower.find(L"setup") != std::wstring::npos) continue;
-            ++usableExecutables;
-            onlyExecutable = it->path().wstring();
             if (score > bestScore) { bestScore = score; bestPath = it->path().wstring(); }
         }
-        if (bestScore >= 25) return bestPath;
-        return usableExecutables == 1 ? onlyExecutable : std::wstring{};
+        return bestScore >= 60 ? bestPath : std::wstring{};
     }
 
     bool TryAppendCatalogProgram(
         std::vector<CatalogProgram>& programs,
         std::unordered_set<std::wstring>& seenPaths,
         const std::wstring& displayName,
-        const std::wstring& filePath)
+        const std::wstring& filePath,
+        bool manuallyAdded = false)
     {
-        if (displayName.empty())
+        if (displayName.empty() || filePath.empty())
         {
             return false;
         }
@@ -1174,7 +1156,7 @@ namespace
             return false;
         }
 
-        programs.push_back({displayName, filePath});
+        programs.push_back({displayName, filePath, manuallyAdded});
         return true;
     }
 
@@ -1602,7 +1584,7 @@ void MainWindow::CreateControls()
     TabCtrl_InsertItem(sourceTabsHandle_, 1, &sourceTab);
     sourceTab.pszText = const_cast<wchar_t*>(L"Detected processes");
     TabCtrl_InsertItem(sourceTabsHandle_, 2, &sourceTab);
-    detectSourceButtonHandle_ = CreateButtonControl(windowHandle_, IdDetectInstalledApps, L"Detect installed apps", kGlobalListX, 52, 150, 28, uiFont_);
+    detectSourceButtonHandle_ = CreateButtonControl(windowHandle_, IdDetectInstalledApps, L"Refresh installed apps", kGlobalListX, 52, 150, 28, uiFont_);
     addCatalogButtonHandle_ = CreateButtonControl(windowHandle_, IdAddCatalogProgram, L"+", globalButtonsRight - (kActionButtonWidth * 2) - kActionButtonGap, 52, kActionButtonWidth, 28, uiFont_);
     removeCatalogButtonHandle_ = CreateButtonControl(windowHandle_, IdRemoveCatalogProgram, L"-", globalButtonsRight - kActionButtonWidth, 52, kActionButtonWidth, 28, uiFont_);
     catalogSearchHandle_ = CreateEditControl(windowHandle_, IdCatalogSearch, L"", kGlobalListX, kCatalogSearchY, kGlobalListWidth, kCatalogSearchHeight, uiFont_);
@@ -1754,7 +1736,7 @@ void MainWindow::SyncSourceRefreshUi()
 {
     const bool busy = sourceTasks_[sourceTabIndex_].Running();
     SetWindowTextW(detectSourceButtonHandle_, busy ? L"Loading..." :
-        sourceTabIndex_ == 0 ? L"Detect installed apps" : L"Refresh processes");
+        sourceTabIndex_ == 0 ? L"Refresh installed apps" : L"Refresh processes");
     EnableWindow(detectSourceButtonHandle_, !busy);
     EnableWindow(addCatalogButtonHandle_, sourceTabIndex_ == 0 && !sourceTasks_[0].Running());
     EnableWindow(removeCatalogButtonHandle_, sourceTabIndex_ == 0 && !sourceTasks_[0].Running());
@@ -1790,8 +1772,8 @@ void MainWindow::StartSourceRefresh()
             {
                 if (cancelled) return result;
                 std::error_code error;
-                if (!program.filePath.empty() && std::filesystem::exists(program.filePath, error))
-                    TryAppendCatalogProgram(result.programs, seen, program.displayName, program.filePath);
+                if (program.manuallyAdded && !program.filePath.empty() && std::filesystem::exists(program.filePath, error))
+                    TryAppendCatalogProgram(result.programs, seen, program.displayName, program.filePath, true);
             }
             for (const auto& candidate : kCatalogPathCandidates)
             {
@@ -1862,13 +1844,13 @@ void MainWindow::PopulateCatalogPrograms()
     for (size_t index = 0; index < detectedPrograms_.size(); ++index)
     {
         const auto& program = detectedPrograms_[index];
+        if (program.filePath.empty()) continue;
         if (!ContainsInsensitive(program.displayName, searchText) && !ContainsInsensitive(program.filePath, searchText))
         {
             continue;
         }
 
-        AddListViewRow(catalogListHandle_, {L"", program.displayName,
-            program.filePath.empty() ? L"Path unavailable" : program.filePath},
+        AddListViewRow(catalogListHandle_, {L"", program.displayName, program.filePath},
             static_cast<LPARAM>(index), ProgramIconIndex(program.filePath));
     }
 }
@@ -2234,7 +2216,7 @@ void MainWindow::SwitchSourceTab()
 {
     sourceTabIndex_ = TabCtrl_GetCurSel(sourceTabsHandle_);
     const bool runningProcesses = sourceTabIndex_ == 1;
-    SetWindowTextW(detectSourceButtonHandle_, sourceTabIndex_ == 0 ? L"Detect installed apps" : L"Refresh processes");
+    SetWindowTextW(detectSourceButtonHandle_, sourceTabIndex_ == 0 ? L"Refresh installed apps" : L"Refresh processes");
     SetWindowTextW(GetDlgItem(windowHandle_, IdTransferCatalogProgram), L">");
     EnableWindow(addCatalogButtonHandle_, sourceTabIndex_ == 0);
     EnableWindow(removeCatalogButtonHandle_, sourceTabIndex_ == 0);
@@ -2737,7 +2719,7 @@ void MainWindow::AddCustomCatalogProgram()
         return;
     }
 
-    app_.Configuration().catalogPrograms.push_back({program.displayName, program.filePath});
+    app_.Configuration().catalogPrograms.push_back({program.displayName, program.filePath, true});
     SyncCatalogProgramsFromConfiguration();
     PopulateCatalogPrograms();
     SaveConfiguration();

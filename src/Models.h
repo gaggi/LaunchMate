@@ -37,6 +37,7 @@ struct CatalogProgram
 {
     std::wstring displayName;
     std::wstring filePath;
+    bool manuallyAdded{false};
 };
 
 struct MonitorPowerSetup

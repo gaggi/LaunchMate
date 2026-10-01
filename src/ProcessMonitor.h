@@ -39,6 +39,7 @@ private:
         std::vector<LaunchProgram> programsToLaunch;
         std::vector<ProcessStopAction> processesToStop;
         std::vector<HomeAssistantAction> homeAssistantActions;
+        std::vector<ProcessPerformanceAction> processPerformanceActions;
         MonitorPowerSetup monitorPowerSetup;
         bool hasMonitorPowerSetup{false};
         int monitorPowerSetupDelayMilliseconds{0};
@@ -72,15 +73,24 @@ private:
         std::unordered_map<DWORD, std::vector<DWORD>> childrenByParent;
     };
 
+    struct PerformanceTargetState
+    {
+        unsigned appliedSettings{};
+        std::wstring lastFailure;
+        bool successReported{};
+    };
+
     void WorkerLoop();
     void CheckRules();
     void ApplySnapshot(const RuntimeConfiguration& configuration, const ProcessSnapshot& snapshot);
     void ProcessEtwEvents();
+    void RefreshEtwProcessKeys(const RuntimeConfiguration& configuration);
     void CacheProcessState(const std::wstring& processKey, bool running);
     void CacheProcessStates(const RuntimeConfiguration& configuration, const ProcessSnapshot& snapshot);
     void FinishRule(const RuntimeRule& rule);
     void StartProgramsForRule(const RuntimeRule& rule);
     void ExecuteStartActions(const RuntimeRule& rule);
+    void ApplyPerformanceActions(const RuntimeRule& rule, const ProcessSnapshot& snapshot);
     void RestoreMonitorSetupForRule(const RuntimeRule& rule, ULONGLONG exitTick);
     void ExecuteExitActions(const RuntimeRule& rule, ULONGLONG exitTick);
     void StopProgramsForRule(const RuntimeRule& rule);
@@ -123,5 +133,6 @@ private:
     std::map<std::wstring, std::vector<ProcessStopAction>> stoppedProcesses_;
     std::map<std::wstring, MonitorPowerSetup> previousMonitorSetups_;
     std::map<std::wstring, GUID> previousPowerSchemes_;
+    std::map<std::wstring, std::unordered_map<size_t, std::unordered_map<DWORD, PerformanceTargetState>>> performanceTargetStates_;
     std::wstring serviceOwnerKey_;
 };

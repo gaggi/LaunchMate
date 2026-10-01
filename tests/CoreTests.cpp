@@ -12,6 +12,8 @@
 #include <iostream>
 #include <limits>
 #include <locale>
+#include <condition_variable>
+#include <mutex>
 #include <stdexcept>
 
 namespace
@@ -43,6 +45,168 @@ bool MonitorPowerController::ApplySetup(const MonitorPowerSetup&, const std::fun
 
 struct ProcessMonitorTestAccess
 {
+    static void TestPerformanceSettings()
+    {
+        HANDLE currentToken = nullptr;
+        TOKEN_ELEVATION currentElevation{};
+        DWORD currentTokenSize = 0;
+        const bool tokenElevationKnown = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &currentToken) &&
+            GetTokenInformation(currentToken, TokenElevation, &currentElevation, sizeof(currentElevation), &currentTokenSize) != FALSE;
+        if (currentToken) CloseHandle(currentToken);
+        wchar_t executable[MAX_PATH]{};
+        Require(GetModuleFileNameW(nullptr, executable, MAX_PATH) != 0, "Test executable unavailable");
+        std::wstring command = L"\"" + std::wstring(executable) + L"\" --idle-child";
+        STARTUPINFOW startup{sizeof(startup)};
+        PROCESS_INFORMATION child{};
+        Require(CreateProcessW(executable, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+            nullptr, nullptr, &startup, &child) != FALSE, "Could not create performance test child");
+        CloseHandle(child.hThread);
+        struct ChildCleanup
+        {
+            HANDLE process;
+            ~ChildCleanup()
+            {
+                if (WaitForSingleObject(process, 0) == WAIT_TIMEOUT) TerminateProcess(process, 0);
+                WaitForSingleObject(process, 2000);
+                CloseHandle(process);
+            }
+        } cleanup{child.hProcess};
+
+        std::wstring lastStatus;
+        ProcessMonitor monitor([&](const auto& status) { lastStatus = status; });
+        ProcessMonitor::RuntimeRule rule;
+        rule.processKey = L"performance-watch-test.exe";
+        ProcessPerformanceAction action;
+        action.processName = std::filesystem::path(executable).filename().wstring();
+        action.cpuPriorityClass = BELOW_NORMAL_PRIORITY_CLASS;
+        action.ioPriority = 3; // High exercises the privilege path in both token modes.
+        action.memoryPriority = 6; // Invalid on purpose so we can verify per-setting retry.
+        action.affinityMask = 1;
+        rule.processPerformanceActions.push_back(action);
+        ProcessMonitor::ProcessSnapshot snapshot;
+        snapshot.valid = true;
+        auto processKey = action.processName;
+        std::transform(processKey.begin(), processKey.end(), processKey.begin(), towlower);
+        snapshot.processIdsByName[processKey] = {child.dwProcessId};
+        monitor.ApplyPerformanceActions(rule, snapshot);
+        const auto& firstState = monitor.performanceTargetStates_.at(rule.processKey).at(0).at(child.dwProcessId);
+        Require(!firstState.successReported && firstState.appliedSettings != 0,
+            "Partial performance application was not retained for retry");
+        const std::wstring highIoStatus = lastStatus;
+        Require(highIoStatus.find(L"Memory priority 6") != std::wstring::npos,
+            "Invalid memory priority failure was not reported");
+
+        rule.processPerformanceActions[0].memoryPriority = 1;
+        rule.processPerformanceActions[0].ioPriority = 1;
+        monitor.ApplyPerformanceActions(rule, snapshot);
+        const auto& finalState = monitor.performanceTargetStates_.at(rule.processKey).at(0).at(child.dwProcessId);
+        Require(finalState.successReported, "Failed performance setting was not retried");
+
+        HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, child.dwProcessId);
+        Require(process != nullptr, "Could not inspect performance test child");
+        Require(GetPriorityClass(process) == BELOW_NORMAL_PRIORITY_CLASS, "CPU priority was not applied");
+        MEMORY_PRIORITY_INFORMATION memory{};
+        Require(GetProcessInformation(process, ProcessMemoryPriority, &memory, sizeof(memory)) != FALSE && memory.MemoryPriority == 1,
+            "Memory priority was not applied");
+        DWORD_PTR processMask = 0, systemMask = 0;
+        Require(GetProcessAffinityMask(process, &processMask, &systemMask) != FALSE && processMask == 1,
+            "CPU affinity was not applied");
+        CloseHandle(process);
+        std::cout << "Performance settings and retry passed; test token elevated: "
+            << (tokenElevationKnown && currentElevation.TokenIsElevated ? "yes" : "no/unknown")
+            << "; initial I/O High result: " << ToUtf8(highIoStatus) << "\n";
+    }
+
+    static void TestWatchLifecycle(bool useEtw)
+    {
+        wchar_t executable[32768]{};
+        Require(GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable))) != 0,
+            "Test executable unavailable");
+        const auto directory = std::filesystem::temp_directory_path() /
+            (L"LaunchMate-watch-lifecycle-" + std::to_wstring(GetCurrentProcessId()) + (useEtw ? L"-etw" : L"-poll"));
+        std::filesystem::create_directory(directory);
+        const auto childPath = directory / L"LaunchMateLifecycleChild.exe";
+        std::filesystem::copy_file(executable, childPath, std::filesystem::copy_options::overwrite_existing);
+        struct FileCleanup
+        {
+            std::filesystem::path file, directory;
+            ~FileCleanup() { std::error_code error; std::filesystem::remove(file, error); std::filesystem::remove(directory, error); }
+        } fileCleanup{childPath, directory};
+
+        std::mutex statusMutex;
+        std::condition_variable statusChanged;
+        std::vector<std::wstring> statuses;
+        ProcessMonitor monitor([&](const std::wstring& status)
+        {
+            {
+                std::scoped_lock lock(statusMutex);
+                statuses.push_back(status);
+            }
+            statusChanged.notify_all();
+        });
+        monitor.SetPollInterval(100);
+        monitor.SetActivePollInterval(100);
+        AppConfiguration config;
+        config.useEtw = useEtw;
+        WatchedProcessRule rule;
+        rule.displayName = L"Lifecycle test";
+        rule.processName = childPath.filename().wstring();
+        rule.executablePath = childPath.wstring();
+        config.watchedProcesses.push_back(rule);
+        monitor.UpdateConfiguration(config);
+        monitor.Start();
+
+        std::wstring command = L"\"" + childPath.wstring() + L"\" --idle-child";
+        STARTUPINFOW startup{sizeof(startup)};
+        PROCESS_INFORMATION child{};
+        Require(CreateProcessW(childPath.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+            nullptr, directory.c_str(), &startup, &child) != FALSE, "Could not start disposable watch child");
+        CloseHandle(child.hThread);
+        struct ChildCleanup
+        {
+            HANDLE process;
+            ~ChildCleanup()
+            {
+                if (WaitForSingleObject(process, 0) == WAIT_TIMEOUT) TerminateProcess(process, 0);
+                WaitForSingleObject(process, 2000);
+                CloseHandle(process);
+            }
+        } childCleanup{child.hProcess};
+
+        const auto waitForStatus = [&](const std::wstring& fragment)
+        {
+            std::unique_lock lock(statusMutex);
+            return statusChanged.wait_for(lock, std::chrono::seconds(8), [&]
+            {
+                return std::any_of(statuses.begin(), statuses.end(), [&](const auto& status)
+                {
+                    return status.find(fragment) != std::wstring::npos;
+                });
+            });
+        };
+        Require(waitForStatus(L"Lifecycle test detected"), "Watch start was not detected with selected monitoring mode");
+        Require(TerminateProcess(child.hProcess, 0) != FALSE, "Could not stop disposable watch child");
+        WaitForSingleObject(child.hProcess, 2000);
+        Require(waitForStatus(L"Lifecycle test session ended"), "Watch exit was not detected with selected monitoring mode");
+        monitor.Stop();
+
+        std::wstring mode = useEtw ? L"ETW requested" : L"polling";
+        {
+            std::scoped_lock lock(statusMutex);
+            const auto fallback = std::find_if(statuses.begin(), statuses.end(), [](const auto& status)
+            {
+                return status.find(L"ETW could not start; using process polling") != std::wstring::npos;
+            });
+            const auto active = std::find_if(statuses.begin(), statuses.end(), [](const auto& status)
+            {
+                return status.find(L"ETW process monitoring active") != std::wstring::npos;
+            });
+            if (fallback != statuses.end()) mode += L" (polling fallback)";
+            else if (active != statuses.end()) mode += L" (active)";
+        }
+        std::cout << "Watch start and exit passed with " << ToUtf8(mode) << ".\n";
+    }
+
     static void TestDetectionAndLaunch()
     {
         wchar_t executable[32768]{};
@@ -406,6 +570,9 @@ int main(int argc, char** argv)
         TestBackgroundTasks();
         TestAtomicFile();
         ProcessMonitorTestAccess::Run();
+        ProcessMonitorTestAccess::TestPerformanceSettings();
+        ProcessMonitorTestAccess::TestWatchLifecycle(false);
+        ProcessMonitorTestAccess::TestWatchLifecycle(true);
         ProcessMonitorTestAccess::TestBatchStop();
         ProcessMonitorTestAccess::TestDetectionAndLaunch();
         ProcessMonitorTestAccess::TestHandoffOwnership();

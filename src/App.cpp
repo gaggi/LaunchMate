@@ -25,6 +25,18 @@ namespace
             localTime.wMilliseconds);
         return buffer;
     }
+
+    bool IsRunningElevated()
+    {
+        HANDLE token = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+        TOKEN_ELEVATION elevation{};
+        DWORD size = 0;
+        const bool elevated = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size) != FALSE &&
+            elevation.TokenIsElevated != 0;
+        CloseHandle(token);
+        return elevated;
+    }
 }
 
 App::App(HINSTANCE instanceHandle, AppLaunchOptions launchOptions)
@@ -43,6 +55,9 @@ App::App(HINSTANCE instanceHandle, AppLaunchOptions launchOptions)
         LogMessage(L"Logging enabled.");
         LogMessage(L"Idle poll interval: " + std::to_wstring(launchOptions_.pollIntervalMs) + L" ms");
         LogMessage(L"Active poll interval: " + std::to_wstring(launchOptions_.activePollIntervalMs) + L" ms");
+        LogMessage(IsRunningElevated()
+            ? L"LaunchMate is running as administrator."
+            : L"LaunchMate is running without administrator rights.");
     }
 }
 

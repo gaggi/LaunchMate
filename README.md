@@ -90,6 +90,17 @@ When `Start with Windows` is enabled, LaunchMate creates a current-user logon ta
 
 Tagged GitHub releases publish direct `windows-x64.exe` and `windows-x86.exe` assets in addition to the ZIP packages. LaunchMate uses those direct executable assets for its built-in self-update flow.
 
+### Release 0.2.1
+
+After committing and pushing the release changes, create and push the tag:
+
+```powershell
+git tag v0.2.1
+git push origin v0.2.1
+```
+
+The release workflow takes the version from the tag and builds both x64 and x86 packages as version `0.2.1`. For an existing local build directory, configure with `-DLAUNCHMATE_VERSION:STRING=0.2.1` to replace any previously cached version.
+
 ### Release 0.2.0
 
 After committing and pushing the release changes, create and push the tag:

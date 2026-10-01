@@ -153,7 +153,17 @@ void EtwProcessListener::UpdateWatchedProcessKeys(const std::unordered_set<std::
 {
     std::scoped_lock lock(mutex_);
     watchedProcessKeys_ = watchedProcessKeys;
-    trackedProcessKeys_.clear();
+    // Stop events identify a process by PID only.  Keep mappings that were
+    // learned from earlier start events while the filter changes, otherwise a
+    // performance-target update makes active watched processes impossible to
+    // recognize when they later exit.
+}
+
+void EtwProcessListener::TrackExistingProcess(DWORD processId, const std::wstring& processKey)
+{
+    if (processId == 0 || processKey.empty()) return;
+    std::scoped_lock lock(mutex_);
+    trackedProcessKeys_[processId] = processKey;
 }
 
 void EtwProcessListener::Stop()

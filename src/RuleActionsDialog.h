@@ -8,7 +8,9 @@ bool ShowRuleActionsDialog(
     HINSTANCE instanceHandle,
     HWND owner,
     WatchedProcessRule& rule,
-    const std::vector<MonitorPowerSetup>& monitorSetups);
+    const std::vector<MonitorPowerSetup>& monitorSetups,
+    int initialTab = 0,
+    int initialActionIndex = -1);
 
 bool ShowStopProcessActionDialog(
     HINSTANCE instanceHandle,

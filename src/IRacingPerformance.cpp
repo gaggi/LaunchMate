@@ -1,6 +1,7 @@
 #include "IRacingPerformance.h"
 #include "BackgroundTask.h"
 #include "IRacingServices.h"
+#include "ListViewHelpers.h"
 
 #include "resource.h"
 
@@ -406,6 +407,223 @@ namespace
         BackgroundTask<DiagnosticResult> refresh;
     };
 
+    std::vector<std::wstring> RunningProcessNames(const WatchedProcessRule* rule = nullptr)
+    {
+        std::vector<std::wstring> names;
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) return names;
+        PROCESSENTRY32W entry{sizeof(entry)};
+        if (Process32FirstW(snapshot, &entry))
+        {
+            do { names.emplace_back(entry.szExeFile); } while (Process32NextW(snapshot, &entry));
+        }
+        CloseHandle(snapshot);
+        // These processes are meaningful performance targets even before a
+        // session starts: the watched executable itself and every configured
+        // Start-program action.  They supplement (rather than replace) the
+        // live process list.
+        if (rule)
+        {
+            const auto watched = rule->processName.empty()
+                ? std::filesystem::path(rule->executablePath).filename().wstring()
+                : std::filesystem::path(rule->processName).filename().wstring();
+            if (!watched.empty()) names.push_back(watched);
+            for (const auto& program : rule->programsToLaunch)
+            {
+                const auto name = std::filesystem::path(program.filePath).filename().wstring();
+                if (!name.empty()) names.push_back(name);
+            }
+        }
+        std::sort(names.begin(), names.end(), [](const auto& left, const auto& right) { return _wcsicmp(left.c_str(), right.c_str()) < 0; });
+        names.erase(std::unique(names.begin(), names.end(), [](const auto& left, const auto& right) { return _wcsicmp(left.c_str(), right.c_str()) == 0; }), names.end());
+        return names;
+    }
+
+    std::wstring PriorityText(int value)
+    {
+        switch (value)
+        {
+        case IDLE_PRIORITY_CLASS: return L"Low";
+        case BELOW_NORMAL_PRIORITY_CLASS: return L"Below normal";
+        case NORMAL_PRIORITY_CLASS: return L"Normal";
+        case ABOVE_NORMAL_PRIORITY_CLASS: return L"Above normal";
+        case HIGH_PRIORITY_CLASS: return L"High";
+        case REALTIME_PRIORITY_CLASS: return L"Real time";
+        default: return L"Do not change";
+        }
+    }
+
+    std::wstring IoPriorityText(int value)
+    {
+        switch (value)
+        {
+        case 0: return L"Very low";
+        case 1: return L"Low";
+        case 2: return L"Normal";
+        case 3: return L"High";
+        default: return L"Do not change";
+        }
+    }
+
+    std::wstring MemoryPriorityText(int value)
+    {
+        switch (value)
+        {
+        case 1: return L"Very low";
+        case 2: return L"Low";
+        case 3: return L"Medium";
+        case 4: return L"Below normal";
+        case 5: return L"Normal";
+        default: return L"Do not change";
+        }
+    }
+
+    void EnsureDefaultPerformanceActions(WatchedProcessRule& rule)
+    {
+        const auto addIfMissing = [&](const std::wstring& candidate)
+        {
+            const auto name = std::filesystem::path(candidate).filename().wstring();
+            if (name.empty()) return;
+            const bool exists = std::any_of(rule.processPerformanceActions.begin(), rule.processPerformanceActions.end(),
+                [&](const ProcessPerformanceAction& action) { return _wcsicmp(action.processName.c_str(), name.c_str()) == 0; });
+            if (!exists) rule.processPerformanceActions.push_back({name});
+        };
+
+        addIfMissing(rule.processName.empty() ? rule.executablePath : rule.processName);
+        for (const auto& program : rule.programsToLaunch) addIfMissing(program.filePath);
+    }
+
+    struct PerformanceActionDialogState
+    {
+        ProcessPerformanceAction* action{};
+        const WatchedProcessRule* rule{};
+        std::vector<std::wstring> processes;
+        bool accepted{};
+    };
+
+    void AddChoice(HWND combo, const wchar_t* label, int value, int selectedValue)
+    {
+        const int index = static_cast<int>(SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label)));
+        SendMessageW(combo, CB_SETITEMDATA, index, value);
+        if (value == selectedValue) SendMessageW(combo, CB_SETCURSEL, index, 0);
+    }
+
+    int ChoiceValue(HWND combo, int fallback)
+    {
+        const int selected = static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0));
+        return selected >= 0 ? static_cast<int>(SendMessageW(combo, CB_GETITEMDATA, selected, 0)) : fallback;
+    }
+
+    INT_PTR CALLBACK PerformanceActionProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        auto* state = reinterpret_cast<PerformanceActionDialogState*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
+        if (message == WM_INITDIALOG)
+        {
+            state = reinterpret_cast<PerformanceActionDialogState*>(lParam);
+            SetWindowLongPtrW(dialog, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+            state->processes = RunningProcessNames(state->rule);
+            if (std::none_of(state->processes.begin(), state->processes.end(), [&](const auto& name) { return _wcsicmp(name.c_str(), state->action->processName.c_str()) == 0; }) && !state->action->processName.empty())
+                state->processes.push_back(state->action->processName);
+            std::sort(state->processes.begin(), state->processes.end(), [](const auto& left, const auto& right) { return _wcsicmp(left.c_str(), right.c_str()) < 0; });
+            HWND processCombo = GetDlgItem(dialog, IDC_PERF_PROCESS);
+            for (size_t index = 0; index < state->processes.size(); ++index)
+            {
+                SendMessageW(processCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(state->processes[index].c_str()));
+                if (_wcsicmp(state->processes[index].c_str(), state->action->processName.c_str()) == 0)
+                    SendMessageW(processCombo, CB_SETCURSEL, static_cast<WPARAM>(index), 0);
+            }
+            HWND priority = GetDlgItem(dialog, IDC_PERF_CPU_PRIORITY);
+            AddChoice(priority, L"Do not change", 0, state->action->cpuPriorityClass);
+            AddChoice(priority, L"Low", IDLE_PRIORITY_CLASS, state->action->cpuPriorityClass);
+            AddChoice(priority, L"Below normal", BELOW_NORMAL_PRIORITY_CLASS, state->action->cpuPriorityClass);
+            AddChoice(priority, L"Normal", NORMAL_PRIORITY_CLASS, state->action->cpuPriorityClass);
+            AddChoice(priority, L"Above normal", ABOVE_NORMAL_PRIORITY_CLASS, state->action->cpuPriorityClass);
+            AddChoice(priority, L"High", HIGH_PRIORITY_CLASS, state->action->cpuPriorityClass);
+            AddChoice(priority, L"Real time", REALTIME_PRIORITY_CLASS, state->action->cpuPriorityClass);
+            HWND io = GetDlgItem(dialog, IDC_PERF_IO_PRIORITY);
+            AddChoice(io, L"Do not change", -1, state->action->ioPriority);
+            AddChoice(io, L"Very low", 0, state->action->ioPriority);
+            AddChoice(io, L"Low", 1, state->action->ioPriority);
+            AddChoice(io, L"Normal", 2, state->action->ioPriority);
+            AddChoice(io, L"High", 3, state->action->ioPriority);
+            HWND memory = GetDlgItem(dialog, IDC_PERF_MEMORY_PRIORITY);
+            AddChoice(memory, L"Do not change", -1, state->action->memoryPriority);
+            AddChoice(memory, L"Very low", 1, state->action->memoryPriority);
+            AddChoice(memory, L"Low", 2, state->action->memoryPriority);
+            AddChoice(memory, L"Medium", 3, state->action->memoryPriority);
+            AddChoice(memory, L"Below normal", 4, state->action->memoryPriority);
+            AddChoice(memory, L"Normal", 5, state->action->memoryPriority);
+            const DWORD count = std::min<DWORD>(GetActiveProcessorCount(0), 64);
+            for (DWORD cpu = 0; cpu < count; ++cpu)
+            {
+                // Keep sibling logical CPUs visually together: evens on the
+                // first row, odds directly beneath them.  With 16 CPUs this
+                // is exactly the requested two-row layout.
+                const int column = static_cast<int>((cpu % 16) / 2);
+                const int row = static_cast<int>((cpu % 2) + (cpu / 16) * 2);
+                const std::wstring label = L"CPU " + std::to_wstring(cpu);
+                RECT position{12 + column * 60, 152 + row * 20, 12 + column * 60 + 56, 152 + row * 20 + 16};
+                MapDialogRect(dialog, &position);
+                HWND checkbox = CreateWindowExW(0, L"Button", label.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                    position.left, position.top, position.right - position.left, position.bottom - position.top, dialog,
+                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PERF_AFFINITY_FIRST + cpu)), GetModuleHandleW(nullptr), nullptr);
+                if (state->action->affinityMask == 0 || (state->action->affinityMask & (std::uint64_t{1} << cpu)) != 0)
+                    SendMessageW(checkbox, BM_SETCHECK, BST_CHECKED, 0);
+            }
+            return TRUE;
+        }
+        if (message != WM_COMMAND) return FALSE;
+        if (LOWORD(wParam) == IDOK)
+        {
+            const int selected = static_cast<int>(SendDlgItemMessageW(dialog, IDC_PERF_PROCESS, CB_GETCURSEL, 0, 0));
+            if (selected < 0 || static_cast<size_t>(selected) >= state->processes.size())
+            {
+                MessageBoxW(dialog, L"Select a currently running process.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
+                return TRUE;
+            }
+            state->action->processName = state->processes[static_cast<size_t>(selected)];
+            state->action->cpuPriorityClass = ChoiceValue(GetDlgItem(dialog, IDC_PERF_CPU_PRIORITY), 0);
+            state->action->ioPriority = ChoiceValue(GetDlgItem(dialog, IDC_PERF_IO_PRIORITY), -1);
+            state->action->memoryPriority = ChoiceValue(GetDlgItem(dialog, IDC_PERF_MEMORY_PRIORITY), -1);
+            const DWORD count = std::min<DWORD>(GetActiveProcessorCount(0), 64);
+            std::uint64_t mask = 0;
+            for (DWORD cpu = 0; cpu < count; ++cpu)
+                if (IsDlgButtonChecked(dialog, IDC_PERF_AFFINITY_FIRST + cpu) == BST_CHECKED) mask |= (std::uint64_t{1} << cpu);
+            const std::uint64_t all = count == 64 ? ~std::uint64_t{0} : ((std::uint64_t{1} << count) - 1);
+            state->action->affinityMask = mask == all ? 0 : mask;
+            state->accepted = true;
+            EndDialog(dialog, IDOK);
+            return TRUE;
+        }
+        if (LOWORD(wParam) == IDCANCEL) { EndDialog(dialog, IDCANCEL); return TRUE; }
+        return FALSE;
+    }
+
+    bool EditPerformanceAction(HWND owner, const WatchedProcessRule& rule, ProcessPerformanceAction& action)
+    {
+        PerformanceActionDialogState state{&action, &rule};
+        DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_PROCESS_PERFORMANCE_ACTION), owner, PerformanceActionProc, reinterpret_cast<LPARAM>(&state));
+        return state.accepted;
+    }
+
+    void RefreshPerformanceActions(HWND dialog, DialogState& state)
+    {
+        HWND list = GetDlgItem(dialog, IDC_PERF_ACTION_LIST);
+        ConfigureListView(list, {{L"Process", 3}, {L"CPU priority", 2}, {L"I/O priority", 2}, {L"Memory priority", 2}, {L"CPU affinity", 3}});
+        for (const auto& action : state.rule->processPerformanceActions)
+        {
+            std::wstring affinity = L"All CPUs";
+            if (action.affinityMask != 0)
+            {
+                affinity.clear();
+                for (DWORD cpu = 0; cpu < std::min<DWORD>(GetActiveProcessorCount(0), 64); ++cpu)
+                    if ((action.affinityMask & (std::uint64_t{1} << cpu)) != 0)
+                        affinity += (affinity.empty() ? L"" : L", ") + std::to_wstring(cpu);
+            }
+            AddListViewRow(list, {action.processName, PriorityText(action.cpuPriorityClass), IoPriorityText(action.ioPriority), MemoryPriorityText(action.memoryPriority), affinity});
+        }
+    }
+
     INT_PTR RulePaneBrush(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
     {
         // The tab control paints its body at RGB(249, 249, 249) with the current
@@ -776,6 +994,8 @@ namespace
             SendDlgItemMessageW(dialog, IDC_IRACING_PLAN, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Loading power plans..."));
             SendDlgItemMessageW(dialog, IDC_IRACING_PLAN, CB_SETCURSEL, 0, 0);
             EnableWindow(GetDlgItem(dialog, IDC_IRACING_PLAN), FALSE);
+            InitializeReportListView(GetDlgItem(dialog, IDC_PERF_ACTION_LIST));
+            RefreshPerformanceActions(dialog, *state);
             if (!IsIRacingRule(*state->rule))
             {
                 ShowWindow(GetDlgItem(dialog, IDC_IRACING_INI), SW_HIDE);
@@ -845,7 +1065,47 @@ namespace
             SetWindowLongPtrW(dialog, GWLP_USERDATA, 0);
             return FALSE;
         }
+        if (message == WM_NOTIFY)
+        {
+            const auto* header = reinterpret_cast<NMHDR*>(lParam);
+            if (header->idFrom == IDC_PERF_ACTION_LIST && header->code == NM_DBLCLK)
+            {
+                const int selected = SelectedListViewRow(GetDlgItem(dialog, IDC_PERF_ACTION_LIST));
+                if (selected >= 0 && static_cast<size_t>(selected) < state->rule->processPerformanceActions.size() &&
+                    EditPerformanceAction(dialog, *state->rule, state->rule->processPerformanceActions[static_cast<size_t>(selected)]))
+                    RefreshPerformanceActions(dialog, *state);
+                return TRUE;
+            }
+        }
         if (message != WM_COMMAND) return FALSE;
+        if (LOWORD(wParam) == IDC_PERF_ACTION_ADD)
+        {
+            ProcessPerformanceAction action;
+            if (EditPerformanceAction(dialog, *state->rule, action))
+            {
+                state->rule->processPerformanceActions.push_back(std::move(action));
+                RefreshPerformanceActions(dialog, *state);
+            }
+            return TRUE;
+        }
+        if (LOWORD(wParam) == IDC_PERF_ACTION_EDIT)
+        {
+            const int selected = SelectedListViewRow(GetDlgItem(dialog, IDC_PERF_ACTION_LIST));
+            if (selected >= 0 && static_cast<size_t>(selected) < state->rule->processPerformanceActions.size() &&
+                EditPerformanceAction(dialog, *state->rule, state->rule->processPerformanceActions[static_cast<size_t>(selected)]))
+                RefreshPerformanceActions(dialog, *state);
+            return TRUE;
+        }
+        if (LOWORD(wParam) == IDC_PERF_ACTION_REMOVE)
+        {
+            const int selected = SelectedListViewRow(GetDlgItem(dialog, IDC_PERF_ACTION_LIST));
+            if (selected >= 0 && static_cast<size_t>(selected) < state->rule->processPerformanceActions.size())
+            {
+                state->rule->processPerformanceActions.erase(state->rule->processPerformanceActions.begin() + selected);
+                RefreshPerformanceActions(dialog, *state);
+            }
+            return TRUE;
+        }
         switch (LOWORD(wParam))
         {
         case IDC_IRACING_REFRESH: RefreshStatus(dialog, *state); return TRUE;
@@ -961,6 +1221,7 @@ bool RestorePowerScheme(const GUID& scheme)
 
 HWND CreateIRacingPerformancePane(HINSTANCE instance, HWND parent, WatchedProcessRule& rule)
 {
+    EnsureDefaultPerformanceActions(rule);
     auto* state = new DialogState{&rule};
     HWND pane = CreateDialogParamW(instance, MAKEINTRESOURCEW(IDD_IRACING_PERFORMANCE_PANE), parent, DialogProc, reinterpret_cast<LPARAM>(state));
     if (!pane) delete state;

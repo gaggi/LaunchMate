@@ -236,6 +236,18 @@ namespace
             homeActions.push_back(ToJson(action));
         }
         object["HomeAssistantActions"] = homeActions;
+        Array performanceActions;
+        for (const auto& action : rule.processPerformanceActions)
+        {
+            Object performance;
+            performance["ProcessName"] = ToUtf8(action.processName);
+            performance["CpuPriorityClass"] = static_cast<double>(action.cpuPriorityClass);
+            performance["IoPriority"] = static_cast<double>(action.ioPriority);
+            performance["MemoryPriority"] = static_cast<double>(action.memoryPriority);
+            performance["AffinityMask"] = std::to_string(action.affinityMask);
+            performanceActions.push_back(performance);
+        }
+        object["ProcessPerformanceActions"] = performanceActions;
         object["MonitorPowerSetupName"] = ToUtf8(rule.monitorPowerSetupName);
         object["MonitorPowerSetupDelayMilliseconds"] = static_cast<double>(rule.monitorPowerSetupDelayMilliseconds);
         object["RestoreMonitorPowerSetupOnExit"] = rule.restoreMonitorPowerSetupOnExit;
@@ -298,6 +310,27 @@ namespace
             }
         }
 
+        const auto performanceIt = object.find("ProcessPerformanceActions");
+        if (performanceIt != object.end() && performanceIt->second.IsArray())
+        {
+            for (const auto& item : performanceIt->second.AsArray())
+            {
+                if (!item.IsObject()) continue;
+                const auto& performance = item.AsObject();
+                ProcessPerformanceAction action;
+                action.processName = ReadWideString(performance, "ProcessName");
+                action.cpuPriorityClass = ReadInt(performance, "CpuPriorityClass");
+                action.ioPriority = ReadInt(performance, "IoPriority", -1);
+                action.memoryPriority = ReadInt(performance, "MemoryPriority", -1);
+                const auto affinity = performance.find("AffinityMask");
+                if (affinity != performance.end() && affinity->second.IsString())
+                {
+                    try { action.affinityMask = std::stoull(affinity->second.AsString()); } catch (...) {}
+                }
+                if (!action.processName.empty()) rule.processPerformanceActions.push_back(std::move(action));
+            }
+        }
+
         return rule;
     }
 }
@@ -347,8 +380,8 @@ AppConfiguration ConfigStore::Load() const
         config.startInTray = ReadBool(object, "StartInTray", false);
         config.startMonitoringOnLaunch = ReadBool(object, "StartMonitoringOnLaunch", false);
         config.checkForUpdatesOnStartup = ReadBool(object, "CheckForUpdatesOnStartup", true);
-        config.windowWidth = ReadInt(object, "WindowWidth", 1210);
-        config.windowHeight = ReadInt(object, "WindowHeight", 730);
+        config.windowWidth = ReadInt(object, "WindowWidth", 1215);
+        config.windowHeight = ReadInt(object, "WindowHeight", 736);
         config.startMaximized = ReadBool(object, "StartMaximized", false);
 
         const auto leftIt = object.find("WindowLeft");

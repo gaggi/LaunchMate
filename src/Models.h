@@ -2,6 +2,7 @@
 
 #include <string>
 #include <vector>
+#include <cstdint>
 #include <windows.h>
 
 struct LaunchProgram
@@ -31,6 +32,15 @@ struct HomeAssistantAction
     std::wstring webhookUrl;
     std::wstring jsonPayload{L"{}"};
     int waitTimeMilliseconds{0};
+};
+
+struct ProcessPerformanceAction
+{
+    std::wstring processName;
+    int cpuPriorityClass{0}; // 0 means leave the Windows default unchanged.
+    int ioPriority{-1}; // -1 means leave unchanged; otherwise IO_PRIORITY_HINT.
+    int memoryPriority{-1}; // -1 means leave unchanged; otherwise MEMORY_PRIORITY_INFORMATION.
+    std::uint64_t affinityMask{0}; // 0 means use all available logical processors.
 };
 
 struct CatalogProgram
@@ -74,6 +84,7 @@ struct WatchedProcessRule
     std::vector<LaunchProgram> programsToLaunch;
     std::vector<ProcessStopAction> processesToStop;
     std::vector<HomeAssistantAction> homeAssistantActions;
+    std::vector<ProcessPerformanceAction> processPerformanceActions;
     std::wstring monitorPowerSetupName;
     int monitorPowerSetupDelayMilliseconds{0};
     bool restoreMonitorPowerSetupOnExit{true};
@@ -92,8 +103,8 @@ struct AppConfiguration
     bool startInTray{false};
     bool startMonitoringOnLaunch{false};
     bool checkForUpdatesOnStartup{true};
-    int windowWidth{1210};
-    int windowHeight{730};
+    int windowWidth{1215};
+    int windowHeight{736};
     int windowLeft{CW_USEDEFAULT};
     int windowTop{CW_USEDEFAULT};
     bool hasWindowPlacement{false};

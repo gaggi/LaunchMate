@@ -1354,6 +1354,11 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             TransferSelectedSource();
             return 0;
         }
+        if (header && header->idFrom == IdWatchedList && header->code == NM_DBLCLK)
+        {
+            EditRuleActions();
+            return 0;
+        }
         if (header && header->idFrom == IdRuleProgramsList && header->code == NM_DBLCLK)
         {
             EditRuleProgram();
@@ -2556,29 +2561,46 @@ void MainWindow::EditRuleProgram()
         {
             return;
         }
-    }
-    else
-    {
-        const int stopIndex = actionIndex - static_cast<int>(rule.programsToLaunch.size());
-        if (stopIndex < 0 || stopIndex >= static_cast<int>(rule.processesToStop.size()))
-        {
-            EditRuleActions();
-            return;
-        }
-        if (!ShowStopProcessActionDialog(app_.InstanceHandle(), windowHandle_,
-                rule.processesToStop[static_cast<size_t>(stopIndex)]))
-        {
-            return;
-        }
+        PopulateRulePrograms();
+        ListView_SetItemState(ruleProgramsListHandle_, actionIndex,
+            LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        SaveConfiguration();
+        return;
     }
 
-    PopulateRulePrograms();
-    ListView_SetItemState(ruleProgramsListHandle_, actionIndex,
-        LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-    SaveConfiguration();
+    int relativeIndex = actionIndex - static_cast<int>(rule.programsToLaunch.size());
+    if (relativeIndex < static_cast<int>(rule.processesToStop.size()))
+    {
+        EditRuleActions(1, relativeIndex);
+        return;
+    }
+    relativeIndex -= static_cast<int>(rule.processesToStop.size());
+    if (relativeIndex < static_cast<int>(rule.homeAssistantActions.size()))
+    {
+        EditRuleActions(2, relativeIndex);
+        return;
+    }
+    relativeIndex -= static_cast<int>(rule.homeAssistantActions.size());
+    if (!rule.monitorPowerSetupName.empty())
+    {
+        if (relativeIndex == 0) { EditRuleActions(3); return; }
+        --relativeIndex;
+    }
+    if (!rule.powerSchemeGuid.empty())
+    {
+        if (relativeIndex == 0) { EditRuleActions(4); return; }
+        --relativeIndex;
+    }
+    if (!rule.servicesToStop.empty() && relativeIndex == 0)
+    {
+        EditRuleActions(5);
+        return;
+    }
+
+    EditRuleActions();
 }
 
-void MainWindow::EditRuleActions()
+void MainWindow::EditRuleActions(int initialTab, int initialActionIndex)
 {
     const int watchedIndex = SelectedWatchedIndex();
     if (watchedIndex < 0)
@@ -2588,7 +2610,8 @@ void MainWindow::EditRuleActions()
     }
 
     auto& rule = app_.Configuration().watchedProcesses[static_cast<size_t>(watchedIndex)];
-    if (!ShowRuleActionsDialog(app_.InstanceHandle(), windowHandle_, rule, app_.Configuration().monitorPowerSetups))
+    if (!ShowRuleActionsDialog(app_.InstanceHandle(), windowHandle_, rule,
+            app_.Configuration().monitorPowerSetups, initialTab, initialActionIndex))
     {
         return;
     }

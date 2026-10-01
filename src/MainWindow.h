@@ -93,7 +93,7 @@ private:
     void RemoveSelectedCatalogProgram();
     void AddWatchedProcess();
     void EditRuleProgram();
-    void EditRuleActions();
+    void EditRuleActions(int initialTab = 0, int initialActionIndex = -1);
     void RemoveWatchedProcess();
     void RemoveSelectedRuleAction();
     void HandleTrayCommand(UINT command);

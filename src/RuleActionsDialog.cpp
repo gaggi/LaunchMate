@@ -7,6 +7,7 @@
 
 #include <commctrl.h>
 #include <commdlg.h>
+#include <algorithm>
 #include <cwchar>
 #include <filesystem>
 #include <iterator>
@@ -260,6 +261,7 @@ namespace
         WatchedProcessRule* destination{};
         const std::vector<MonitorPowerSetup>* monitorSetups{};
         int tab{};
+        int initialActionIndex{-1};
         bool accepted{};
         HWND performancePane{};
         HWND servicesPane{};
@@ -430,6 +432,7 @@ namespace
             tab.pszText = const_cast<wchar_t*>(L"Monitor config"); TabCtrl_InsertItem(GetDlgItem(dialog, IDC_ACTION_TAB), 3, &tab);
             tab.pszText = const_cast<wchar_t*>(L"Performance"); TabCtrl_InsertItem(GetDlgItem(dialog, IDC_ACTION_TAB), 4, &tab);
             tab.pszText = const_cast<wchar_t*>(L"Windows Services"); TabCtrl_InsertItem(GetDlgItem(dialog, IDC_ACTION_TAB), 5, &tab);
+            TabCtrl_SetCurSel(GetDlgItem(dialog, IDC_ACTION_TAB), state->tab);
             SendDlgItemMessageW(dialog, IDC_ACTION_MONITOR_COMBO, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Do not change displays"));
             int monitorSelection = 0;
             if (state->monitorSetups)
@@ -452,7 +455,13 @@ namespace
             EnableWindow(GetDlgItem(dialog, IDC_ACTION_MONITOR_RESTORE_DELAY_LABEL), state->workingRule.restoreMonitorPowerSetupOnExit);
             HostRuleActionControls(dialog);
             InitializeReportListView(FindActionControl(dialog, IDC_ACTION_LIST));
+            EnsureIRacingPane(dialog, *state);
             RefreshActions(dialog, *state);
+            if (state->tab < 3 && state->initialActionIndex >= 0)
+            {
+                ListView_SetItemState(FindActionControl(dialog, IDC_ACTION_LIST), state->initialActionIndex,
+                    LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            }
             return TRUE;
         }
         if (message == WM_NOTIFY)
@@ -505,9 +514,13 @@ bool ShowRuleActionsDialog(
     HINSTANCE instanceHandle,
     HWND owner,
     WatchedProcessRule& rule,
-    const std::vector<MonitorPowerSetup>& monitorSetups)
+    const std::vector<MonitorPowerSetup>& monitorSetups,
+    int initialTab,
+    int initialActionIndex)
 {
     ActionsState state{instanceHandle, rule, &rule, &monitorSetups};
+    state.tab = std::clamp(initialTab, 0, 5);
+    state.initialActionIndex = initialActionIndex;
     DialogBoxParamW(instanceHandle, MAKEINTRESOURCEW(IDD_RULE_ACTIONS), owner, ActionsProc, reinterpret_cast<LPARAM>(&state));
     return state.accepted;
 }

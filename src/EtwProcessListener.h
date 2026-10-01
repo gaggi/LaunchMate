@@ -26,6 +26,7 @@ public:
 
     bool Start(const std::unordered_set<std::wstring>& watchedProcessKeys, std::wstring& error);
     void UpdateWatchedProcessKeys(const std::unordered_set<std::wstring>& watchedProcessKeys);
+    void TrackExistingProcess(DWORD processId, const std::wstring& processKey);
     void Stop();
 
 private:

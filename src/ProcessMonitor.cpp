@@ -14,12 +14,93 @@
 #include <objbase.h>
 #include <winhttp.h>
 
+#ifndef LAUNCHMATE_VERSION
+#define LAUNCHMATE_VERSION "0.2.1"
+#endif
+
+#define LAUNCHMATE_WIDEN_IMPL(value) L##value
+#define LAUNCHMATE_WIDEN(value) LAUNCHMATE_WIDEN_IMPL(value)
+
 namespace
 {
+    constexpr wchar_t kLaunchMateUserAgent[] = L"LaunchMate/" LAUNCHMATE_WIDEN(LAUNCHMATE_VERSION);
     constexpr DWORD kProgramLaunchSettleMs = 1200;
     constexpr DWORD kMinimumPollIntervalMs = 100;
     constexpr DWORD kMaximumPollIntervalMs = 300000;
     thread_local const wchar_t* launchStage = L"launch";
+
+    using NtSetInformationProcessFn = LONG (NTAPI*)(HANDLE, ULONG, PVOID, ULONG);
+    using RtlNtStatusToDosErrorFn = ULONG (WINAPI*)(LONG);
+    constexpr ULONG kProcessIoPriorityInformation = 33;
+
+    LONG SetProcessIoPriority(HANDLE process, int priority)
+    {
+        static const auto setInformation = reinterpret_cast<NtSetInformationProcessFn>(
+            GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtSetInformationProcess"));
+        if (!setInformation) return static_cast<LONG>(0xC00000BBL); // STATUS_NOT_SUPPORTED
+        ULONG value = static_cast<ULONG>(priority);
+        return setInformation(process, kProcessIoPriorityInformation, &value, sizeof(value));
+    }
+
+    std::wstring IoPriorityName(int value)
+    {
+        switch (value)
+        {
+        case 0: return L"Very low";
+        case 1: return L"Low";
+        case 2: return L"Normal";
+        case 3: return L"High";
+        default: return std::to_wstring(value);
+        }
+    }
+
+    std::wstring MemoryPriorityName(int value)
+    {
+        switch (value)
+        {
+        case 1: return L"Very low";
+        case 2: return L"Low";
+        case 3: return L"Medium";
+        case 4: return L"Below normal";
+        case 5: return L"Normal";
+        default: return std::to_wstring(value);
+        }
+    }
+
+    std::wstring NtStatusDescription(LONG status)
+    {
+        wchar_t hexadecimal[16]{};
+        swprintf_s(hexadecimal, L"0x%08lX", static_cast<ULONG>(status));
+        static const auto toDosError = reinterpret_cast<RtlNtStatusToDosErrorFn>(
+            GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlNtStatusToDosError"));
+        if (!toDosError) return hexadecimal;
+        return std::wstring(hexadecimal) + L", Windows error " + std::to_wstring(toDosError(status));
+    }
+
+    bool EnableIncreaseBasePriorityPrivilege(DWORD& error)
+    {
+        HANDLE token = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
+        {
+            error = GetLastError();
+            return false;
+        }
+        LUID privilege{};
+        TOKEN_PRIVILEGES privileges{};
+        const bool lookedUp = LookupPrivilegeValueW(nullptr, SE_INC_BASE_PRIORITY_NAME, &privilege) != FALSE;
+        if (lookedUp)
+        {
+            privileges.PrivilegeCount = 1;
+            privileges.Privileges[0].Luid = privilege;
+            privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+            SetLastError(ERROR_SUCCESS);
+            AdjustTokenPrivileges(token, FALSE, &privileges, 0, nullptr, nullptr);
+            error = GetLastError();
+        }
+        else error = GetLastError();
+        CloseHandle(token);
+        return lookedUp && error == ERROR_SUCCESS;
+    }
 
     std::wstring NormalizePath(const std::wstring& path)
     {
@@ -236,7 +317,7 @@ namespace
         const std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
         std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength);
         if (parts.dwExtraInfoLength > 0) path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
-        HINTERNET session = WinHttpOpen(L"LaunchMate/0.2.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0);
+        HINTERNET session = WinHttpOpen(kLaunchMateUserAgent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0);
         if (!session) return false;
         WinHttpSetTimeouts(session, 5000, 5000, 5000, 10000);
         HINTERNET connection = WinHttpConnect(session, host.c_str(), parts.nPort, 0);
@@ -311,6 +392,7 @@ void ProcessMonitor::UpdateConfiguration(const AppConfiguration& configuration)
         runtimeRule.programsToLaunch = rule.programsToLaunch;
         runtimeRule.processesToStop = rule.processesToStop;
         runtimeRule.homeAssistantActions = rule.homeAssistantActions;
+        runtimeRule.processPerformanceActions = rule.processPerformanceActions;
         runtimeRule.monitorPowerSetupDelayMilliseconds = rule.monitorPowerSetupDelayMilliseconds;
         runtimeRule.restoreMonitorPowerSetupOnExit = rule.restoreMonitorPowerSetupOnExit;
         runtimeRule.restoreMonitorPowerSetupDelayMilliseconds = rule.restoreMonitorPowerSetupDelayMilliseconds;
@@ -606,7 +688,7 @@ void ProcessMonitor::WorkerLoop()
         if (usingEtw_.load())
         {
             // One snapshot covers processes that were already running when ETW
-            // was enabled. From then on, ETW PIDs are the source of truth.
+            // was enabled. From then on, ETW events are the source of truth.
             if (!etwInitialSnapshotComplete_.load()) CheckRules();
             ProcessEtwEvents();
         }
@@ -661,7 +743,12 @@ void ProcessMonitor::CheckRules()
     if (runtimeConfiguration->watchedRules.empty() && activeRules_.empty()) return;
 
     auto keys = runtimeConfiguration->watchedProcessKeys;
-    for (const auto& [key, rule] : activeRules_) keys.insert(key);
+    for (const auto& [key, rule] : activeRules_)
+    {
+        keys.insert(key);
+        for (const auto& action : rule.processPerformanceActions)
+            keys.insert(NormalizeProcessKey(action.processName));
+    }
     const auto snapshot = CaptureProcessSnapshot(false, &keys);
     ApplySnapshot(*runtimeConfiguration, snapshot);
 }
@@ -680,7 +767,11 @@ void ProcessMonitor::ApplySnapshot(const RuntimeConfiguration& configuration, co
         {
             const auto found = snapshot.processIdsByName.find(rule.processKey);
             if (found != snapshot.processIdsByName.end())
+            {
                 etwProcessIds_[rule.processKey].insert(found->second.begin(), found->second.end());
+                for (const DWORD processId : found->second)
+                    etwProcessListener_.TrackExistingProcess(processId, rule.processKey);
+            }
         }
         etwInitialSnapshotComplete_.store(true);
     }
@@ -691,6 +782,7 @@ void ProcessMonitor::ApplySnapshot(const RuntimeConfiguration& configuration, co
         {
             FinishRule(it->second);
             it = activeRules_.erase(it);
+            RefreshEtwProcessKeys(configuration);
         }
         else ++it;
     }
@@ -701,10 +793,23 @@ void ProcessMonitor::ApplySnapshot(const RuntimeConfiguration& configuration, co
         if (IsProcessRunning(snapshot, rule.processKey) && !activeRules_.contains(rule.processKey))
         {
             activeRules_.emplace(rule.processKey, rule);
+            RefreshEtwProcessKeys(configuration);
             statusCallback_(rule.displayName + L" detected. Running actions.");
             ExecuteStartActions(rule);
         }
     }
+
+    for (const auto& [key, rule] : activeRules_) ApplyPerformanceActions(rule, snapshot);
+}
+
+void ProcessMonitor::RefreshEtwProcessKeys(const RuntimeConfiguration& configuration)
+{
+    if (!usingEtw_.load()) return;
+    auto keys = configuration.watchedProcessKeys;
+    for (const auto& [key, rule] : activeRules_)
+        for (const auto& action : rule.processPerformanceActions)
+            keys.insert(NormalizeProcessKey(action.processName));
+    etwProcessListener_.UpdateWatchedProcessKeys(keys);
 }
 
 void ProcessMonitor::ProcessEtwEvents()
@@ -725,7 +830,35 @@ void ProcessMonitor::ProcessEtwEvents()
 
     for (const auto& event : events)
     {
-        if (!configuration->watchedProcessKeys.contains(event.imageName)) continue;
+        if (!configuration->watchedProcessKeys.contains(event.imageName))
+        {
+            // This is a configured performance target, such as a helper
+            // started by a Start-program action.  Its ETW start event is the
+            // precise moment at which the Windows settings can be applied.
+            if (event.processStopped)
+            {
+                for (const auto& [key, rule] : activeRules_)
+                {
+                    for (size_t index = 0; index < rule.processPerformanceActions.size(); ++index)
+                    {
+                        if (NormalizeProcessKey(rule.processPerformanceActions[index].processName) != event.imageName) continue;
+                        auto ruleState = performanceTargetStates_.find(key);
+                        if (ruleState == performanceTargetStates_.end()) continue;
+                        auto actionState = ruleState->second.find(index);
+                        if (actionState != ruleState->second.end()) actionState->second.erase(event.processId);
+                    }
+                }
+            }
+            else
+            {
+                ProcessSnapshot snapshot;
+                snapshot.valid = true;
+                snapshot.processIdsByName[event.imageName].push_back(event.processId);
+                for (const auto& [key, rule] : activeRules_)
+                    ApplyPerformanceActions(rule, snapshot);
+            }
+            continue;
+        }
         auto& processIds = etwProcessIds_[event.imageName];
         const bool wasRunning = !processIds.empty();
         if (event.processStopped) processIds.erase(event.processId);
@@ -743,6 +876,7 @@ void ProcessMonitor::ProcessEtwEvents()
             if (rule != configuration->watchedRules.end() && !activeRules_.contains(event.imageName))
             {
                 activeRules_.emplace(event.imageName, *rule);
+                RefreshEtwProcessKeys(*configuration);
                 statusCallback_(rule->displayName + L" detected. Running actions.");
                 ExecuteStartActions(*rule);
             }
@@ -754,6 +888,7 @@ void ProcessMonitor::ProcessEtwEvents()
             {
                 FinishRule(active->second);
                 activeRules_.erase(active);
+                RefreshEtwProcessKeys(*configuration);
             }
         }
     }
@@ -799,10 +934,16 @@ void ProcessMonitor::FinishRule(const RuntimeRule& rule)
     RestoreMonitorSetupForRule(rule, exitTick);
     StopProgramsForRule(rule);
     ExecuteExitActions(rule, exitTick);
+    performanceTargetStates_.erase(rule.processKey);
 }
 
 void ProcessMonitor::ExecuteStartActions(const RuntimeRule& rule)
 {
+    if (!rule.processPerformanceActions.empty())
+    {
+        const auto snapshot = CaptureProcessSnapshot(false);
+        if (snapshot.valid) ApplyPerformanceActions(rule, snapshot);
+    }
     if (!rule.powerSchemeGuid.empty())
     {
         if (!previousPowerSchemes_.empty())
@@ -895,6 +1036,114 @@ void ProcessMonitor::ExecuteStartActions(const RuntimeRule& rule)
         }
     }
     StartProgramsForRule(rule);
+}
+
+void ProcessMonitor::ApplyPerformanceActions(const RuntimeRule& rule, const ProcessSnapshot& snapshot)
+{
+    constexpr unsigned kCpuPriorityApplied = 1u << 0;
+    constexpr unsigned kIoPriorityApplied = 1u << 1;
+    constexpr unsigned kMemoryPriorityApplied = 1u << 2;
+    constexpr unsigned kAffinityApplied = 1u << 3;
+
+    auto& ruleStates = performanceTargetStates_[rule.processKey];
+    for (size_t actionIndex = 0; actionIndex < rule.processPerformanceActions.size(); ++actionIndex)
+    {
+        const auto& action = rule.processPerformanceActions[actionIndex];
+        if (action.cpuPriorityClass == 0 && action.ioPriority < 0 && action.memoryPriority < 0 && action.affinityMask == 0)
+            continue;
+
+        const auto targetKey = NormalizeProcessKey(action.processName);
+        const auto found = snapshot.processIdsByName.find(targetKey);
+        auto& processStates = ruleStates[actionIndex];
+        if (found == snapshot.processIdsByName.end())
+        {
+            processStates.clear();
+            continue;
+        }
+        std::unordered_set<DWORD> stillRunning(found->second.begin(), found->second.end());
+        for (const DWORD processId : found->second)
+        {
+            auto& state = processStates[processId];
+            if (state.successReported) continue;
+            HANDLE process = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+            if (!process)
+            {
+                const std::wstring failure = L"Could not open " + action.processName + L" for performance settings (Windows error " +
+                    std::to_wstring(GetLastError()) + L").";
+                if (state.lastFailure != failure) statusCallback_(failure);
+                state.lastFailure = failure;
+                continue;
+            }
+            std::vector<std::wstring> failures;
+            if (action.cpuPriorityClass != 0 && (state.appliedSettings & kCpuPriorityApplied) == 0)
+            {
+                if (SetPriorityClass(process, static_cast<DWORD>(action.cpuPriorityClass))) state.appliedSettings |= kCpuPriorityApplied;
+                else failures.push_back(L"CPU priority (Windows error " + std::to_wstring(GetLastError()) + L")");
+            }
+            if (action.ioPriority >= 0 && (state.appliedSettings & kIoPriorityApplied) == 0)
+            {
+                DWORD privilegeError = ERROR_SUCCESS;
+                const bool needsPrivilege = action.ioPriority >= 3;
+                if (needsPrivilege && !EnableIncreaseBasePriorityPrivilege(privilegeError))
+                {
+                    failures.push_back(L"I/O priority " + IoPriorityName(action.ioPriority) +
+                        L" (could not enable SeIncreaseBasePriorityPrivilege; Windows error " + std::to_wstring(privilegeError) + L")");
+                }
+                else
+                {
+                    const LONG result = SetProcessIoPriority(process, action.ioPriority);
+                    if (result < 0)
+                        failures.push_back(L"I/O priority " + IoPriorityName(action.ioPriority) + L" (" + NtStatusDescription(result) + L")");
+                    else state.appliedSettings |= kIoPriorityApplied;
+                }
+            }
+            if (action.memoryPriority >= 0 && (state.appliedSettings & kMemoryPriorityApplied) == 0)
+            {
+                MEMORY_PRIORITY_INFORMATION memory{};
+                memory.MemoryPriority = static_cast<ULONG>(action.memoryPriority);
+                if (!SetProcessInformation(process, ProcessMemoryPriority, &memory, sizeof(memory)))
+                    failures.push_back(L"Memory priority " + MemoryPriorityName(action.memoryPriority) +
+                        L" (Windows error " + std::to_wstring(GetLastError()) + L")");
+                else state.appliedSettings |= kMemoryPriorityApplied;
+            }
+            if (action.affinityMask != 0 && (state.appliedSettings & kAffinityApplied) == 0)
+            {
+                if (!SetProcessAffinityMask(process, static_cast<DWORD_PTR>(action.affinityMask)))
+                    failures.push_back(L"CPU affinity (Windows error " + std::to_wstring(GetLastError()) + L")");
+                else state.appliedSettings |= kAffinityApplied;
+            }
+            CloseHandle(process);
+            if (failures.empty())
+            {
+                const unsigned requestedSettings =
+                    (action.cpuPriorityClass != 0 ? kCpuPriorityApplied : 0) |
+                    (action.ioPriority >= 0 ? kIoPriorityApplied : 0) |
+                    (action.memoryPriority >= 0 ? kMemoryPriorityApplied : 0) |
+                    (action.affinityMask != 0 ? kAffinityApplied : 0);
+                if (!state.successReported && state.appliedSettings == requestedSettings)
+                {
+                    statusCallback_(L"Applied performance settings to " + action.processName + L".");
+                    state.lastFailure.clear();
+                    state.successReported = true;
+                }
+            }
+            else
+            {
+                std::wstring message = L"Performance settings partly applied to " + action.processName + L"; failed: ";
+                for (size_t index = 0; index < failures.size(); ++index)
+                {
+                    if (index != 0) message += L"; ";
+                    message += failures[index];
+                }
+                message += L".";
+                if (state.lastFailure != message) statusCallback_(message);
+                state.lastFailure = std::move(message);
+                state.successReported = false;
+            }
+        }
+        for (auto it = processStates.begin(); it != processStates.end();)
+            if (!stillRunning.contains(it->first)) it = processStates.erase(it); else ++it;
+    }
 }
 
 void ProcessMonitor::RestoreMonitorSetupForRule(const RuntimeRule& rule, ULONGLONG exitTick)

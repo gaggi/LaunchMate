@@ -89,7 +89,7 @@ namespace
         PROCESS_INFORMATION process{};
         std::wstring command = L"\"" + executable + L"\" -NoProfile -NonInteractive -EncodedCommand " + encoded;
         const bool started = CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, TRUE,
-            CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process) != FALSE;
+            CREATE_NO_WINDOW | NORMAL_PRIORITY_CLASS, nullptr, nullptr, &startup, &process) != FALSE;
         CloseHandle(writePipe);
         if (!started) { CloseHandle(readPipe); return false; }
         output.clear();

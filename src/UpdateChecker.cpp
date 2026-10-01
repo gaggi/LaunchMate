@@ -517,7 +517,7 @@ bool UpdateChecker::LaunchSelfUpdater(const std::filesystem::path& downloadedPat
     STARTUPINFOW startupInfo{};
     startupInfo.cb = sizeof(startupInfo);
     PROCESS_INFORMATION processInformation{};
-    if (!CreateProcessW(nullptr, commandBuffer.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startupInfo, &processInformation))
+    if (!CreateProcessW(nullptr, commandBuffer.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | NORMAL_PRIORITY_CLASS, nullptr, nullptr, &startupInfo, &processInformation))
     {
         errorMessage = L"Could not launch the temporary update helper.";
         return false;

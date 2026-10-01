@@ -1238,7 +1238,6 @@ bool MainWindow::Create(int showCommand)
     }
 
     CreateControls();
-    SetTimer(windowHandle_, kProcessStateTimer, 1000, nullptr);
     SyncCatalogProgramsFromConfiguration();
     PopulateLists();
     UpdateSettingsUi();
@@ -1397,7 +1396,11 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         trayIcon_.Destroy();
         DestroyWindow(windowHandle_);
         return 0;
+    case WM_SHOWWINDOW:
+        SyncProcessStateTimer(wParam != FALSE);
+        break;
     case WM_SIZE:
+        SyncProcessStateTimer(wParam != SIZE_MINIMIZED && IsWindowVisible(windowHandle_));
         if (wParam == SIZE_MINIMIZED && app_.Configuration().minimizeToTray)
         {
             HideToTray();
@@ -1415,7 +1418,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     case WM_TIMER:
         if (wParam == kProcessStateTimer)
         {
-            RefreshProcessStates();
+            if (IsWindowVisible(windowHandle_) && !IsIconic(windowHandle_)) RefreshProcessStates();
             return 0;
         }
         if (wParam == kSourceRefreshTimer) { PollSourceRefresh(); return 0; }
@@ -1700,6 +1703,16 @@ void MainWindow::PopulateLists()
     PopulateRulePrograms();
 }
 
+void MainWindow::SyncProcessStateTimer(bool visible)
+{
+    KillTimer(windowHandle_, kProcessStateTimer);
+    if (visible && !IsIconic(windowHandle_) && watchedListHandle_)
+    {
+        RefreshProcessStates();
+        SetTimer(windowHandle_, kProcessStateTimer, 1000, nullptr);
+    }
+}
+
 void MainWindow::RefreshProcessStates()
 {
     const auto& rules = app_.Configuration().watchedProcesses;
@@ -1715,7 +1728,9 @@ void MainWindow::RefreshProcessStates()
         const auto index = static_cast<size_t>(item.lParam);
         auto text = states[index];
         if (!rules[index].enabled) text += L" (disabled)";
-        ListView_SetItemText(watchedListHandle_, row, 1, text.data());
+        wchar_t currentText[64]{};
+        ListView_GetItemText(watchedListHandle_, row, 1, currentText, static_cast<int>(std::size(currentText)));
+        if (text != currentText) ListView_SetItemText(watchedListHandle_, row, 1, text.data());
     }
 }
 

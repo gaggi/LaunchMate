@@ -182,12 +182,38 @@ namespace
         bool success{};
         DWORD processId{};
     };
+
+    // ShellExecute has no creation-priority flag. Serialize the brief normal-
+    // priority scope so launched apps do not inherit LaunchMate's low priority.
+    class ShellLaunchPriorityScope
+    {
+    public:
+        ShellLaunchPriorityScope() : lock_(mutex_), previous_(GetPriorityClass(GetCurrentProcess()))
+        {
+            changed_ = previous_ == IDLE_PRIORITY_CLASS || previous_ == BELOW_NORMAL_PRIORITY_CLASS;
+            ready_ = !changed_ || SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS) != FALSE;
+        }
+        ~ShellLaunchPriorityScope()
+        {
+            const DWORD error = GetLastError();
+            if (changed_ && ready_) SetPriorityClass(GetCurrentProcess(), previous_);
+            SetLastError(error);
+        }
+        bool Ready() const { return ready_; }
+    private:
+        inline static std::mutex mutex_;
+        std::unique_lock<std::mutex> lock_;
+        DWORD previous_{};
+        bool changed_{};
+        bool ready_{};
+    };
+
     ProgramLaunchResult LaunchProgramProcess(const LaunchProgram& program, std::shared_ptr<void>* launchedProcess = nullptr)
     {
         SHELLEXECUTEINFOW info{};
         launchStage = L"shell execute";
         info.cbSize = sizeof(info);
-        info.fMask = SEE_MASK_NOCLOSEPROCESS;
+        info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
         info.lpFile = program.filePath.c_str();
         info.lpParameters = program.arguments.empty() ? nullptr : program.arguments.c_str();
         info.nShow = SW_SHOWNORMAL;
@@ -195,6 +221,8 @@ namespace
         const auto directory = std::filesystem::path(program.filePath).parent_path().wstring();
         info.lpDirectory = directory.empty() ? nullptr : directory.c_str();
 
+        ShellLaunchPriorityScope priorityScope;
+        if (!priorityScope.Ready()) { launchStage = L"prepare launch priority"; return {}; }
         if (ShellExecuteExW(&info))
         {
             if (!info.hProcess) return {true, 0};

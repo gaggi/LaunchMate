@@ -75,6 +75,7 @@ private:
     void SyncCatalogProgramsFromConfiguration();
     void DetectInstalledApps();
     void PopulateRulePrograms();
+    void SyncProcessStateTimer(bool visible);
     void ToggleMonitoring();
     void ManageMonitorPowerSetups();
     bool ApplyMonitorPowerSetup(size_t index, bool interactive);

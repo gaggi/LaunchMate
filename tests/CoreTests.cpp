@@ -239,13 +239,21 @@ struct ProcessMonitorTestAccess
         Require(states[0] == L"Running" && states[1] == L"Stopped", "Live process detection failed");
         monitor.UpdateConfiguration(config);
         monitor.running_ = true;
+        struct RestorePriority
+        {
+            DWORD previous{GetPriorityClass(GetCurrentProcess())};
+            ~RestorePriority() { SetPriorityClass(GetCurrentProcess(), previous); }
+        } restorePriority;
+        Require(SetPriorityClass(GetCurrentProcess(), IDLE_PRIORITY_CLASS) != FALSE, "Cannot lower test parent priority");
         monitor.CheckRules();
+        Require(GetPriorityClass(GetCurrentProcess()) == IDLE_PRIORITY_CLASS, "Launch did not restore parent low priority");
         Require(monitor.activeRules_.size() == 1, "Real snapshot failed to activate watched rule");
         Require(monitor.startedPrograms_.size() == 1, "Launch ownership missing");
         const auto& records = monitor.startedPrograms_.begin()->second;
         if (records.size() != 1 || records[0].startedProcessHandles.empty())
             throw std::runtime_error("Program did not launch: " + ToUtf8(lastStatus));
         const auto owned = records[0].startedProcessHandles.front();
+        Require(GetPriorityClass(owned.get()) == NORMAL_PRIORITY_CLASS, "Launched app inherited parent low priority");
         if (WaitForSingleObject(owned.get(), 0) != WAIT_TIMEOUT)
         {
             DWORD exitCode = 0;

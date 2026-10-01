@@ -45,6 +45,8 @@ App::App(HINSTANCE instanceHandle, AppLaunchOptions launchOptions)
       configuration_(configStore_.Load()),
       monitor_([this](const std::wstring& status) { SetStatus(status); })
 {
+    const bool lowCpuPrioritySet = SetPriorityClass(GetCurrentProcess(), IDLE_PRIORITY_CLASS) != FALSE;
+    const DWORD priorityError = lowCpuPrioritySet ? ERROR_SUCCESS : GetLastError();
     monitor_.SetPollInterval(launchOptions_.pollIntervalMs);
     monitor_.SetActivePollInterval(launchOptions_.activePollIntervalMs);
     monitor_.UpdateConfiguration(configuration_);
@@ -53,6 +55,8 @@ App::App(HINSTANCE instanceHandle, AppLaunchOptions launchOptions)
     {
         logPath_ = configStore_.Path().parent_path() / L"launchmate.log";
         LogMessage(L"Logging enabled.");
+        LogMessage(lowCpuPrioritySet ? L"LaunchMate CPU priority: Low."
+            : L"Could not set LaunchMate CPU priority to Low (Windows error " + std::to_wstring(priorityError) + L").");
         LogMessage(L"Idle poll interval: " + std::to_wstring(launchOptions_.pollIntervalMs) + L" ms");
         LogMessage(L"Active poll interval: " + std::to_wstring(launchOptions_.activePollIntervalMs) + L" ms");
         LogMessage(IsRunningElevated()

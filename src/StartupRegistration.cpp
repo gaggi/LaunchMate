@@ -42,7 +42,7 @@ namespace
         std::wstring command = L"\"C:\\Windows\\System32\\schtasks.exe\" " + parameters;
         STARTUPINFOW startup{sizeof(startup)};
         PROCESS_INFORMATION process{};
-        if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+        if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | NORMAL_PRIORITY_CLASS,
             nullptr, nullptr, &startup, &process)) return false;
         WaitForSingleObject(process.hProcess, 10000);
         DWORD result = 1;

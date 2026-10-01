@@ -172,6 +172,7 @@ namespace
 
 int WINAPI wWinMain(HINSTANCE instanceHandle, HINSTANCE, PWSTR, int showCommand)
 {
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     const int elevatedCommandResult = RunElevatedCommand();
     if (elevatedCommandResult >= 0) return elevatedCommandResult;
 

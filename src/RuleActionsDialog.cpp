@@ -4,6 +4,7 @@
 #include "IRacingPerformance.h"
 #include "resource.h"
 #include "TabHost.h"
+#include "UiTheme.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -106,6 +107,7 @@ namespace
         auto* state = reinterpret_cast<ItemDialogState<LaunchProgram>*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
         if (message == WM_INITDIALOG)
         {
+            UiTheme::Apply(dialog);
             state = reinterpret_cast<ItemDialogState<LaunchProgram>*>(lParam);
             SetWindowLongPtrW(dialog, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
             const auto& item = *state->item;
@@ -149,6 +151,7 @@ namespace
         auto* state = reinterpret_cast<ItemDialogState<ProcessStopAction>*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
         if (message == WM_INITDIALOG)
         {
+            UiTheme::Apply(dialog);
             state = reinterpret_cast<ItemDialogState<ProcessStopAction>*>(lParam);
             SetWindowLongPtrW(dialog, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
             const auto& item = *state->item;
@@ -213,6 +216,7 @@ namespace
         auto* state = reinterpret_cast<ItemDialogState<HomeAssistantAction>*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
         if (message == WM_INITDIALOG)
         {
+            UiTheme::Apply(dialog);
             state = reinterpret_cast<ItemDialogState<HomeAssistantAction>*>(lParam);
             SetWindowLongPtrW(dialog, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
             const auto& item = *state->item;
@@ -280,8 +284,13 @@ namespace
         pane = state.tab == 4
             ? CreateIRacingPerformancePane(state.instance, dialog, state.workingRule)
             : CreateIRacingServicesPane(state.instance, dialog, state.workingRule);
-        if (pane) SetWindowPos(pane, HWND_TOP, rect.left, rect.top,
-            rect.right - rect.left, rect.bottom - rect.top, SWP_NOACTIVATE);
+        if (pane)
+        {
+            SetPropW(pane, UiTheme::TabSurfaceProperty, reinterpret_cast<HANDLE>(1));
+            SetWindowPos(pane, HWND_TOP, rect.left, rect.top,
+                rect.right - rect.left, rect.bottom - rect.top, SWP_NOACTIVATE);
+            RedrawWindow(pane, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+        }
     }
 
     int SelectedItem(HWND dialog)
@@ -423,6 +432,7 @@ namespace
         auto* state = reinterpret_cast<ActionsState*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
         if (message == WM_INITDIALOG)
         {
+            UiTheme::Apply(dialog);
             state = reinterpret_cast<ActionsState*>(lParam);
             SetWindowLongPtrW(dialog, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
             TCITEMW tab{TCIF_TEXT};
@@ -432,6 +442,12 @@ namespace
             tab.pszText = const_cast<wchar_t*>(L"Monitor config"); TabCtrl_InsertItem(GetDlgItem(dialog, IDC_ACTION_TAB), 3, &tab);
             tab.pszText = const_cast<wchar_t*>(L"Performance"); TabCtrl_InsertItem(GetDlgItem(dialog, IDC_ACTION_TAB), 4, &tab);
             tab.pszText = const_cast<wchar_t*>(L"Windows Services"); TabCtrl_InsertItem(GetDlgItem(dialog, IDC_ACTION_TAB), 5, &tab);
+            const HWND tabControl = GetDlgItem(dialog, IDC_ACTION_TAB);
+            RECT tabRect{};
+            GetClientRect(tabControl, &tabRect);
+            const UINT dpi = GetDpiForWindow(tabControl);
+            TabCtrl_SetItemSize(tabControl, (tabRect.right - MulDiv(8, dpi, 96)) / 6,
+                MulDiv(UiTheme::TabHeight, dpi, 96));
             TabCtrl_SetCurSel(GetDlgItem(dialog, IDC_ACTION_TAB), state->tab);
             SendDlgItemMessageW(dialog, IDC_ACTION_MONITOR_COMBO, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Do not change displays"));
             int monitorSelection = 0;
@@ -528,4 +544,9 @@ bool ShowRuleActionsDialog(
 bool ShowStopProcessActionDialog(HINSTANCE instanceHandle, HWND owner, ProcessStopAction& action)
 {
     return ShowItemDialog(instanceHandle, owner, IDD_STOP_ACTION, StopActionProc, action);
+}
+
+bool ShowHomeAssistantActionDialog(HINSTANCE instanceHandle, HWND owner, HomeAssistantAction& action)
+{
+    return ShowItemDialog(instanceHandle, owner, IDD_HOME_ACTION, HomeActionProc, action);
 }

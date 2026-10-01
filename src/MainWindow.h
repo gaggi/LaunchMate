@@ -65,6 +65,7 @@ private:
 
     void CreateFonts();
     void CreateControls();
+    void LayoutControls(int width, int height);
     void PopulateLists();
     void RefreshProcessStates();
     static constexpr UINT_PTR kProcessStateTimer = 82;
@@ -109,6 +110,9 @@ private:
     App& app_;
     HWND windowHandle_{nullptr};
     HWND toggleButtonHandle_{nullptr};
+    HWND watchedHeadingHandle_{nullptr};
+    HWND actionsHeadingHandle_{nullptr};
+    std::array<HWND, 3> settingsGroups_{};
     HWND catalogSearchHandle_{nullptr};
     HWND catalogListHandle_{nullptr};
     HWND sourceTabsHandle_{nullptr};
@@ -125,8 +129,9 @@ private:
     HWND startInTrayHandle_{nullptr};
     HWND startMonitoringHandle_{nullptr};
     HWND checkForUpdatesHandle_{nullptr};
-    HFONT titleFont_{nullptr};
+    HFONT headingFont_{nullptr};
     HFONT uiFont_{nullptr};
+    UINT dpi_{96};
     HIMAGELIST programIconList_{nullptr};
     std::unordered_map<std::wstring, int> programIconIndexes_;
     int defaultProgramIconIndex_{-1};

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "UiTheme.h"
+
 #include <commctrl.h>
 #include <windows.h>
 
@@ -44,47 +46,55 @@ namespace ListViewDetail
     }
 }
 
+inline void ResizeListViewColumns(HWND list, const std::vector<int>& weights, int iconWidth = 24)
+{
+    if (Header_GetItemCount(ListView_GetHeader(list)) != static_cast<int>(weights.size())) return;
+    RECT rect{};
+    GetClientRect(list, &rect);
+    const int availableWidth = std::max(100, static_cast<int>(rect.right - rect.left) -
+        GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForWindow(list)) - 4);
+    int totalWeight = 0;
+    int fixedWidth = 0;
+    for (int weight : weights)
+    {
+        if (weight == 0) fixedWidth += iconWidth;
+        else totalWeight += weight;
+    }
+
+    int index = 0;
+    int remainingWidth = std::max(0, availableWidth - fixedWidth);
+    int remainingWeight = totalWeight;
+    for (int weight : weights)
+    {
+        const int width = weight == 0 ? iconWidth :
+            (remainingWeight == weight ? remainingWidth : (remainingWidth * weight) / remainingWeight);
+        ListView_SetColumnWidth(list, index++, width);
+        if (weight != 0)
+        {
+            remainingWidth -= width;
+            remainingWeight -= weight;
+        }
+    }
+}
+
 inline void ConfigureListView(HWND list, std::initializer_list<std::pair<const wchar_t*, int>> columns)
 {
     RemovePropW(list, L"LaunchMate.ListViewSort");
     ListView_DeleteAllItems(list);
-    while (Header_GetItemCount(ListView_GetHeader(list)) > 0)
-    {
-        ListView_DeleteColumn(list, 0);
-    }
-
-    RECT rect{};
-    GetClientRect(list, &rect);
-    const int availableWidth = std::max(100, static_cast<int>(rect.right - rect.left) - GetSystemMetrics(SM_CXVSCROLL) - 4);
-    int totalWeight = 0;
-    int fixedWidth = 0;
-    for (const auto& column : columns)
-    {
-        if (column.second == 0) fixedWidth += 24; // compact icon column
-        else totalWeight += column.second;
-    }
-
+    while (Header_GetItemCount(ListView_GetHeader(list)) > 0) ListView_DeleteColumn(list, 0);
     int index = 0;
-    int usedWidth = 0;
-    int remainingWidth = std::max(0, availableWidth - fixedWidth);
-    int remainingWeight = totalWeight;
+    std::vector<int> weights;
     for (const auto& column : columns)
     {
-        const int width = column.second == 0 ? 24 :
-            (remainingWeight == column.second ? remainingWidth : (remainingWidth * column.second) / remainingWeight);
         LVCOLUMNW item{};
         item.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
         item.pszText = const_cast<wchar_t*>(column.first);
-        item.cx = width;
+        item.cx = 100;
         item.fmt = LVCFMT_LEFT;
         ListView_InsertColumn(list, index++, &item);
-        usedWidth += width;
-        if (column.second != 0)
-        {
-            remainingWidth -= width;
-            remainingWeight -= column.second;
-        }
+        weights.push_back(column.second);
     }
+    ResizeListViewColumns(list, weights, MulDiv(24, GetDpiForWindow(list), 96));
 }
 
 inline int AddListViewRow(HWND list, std::initializer_list<std::wstring> values, LPARAM itemData = -1, int imageIndex = -1)
@@ -168,6 +178,7 @@ inline void SortListViewByColumn(HWND list, int column)
 
 inline void InitializeReportListView(HWND list)
 {
+    UiTheme::StyleListView(list);
     ListView_SetExtendedListViewStyle(list,
         LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
 }

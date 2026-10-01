@@ -16,3 +16,8 @@ bool ShowStopProcessActionDialog(
     HINSTANCE instanceHandle,
     HWND owner,
     ProcessStopAction& action);
+
+bool ShowHomeAssistantActionDialog(
+    HINSTANCE instanceHandle,
+    HWND owner,
+    HomeAssistantAction& action);

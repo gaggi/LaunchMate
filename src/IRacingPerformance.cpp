@@ -2,6 +2,7 @@
 #include "BackgroundTask.h"
 #include "IRacingServices.h"
 #include "ListViewHelpers.h"
+#include "UiTheme.h"
 
 #include "resource.h"
 
@@ -519,6 +520,7 @@ namespace
         auto* state = reinterpret_cast<PerformanceActionDialogState*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
         if (message == WM_INITDIALOG)
         {
+            UiTheme::Apply(dialog);
             state = reinterpret_cast<PerformanceActionDialogState*>(lParam);
             SetWindowLongPtrW(dialog, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
             state->processes = RunningProcessNames(state->rule);
@@ -567,6 +569,7 @@ namespace
                 HWND checkbox = CreateWindowExW(0, L"Button", label.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                     position.left, position.top, position.right - position.left, position.bottom - position.top, dialog,
                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PERF_AFFINITY_FIRST + cpu)), GetModuleHandleW(nullptr), nullptr);
+                SendMessageW(checkbox, WM_SETFONT, SendMessageW(dialog, WM_GETFONT, 0, 0), TRUE);
                 if (state->action->affinityMask == 0 || (state->action->affinityMask & (std::uint64_t{1} << cpu)) != 0)
                     SendMessageW(checkbox, BM_SETCHECK, BST_CHECKED, 0);
             }
@@ -622,21 +625,6 @@ namespace
             }
             AddListViewRow(list, {action.processName, PriorityText(action.cpuPriorityClass), IoPriorityText(action.ioPriority), MemoryPriorityText(action.memoryPriority), affinity});
         }
-    }
-
-    INT_PTR RulePaneBrush(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
-    {
-        // The tab control paints its body at RGB(249, 249, 249) with the current
-        // Windows theme. The embedded dialogs must match it, not COLOR_WINDOW.
-        static const HBRUSH paneBrush = CreateSolidBrush(RGB(249, 249, 249));
-        const bool statusEdit = message == WM_CTLCOLOREDIT ||
-            (message == WM_CTLCOLORSTATIC && reinterpret_cast<HWND>(lParam) ==
-                GetDlgItem(dialog, IDC_IRACING_STATUS));
-        const HBRUSH brush = statusEdit ? GetSysColorBrush(COLOR_WINDOW) : paneBrush;
-        if (message == WM_CTLCOLORDLG) return reinterpret_cast<INT_PTR>(brush);
-        HDC dc = reinterpret_cast<HDC>(wParam);
-        SetBkColor(dc, statusEdit ? GetSysColor(COLOR_WINDOW) : RGB(249, 249, 249));
-        return reinterpret_cast<INT_PTR>(brush);
     }
 
     constexpr wchar_t kDwmRegistryPath[] = L"SOFTWARE\\Microsoft\\Windows\\Dwm";
@@ -794,8 +782,23 @@ namespace
     {
         if (message == WM_INITDIALOG)
         {
+            LOGFONTW font{};
+            GetObjectW(reinterpret_cast<HFONT>(SendMessageW(dialog, WM_GETFONT, 0, 0)), sizeof(font), &font);
+            font.lfHeight = -MulDiv(10, GetDpiForWindow(dialog), 72);
+            font.lfWeight = FW_SEMIBOLD;
+            const HFONT heading = CreateFontIndirectW(&font);
+            SetWindowLongPtrW(dialog, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(heading));
+            if (heading) SendDlgItemMessageW(dialog, IDC_MPO_VALUES_GROUP, WM_SETFONT,
+                reinterpret_cast<WPARAM>(heading), FALSE);
+            UiTheme::Apply(dialog);
             RefreshMpoStatus(dialog);
             return TRUE;
+        }
+        if (message == WM_NCDESTROY)
+        {
+            DeleteObject(reinterpret_cast<HFONT>(GetWindowLongPtrW(dialog, GWLP_USERDATA)));
+            SetWindowLongPtrW(dialog, GWLP_USERDATA, 0);
+            return FALSE;
         }
         if (message != WM_COMMAND) return FALSE;
         switch (LOWORD(wParam))
@@ -824,12 +827,10 @@ namespace
 
     INT_PTR CALLBACK ServicesDialogProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
     {
-        if (message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC ||
-            message == WM_CTLCOLORBTN)
-            return RulePaneBrush(dialog, message, wParam, lParam);
         auto* state = reinterpret_cast<ServicesDialogState*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
         if (message == WM_INITDIALOG)
         {
+            UiTheme::Apply(dialog);
             state = reinterpret_cast<ServicesDialogState*>(lParam);
             SetWindowLongPtrW(dialog, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
             const auto& options = IRacingServiceOptions();
@@ -983,12 +984,10 @@ namespace
 
     INT_PTR CALLBACK DialogProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
     {
-        if (message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC ||
-            message == WM_CTLCOLORBTN || message == WM_CTLCOLOREDIT)
-            return RulePaneBrush(dialog, message, wParam, lParam);
         auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
         if (message == WM_INITDIALOG)
         {
+            UiTheme::Apply(dialog);
             state = reinterpret_cast<DialogState*>(lParam);
             SetWindowLongPtrW(dialog, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
             SendDlgItemMessageW(dialog, IDC_IRACING_PLAN, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Loading power plans..."));

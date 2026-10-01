@@ -9,6 +9,7 @@
 #include "TabHost.h"
 #include "resource.h"
 #include "Utils.h"
+#include "UiTheme.h"
 
 #include <algorithm>
 #include <TlHelp32.h>
@@ -216,28 +217,16 @@ namespace
         return rect;
     }
 
-    bool ShouldRestoreMaximized(HWND windowHandle)
-    {
-        WINDOWPLACEMENT placement{};
-        placement.length = sizeof(placement);
-        if (!GetWindowPlacement(windowHandle, &placement))
-        {
-            return false;
-        }
-
-        return placement.showCmd == SW_SHOWMAXIMIZED || (placement.flags & WPF_RESTORETOMAXIMIZED) != 0;
-    }
-
     HWND CreateLabel(HWND parent, const wchar_t* text, int x, int y, int w, int h, HFONT font)
     {
-        auto handle = CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE, x, y, w, h, parent, nullptr, nullptr, nullptr);
+        auto handle = CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, x, y, w, h, parent, nullptr, nullptr, nullptr);
         SendMessageW(handle, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         return handle;
     }
 
     HWND CreateButtonControl(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h, HFONT font, DWORD extraStyle = 0)
     {
-        auto handle = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | extraStyle,
+        auto handle = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | extraStyle,
             x, y, w, h, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr, nullptr);
         SendMessageW(handle, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         return handle;
@@ -245,7 +234,7 @@ namespace
 
     HWND CreateCheckbox(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h, HFONT font)
     {
-        auto handle = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        auto handle = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
             x, y, w, h, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr, nullptr);
         SendMessageW(handle, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         return handle;
@@ -254,10 +243,10 @@ namespace
     HWND CreateEditControl(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h, HFONT font)
     {
         auto handle = CreateWindowExW(
-            WS_EX_CLIENTEDGE,
+            0,
             L"EDIT",
             text,
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL,
             x,
             y,
             w,
@@ -304,6 +293,7 @@ namespace
         {
         case WM_INITDIALOG:
         {
+            UiTheme::Apply(dialogHandle);
             state = reinterpret_cast<ProgramOptionsDialogState*>(lParam);
             SetWindowLongPtrW(dialogHandle, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
             if (state && state->program)
@@ -486,6 +476,7 @@ namespace
         CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"Name", 0, 207, 52, 180, 10);
         CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"Enabled", 0, 395, 52, 45, 10);
         CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"Primary", 0, 455, 52, 45, 10);
+        CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"", SS_ETCHEDHORZ, 150, 65, 350, 1);
 
         if (setup.displayPaths.empty())
         {
@@ -521,7 +512,7 @@ namespace
                 state,
                 L"STATIC",
                 path.monitorName.empty() ? path.displayName : path.monitorName,
-                0,
+                SS_CENTERIMAGE | SS_ENDELLIPSIS,
                 207,
                 y + 2,
                 180,
@@ -665,6 +656,7 @@ namespace
         {
         case WM_INITDIALOG:
         {
+            UiTheme::Apply(dialogHandle);
             state = reinterpret_cast<MonitorPowerSetupDialogState*>(lParam);
             SetWindowLongPtrW(dialogHandle, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
             if (state == nullptr)
@@ -1183,12 +1175,13 @@ MainWindow::MainWindow(App& app)
 MainWindow::~MainWindow()
 {
     if (programIconList_) ImageList_Destroy(programIconList_);
-    if (titleFont_) DeleteObject(titleFont_);
+    if (headingFont_) DeleteObject(headingFont_);
     if (uiFont_) DeleteObject(uiFont_);
 }
 
 bool MainWindow::Create(int showCommand)
 {
+    dpi_ = GetDpiForSystem();
     const auto appIcon = static_cast<HICON>(LoadImageW(
         app_.InstanceHandle(),
         MAKEINTRESOURCEW(IDI_APPICON),
@@ -1211,7 +1204,7 @@ bool MainWindow::Create(int showCommand)
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     windowClass.hIcon = appIcon ? appIcon : LoadIconW(nullptr, IDI_APPLICATION);
     windowClass.hIconSm = appSmallIcon ? appSmallIcon : windowClass.hIcon;
-    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    windowClass.hbrBackground = UiTheme::BackgroundBrush();
     windowClass.lpszClassName = MainWindow::kWindowClassName;
     RegisterClassExW(&windowClass);
 
@@ -1222,7 +1215,7 @@ bool MainWindow::Create(int showCommand)
         0,
         windowClass.lpszClassName,
         (L"LaunchMate " + UpdateChecker::CurrentVersion()).c_str(),
-        WS_OVERLAPPEDWINDOW,
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         config.windowWidth,
@@ -1238,6 +1231,10 @@ bool MainWindow::Create(int showCommand)
     }
 
     CreateControls();
+    UiTheme::Apply(windowHandle_);
+    RECT client{};
+    GetClientRect(windowHandle_, &client);
+    LayoutControls(client.right, client.bottom);
     SyncCatalogProgramsFromConfiguration();
     PopulateLists();
     UpdateSettingsUi();
@@ -1376,7 +1373,8 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         if (header && header->idFrom == IdWatchedList && header->code == LVN_ITEMCHANGED)
         {
             const auto* change = reinterpret_cast<NMLISTVIEW*>(lParam);
-            if ((change->uNewState & LVIS_SELECTED) != 0 && (change->uOldState & LVIS_SELECTED) == 0)
+            if ((change->uChanged & LVIF_STATE) != 0 &&
+                ((change->uNewState ^ change->uOldState) & LVIS_SELECTED) != 0)
             {
                 PopulateRulePrograms();
                 if (sourceTabIndex_ == 1) PopulateRunningProcesses();
@@ -1406,7 +1404,17 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             HideToTray();
             return 0;
         }
+        if (wParam != SIZE_MINIMIZED) LayoutControls(LOWORD(lParam), HIWORD(lParam));
         break;
+    case WM_DPICHANGED:
+    {
+        dpi_ = HIWORD(wParam);
+        CreateFonts();
+        const auto* rect = reinterpret_cast<const RECT*>(lParam);
+        SetWindowPos(windowHandle_, nullptr, rect->left, rect->top,
+            rect->right - rect->left, rect->bottom - rect->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    }
     case WM_HOTKEY:
         if (wParam >= kMonitorSetupHotkeyBase)
         {
@@ -1532,59 +1540,37 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
 
 void MainWindow::CreateFonts()
 {
-    titleFont_ = CreateFontW(24, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-    uiFont_ = CreateFontW(18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    const HFONT oldUi = uiFont_, oldHeading = headingFont_;
+    const auto font = [this](int points, int weight)
+    {
+        return CreateFontW(-MulDiv(points, dpi_, 72), 0, 0, 0, weight, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+            DEFAULT_PITCH, L"Segoe UI");
+    };
+    uiFont_ = font(9, FW_NORMAL);
+    headingFont_ = font(10, FW_SEMIBOLD);
+    if (windowHandle_)
+        EnumChildWindows(windowHandle_, [](HWND control, LPARAM value) -> BOOL
+        {
+            SendMessageW(control, WM_SETFONT, static_cast<WPARAM>(value), TRUE);
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(uiFont_));
+    for (HWND control : {watchedHeadingHandle_, actionsHeadingHandle_,
+        settingsGroups_[0], settingsGroups_[1], settingsGroups_[2]})
+        if (control) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(headingFont_), TRUE);
+    DeleteObject(oldUi);
+    DeleteObject(oldHeading);
 }
 
 void MainWindow::CreateControls()
 {
-    constexpr int kGlobalListX = 34;
-    constexpr int kCatalogSearchY = 86;
-    constexpr int kGlobalListWidth = 510;
-    constexpr int kCatalogSearchHeight = 28;
-    constexpr int kGlobalListY = 120;
-    constexpr int kGlobalListHeight = 416;
-    constexpr int kWatchedListX = 620;
-    constexpr int kWatchedListY = 106;
-    constexpr int kWatchedListWidth = 560;
-    constexpr int kWatchedListHeight = 200;
-    constexpr int kRuleListX = 620;
-    constexpr int kRuleListY = 362;
-    constexpr int kRuleListWidth = 560;
-    constexpr int kRuleListHeight = 174;
-    constexpr int kTransferButtonWidth = 34;
-    constexpr int kTransferButtonHeight = 38;
-    constexpr int kTransferButtonGap = 8;
-    constexpr int kActionButtonWidth = 42;
-    constexpr int kActionButtonGap = 6;
+    toggleButtonHandle_ = CreateButtonControl(windowHandle_, IdToggleMonitoring, L"Start monitoring", 0, 0, 172, 32, uiFont_);
+    CreateButtonControl(windowHandle_, IdMonitorPowerSetups, L"Monitor configs", 0, 0, 148, 32, uiFont_);
 
-    const int globalButtonsRight = kGlobalListX + kGlobalListWidth;
-    const int watchedButtonsRight = kWatchedListX + kWatchedListWidth;
-    const int ruleButtonsRight = kRuleListX + kRuleListWidth;
-    const int transferButtonX = ((kGlobalListX + kGlobalListWidth) + kRuleListX - kTransferButtonWidth) / 2;
-    const int transferButtonsHeight = (kTransferButtonHeight * 2) + kTransferButtonGap;
-    const int transferButtonY = kRuleListY + ((kRuleListHeight - transferButtonsHeight) / 2);
-
-    constexpr int kTopButtonGap = 12;
-    constexpr int kMonitorSetupButtonWidth = 150;
-    toggleButtonHandle_ = CreateButtonControl(windowHandle_, IdToggleMonitoring, L"Start monitoring", watchedButtonsRight - 220, 14, 220, 34, uiFont_);
-    CreateButtonControl(
-        windowHandle_,
-        IdMonitorPowerSetups,
-        L"Monitor configs",
-        watchedButtonsRight - 220 - kTopButtonGap - kMonitorSetupButtonWidth,
-        14,
-        kMonitorSetupButtonWidth,
-        34,
-        uiFont_);
-
-    sourceTabsHandle_ = CreateWindowExW(0, WC_TABCONTROLW, nullptr,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_FIXEDWIDTH,
-        24, 14, 530, 536, windowHandle_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdSourceTabs)), nullptr, nullptr);
+    sourceTabsHandle_ = CreateWindowExW(WS_EX_CONTROLPARENT, WC_TABCONTROLW, nullptr,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPCHILDREN | TCS_FIXEDWIDTH,
+        0, 0, 100, 100, windowHandle_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdSourceTabs)), nullptr, nullptr);
     SendMessageW(sourceTabsHandle_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
-    TabCtrl_SetItemSize(sourceTabsHandle_, 170, 26);
     TCITEMW sourceTab{TCIF_TEXT};
     sourceTab.pszText = const_cast<wchar_t*>(L"Detected apps");
     TabCtrl_InsertItem(sourceTabsHandle_, 0, &sourceTab);
@@ -1592,68 +1578,148 @@ void MainWindow::CreateControls()
     TabCtrl_InsertItem(sourceTabsHandle_, 1, &sourceTab);
     sourceTab.pszText = const_cast<wchar_t*>(L"Detected processes");
     TabCtrl_InsertItem(sourceTabsHandle_, 2, &sourceTab);
-    detectSourceButtonHandle_ = CreateButtonControl(windowHandle_, IdDetectInstalledApps, L"Refresh installed apps", kGlobalListX, 52, 150, 28, uiFont_);
-    addCatalogButtonHandle_ = CreateButtonControl(windowHandle_, IdAddCatalogProgram, L"+", globalButtonsRight - (kActionButtonWidth * 2) - kActionButtonGap, 52, kActionButtonWidth, 28, uiFont_);
-    removeCatalogButtonHandle_ = CreateButtonControl(windowHandle_, IdRemoveCatalogProgram, L"-", globalButtonsRight - kActionButtonWidth, 52, kActionButtonWidth, 28, uiFont_);
-    catalogSearchHandle_ = CreateEditControl(windowHandle_, IdCatalogSearch, L"", kGlobalListX, kCatalogSearchY, kGlobalListWidth, kCatalogSearchHeight, uiFont_);
+    detectSourceButtonHandle_ = CreateButtonControl(windowHandle_, IdDetectInstalledApps, L"Refresh installed apps", 0, 0, 164, 28, uiFont_);
+    addCatalogButtonHandle_ = CreateButtonControl(windowHandle_, IdAddCatalogProgram, L"+", 0, 0, 36, 28, uiFont_);
+    removeCatalogButtonHandle_ = CreateButtonControl(windowHandle_, IdRemoveCatalogProgram, L"-", 0, 0, 36, 28, uiFont_);
+    catalogSearchHandle_ = CreateEditControl(windowHandle_, IdCatalogSearch, L"", 0, 0, 100, 28, uiFont_);
     SendMessageW(catalogSearchHandle_, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"Search apps"));
-    catalogListHandle_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, nullptr,
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | LVS_REPORT | LVS_SHOWSELALWAYS,
-        kGlobalListX, kGlobalListY, kGlobalListWidth, kGlobalListHeight, windowHandle_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdCatalogList)), nullptr, nullptr);
-    SendMessageW(catalogListHandle_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
-    InitializeReportListView(catalogListHandle_);
-    InitializeProgramIcons();
+    const auto list = [this](int id, bool single)
+    {
+        HWND control = CreateWindowExW(0, WC_LISTVIEWW, nullptr,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | WS_VSCROLL |
+                LVS_REPORT | LVS_SHOWSELALWAYS | (single ? LVS_SINGLESEL : 0),
+            0, 0, 100, 100, windowHandle_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr, nullptr);
+        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
+        InitializeReportListView(control);
+        return control;
+    };
+    catalogListHandle_ = list(IdCatalogList, false);
     ConfigureListView(catalogListHandle_, {{L"", 0}, {L"Name", 2}, {L"Path", 5}});
     HostControlsInTab(windowHandle_, sourceTabsHandle_, {
-        detectSourceButtonHandle_,
-        addCatalogButtonHandle_,
-        removeCatalogButtonHandle_,
-        catalogSearchHandle_,
-        catalogListHandle_});
+        detectSourceButtonHandle_, addCatalogButtonHandle_, removeCatalogButtonHandle_,
+        catalogSearchHandle_, catalogListHandle_});
 
-    CreateLabel(windowHandle_, L"Watched processes", 620, 72, 240, 22, uiFont_);
-    CreateButtonControl(windowHandle_, IdAddWatchedProcess, L"+", watchedButtonsRight - (kActionButtonWidth * 2) - kActionButtonGap, 72, kActionButtonWidth, 28, uiFont_);
-    CreateButtonControl(windowHandle_, IdRemoveWatchedProcess, L"-", watchedButtonsRight - kActionButtonWidth, 72, kActionButtonWidth, 28, uiFont_);
-    watchedListHandle_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, nullptr,
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-        kWatchedListX, kWatchedListY, kWatchedListWidth, kWatchedListHeight, windowHandle_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdWatchedList)), nullptr, nullptr);
-    SendMessageW(watchedListHandle_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
-    InitializeReportListView(watchedListHandle_);
+    watchedHeadingHandle_ = CreateLabel(windowHandle_, L"Watched processes", 0, 0, 240, 24, headingFont_);
+    CreateButtonControl(windowHandle_, IdAddWatchedProcess, L"+", 0, 0, 36, 28, uiFont_);
+    CreateButtonControl(windowHandle_, IdRemoveWatchedProcess, L"-", 0, 0, 36, 28, uiFont_);
+    watchedListHandle_ = list(IdWatchedList, true);
     ConfigureListView(watchedListHandle_, {{L"", 0}, {L"Status", 2}, {L"Name", 3}, {L"Path", 4}});
 
-    CreateLabel(windowHandle_, L"Actions", 620, 328, 240, 22, uiFont_);
-    CreateButtonControl(windowHandle_, IdTransferCatalogProgram, L">", transferButtonX, transferButtonY, kTransferButtonWidth, kTransferButtonHeight, uiFont_);
-    CreateButtonControl(windowHandle_, IdRemoveRuleAction, L"<", transferButtonX,
-        transferButtonY + kTransferButtonHeight + kTransferButtonGap,
-        kTransferButtonWidth, kTransferButtonHeight, uiFont_);
-    CreateButtonControl(windowHandle_, IdEditRuleActions, L"Edit actions...", ruleButtonsRight - 130, 328, 130, 28, uiFont_);
-    ruleProgramsListHandle_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, nullptr,
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-        kRuleListX, kRuleListY, kRuleListWidth, kRuleListHeight, windowHandle_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdRuleProgramsList)), nullptr, nullptr);
-    SendMessageW(ruleProgramsListHandle_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
-    InitializeReportListView(ruleProgramsListHandle_);
+    actionsHeadingHandle_ = CreateLabel(windowHandle_, L"Actions", 0, 0, 240, 24, headingFont_);
+    CreateButtonControl(windowHandle_, IdTransferCatalogProgram, L">", 0, 0, 32, 32, uiFont_);
+    CreateButtonControl(windowHandle_, IdRemoveRuleAction, L"<", 0, 0, 32, 32, uiFont_);
+    CreateButtonControl(windowHandle_, IdEditRuleActions, L"Edit actions...", 0, 0, 132, 28, uiFont_);
+    ruleProgramsListHandle_ = list(IdRuleProgramsList, true);
     ConfigureListView(ruleProgramsListHandle_, {{L"", 0}, {L"Type", 2}, {L"Name", 3}, {L"Details", 6}});
     InitializeProgramIcons();
 
-    CreateLabel(windowHandle_, L"Settings", 24, 560, 180, 22, uiFont_);
-    minimizeToTrayHandle_ = CreateCheckbox(windowHandle_, IdSettingsMinimizeToTray, L"Minimize to tray", 24, 594, 320, 24, uiFont_);
-    closeToTrayHandle_ = CreateCheckbox(windowHandle_, IdSettingsCloseToTray, L"Close to tray", 24, 624, 320, 24, uiFont_);
-    startInTrayHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartInTray, L"Start in tray", 24, 654, 320, 24, uiFont_);
-    startWithWindowsHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartWithWindows, L"Start with Windows", 360, 594, 320, 24, uiFont_);
-    startMonitoringHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartMonitoringOnLaunch, L"Start monitoring on launch", 360, 624, 320, 24, uiFont_);
-    checkForUpdatesHandle_ = CreateCheckbox(windowHandle_, IdSettingsCheckForUpdatesOnStartup, L"Check for updates on startup", 360, 654, 360, 24, uiFont_);
-    startAsAdministratorHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartAsAdministrator, L"Start as Administrator", 720, 594, 230, 24, uiFont_);
-    useEtwHandle_ = CreateCheckbox(windowHandle_, IdSettingsUseEtw, L"Use ETW", 970, 594, 210, 24, uiFont_);
-    CreateButtonControl(windowHandle_, IdCheckForUpdates, L"Check for updates", 840, 644, 190, 34, uiFont_);
-    CreateButtonControl(windowHandle_, IdMpoSettings, L"MPO settings...", 720, 644, 110, 34, uiFont_);
-    CreateButtonControl(windowHandle_, IdSaveConfig, L"Save", 1040, 644, 140, 34, uiFont_);
+    const wchar_t* groupNames[] = {L"Window behavior", L"Startup & updates", L"Monitoring"};
+    for (size_t i = 0; i < settingsGroups_.size(); ++i)
+    {
+        settingsGroups_[i] = CreateWindowExW(0, L"BUTTON", groupNames[i],
+            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | BS_GROUPBOX, 0, 0, 100, 126, windowHandle_, nullptr, nullptr, nullptr);
+        SendMessageW(settingsGroups_[i], WM_SETFONT, reinterpret_cast<WPARAM>(headingFont_), TRUE);
+    }
+    minimizeToTrayHandle_ = CreateCheckbox(windowHandle_, IdSettingsMinimizeToTray, L"Minimize to tray", 0, 0, 300, 24, uiFont_);
+    closeToTrayHandle_ = CreateCheckbox(windowHandle_, IdSettingsCloseToTray, L"Close to tray", 0, 0, 300, 24, uiFont_);
+    startInTrayHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartInTray, L"Start in tray", 0, 0, 300, 24, uiFont_);
+    startWithWindowsHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartWithWindows, L"Start with Windows", 0, 0, 300, 24, uiFont_);
+    startMonitoringHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartMonitoringOnLaunch, L"Start monitoring on launch", 0, 0, 300, 24, uiFont_);
+    checkForUpdatesHandle_ = CreateCheckbox(windowHandle_, IdSettingsCheckForUpdatesOnStartup, L"Check for updates on startup", 0, 0, 300, 24, uiFont_);
+    startAsAdministratorHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartAsAdministrator, L"Start as Administrator", 0, 0, 300, 24, uiFont_);
+    useEtwHandle_ = CreateCheckbox(windowHandle_, IdSettingsUseEtw, L"Use ETW", 0, 0, 300, 24, uiFont_);
+    for (HWND group : settingsGroups_)
+        SetWindowLongPtrW(group, GWL_EXSTYLE, GetWindowLongPtrW(group, GWL_EXSTYLE) | WS_EX_CONTROLPARENT);
+    HostControlsInPanel(windowHandle_, settingsGroups_[0],
+        {minimizeToTrayHandle_, closeToTrayHandle_, startInTrayHandle_});
+    HostControlsInPanel(windowHandle_, settingsGroups_[1],
+        {startWithWindowsHandle_, startMonitoringHandle_, checkForUpdatesHandle_});
+    HostControlsInPanel(windowHandle_, settingsGroups_[2],
+        {startAsAdministratorHandle_, useEtwHandle_});
+    CreateButtonControl(windowHandle_, IdCheckForUpdates, L"Check for updates", 0, 0, 154, 28, uiFont_);
+    CreateButtonControl(windowHandle_, IdMpoSettings, L"MPO settings...", 0, 0, 136, 28, uiFont_);
+    CreateButtonControl(windowHandle_, IdSaveConfig, L"Save", 0, 0, 112, 28, uiFont_);
+}
+
+void MainWindow::LayoutControls(int width, int height)
+{
+    if (!sourceTabsHandle_) return;
+    const auto px = [this](int value) { return MulDiv(value, dpi_, 96); };
+    const int w = MulDiv(width, 96, dpi_);
+    const int h = MulDiv(height, 96, dpi_);
+    const int content = w - 40;
+    const int settingsY = h - 182;
+    const int listBottom = settingsY - 18;
+    const int sourceWidth = (content - 72) * 46 / 100;
+    const int rightX = 20 + sourceWidth + 72;
+    const int rightWidth = w - 20 - rightX;
+    const auto place = [&](HWND control, int x, int y, int cw, int ch)
+    {
+        if (!control) return;
+        POINT position{px(x), px(y)};
+        MapWindowPoints(windowHandle_, GetParent(control), &position, 1);
+        MoveWindow(control, position.x, position.y, px(cw), px(ch), TRUE);
+    };
+    const auto button = [&](int id, int x, int y, int cw, int ch)
+    { place(GetDlgItem(windowHandle_, id), x, y, cw, ch); };
+
+    place(toggleButtonHandle_, w - 192, 20, 172, 32);
+    button(IdMonitorPowerSetups, w - 352, 20, 148, 32);
+    place(sourceTabsHandle_, 20, 20, sourceWidth, listBottom - 20);
+    TabCtrl_SetItemSize(sourceTabsHandle_, px((sourceWidth - 8) / 3), px(UiTheme::TabHeight));
+    place(detectSourceButtonHandle_, 32, 62, 164, 28);
+    place(addCatalogButtonHandle_, 20 + sourceWidth - 90, 62, 36, 28);
+    place(removeCatalogButtonHandle_, 20 + sourceWidth - 48, 62, 36, 28);
+    place(catalogSearchHandle_, 32, 98, sourceWidth - 24, 22);
+    place(catalogListHandle_, 32, 130, sourceWidth - 24, listBottom - 142);
+
+    place(watchedHeadingHandle_, rightX, 72, rightWidth - 96, 24);
+    button(IdAddWatchedProcess, w - 98, 68, 36, 28);
+    button(IdRemoveWatchedProcess, w - 56, 68, 36, 28);
+    const int watchedHeight = (listBottom - 108 - 62) * 46 / 100;
+    place(watchedListHandle_, rightX, 108, rightWidth, watchedHeight);
+    const int actionsY = 108 + watchedHeight + 18;
+    const int actionsListY = actionsY + 38;
+    place(actionsHeadingHandle_, rightX, actionsY, rightWidth - 144, 24);
+    button(IdEditRuleActions, w - 152, actionsY - 2, 132, 28);
+    place(ruleProgramsListHandle_, rightX, actionsListY, rightWidth, listBottom - actionsListY);
+    const int transferY = actionsListY + (listBottom - actionsListY - 72) / 2;
+    button(IdTransferCatalogProgram, 20 + sourceWidth + 20, transferY, 32, 32);
+    button(IdRemoveRuleAction, 20 + sourceWidth + 20, transferY + 40, 32, 32);
+
+    const int firstWidth = (content - 24) * 26 / 100;
+    const int secondWidth = (content - 24) * 40 / 100;
+    const int secondX = 20 + firstWidth + 12;
+    const int thirdX = secondX + secondWidth + 12;
+    const int thirdWidth = w - 20 - thirdX;
+    place(settingsGroups_[0], 20, settingsY, firstWidth, 126);
+    place(settingsGroups_[1], secondX, settingsY, secondWidth, 126);
+    place(settingsGroups_[2], thirdX, settingsY, thirdWidth, 126);
+    place(minimizeToTrayHandle_, 36, settingsY + 30, firstWidth - 32, 24);
+    place(closeToTrayHandle_, 36, settingsY + 58, firstWidth - 32, 24);
+    place(startInTrayHandle_, 36, settingsY + 86, firstWidth - 32, 24);
+    place(startWithWindowsHandle_, secondX + 16, settingsY + 30, secondWidth - 32, 24);
+    place(startMonitoringHandle_, secondX + 16, settingsY + 58, secondWidth - 32, 24);
+    place(checkForUpdatesHandle_, secondX + 16, settingsY + 86, secondWidth - 32, 24);
+    place(startAsAdministratorHandle_, thirdX + 16, settingsY + 30, thirdWidth - 32, 24);
+    place(useEtwHandle_, thirdX + 16, settingsY + 58, thirdWidth - 32, 24);
+    button(IdMpoSettings, w - 446, h - 44, 136, 28);
+    button(IdCheckForUpdates, w - 298, h - 44, 154, 28);
+    button(IdSaveConfig, w - 132, h - 44, 112, 28);
+
+    if (sourceTabIndex_ == 0) ResizeListViewColumns(catalogListHandle_, {0, 2, 5}, px(24));
+    else if (sourceTabIndex_ == 1) ResizeListViewColumns(catalogListHandle_, {0, 2, 5, 1, 2}, px(24));
+    else ResizeListViewColumns(catalogListHandle_, {0, 2, 4, 2, 3}, px(24));
+    ResizeListViewColumns(watchedListHandle_, {0, 2, 3, 4}, px(24));
+    ResizeListViewColumns(ruleProgramsListHandle_, {0, 2, 3, 6}, px(24));
 }
 
 void MainWindow::InitializeProgramIcons()
 {
     if (!programIconList_)
     {
-        programIconList_ = ImageList_Create(16, 16, ILC_COLOR32 | ILC_MASK, 32, 32);
+        const int iconSize = MulDiv(16, dpi_, 96);
+        programIconList_ = ImageList_Create(iconSize, iconSize, ILC_COLOR32 | ILC_MASK, 32, 32);
         if (!programIconList_) return;
         defaultProgramIconIndex_ = ProgramIconIndex(L"");
     }
@@ -1879,7 +1945,10 @@ void MainWindow::PopulateRulePrograms()
 {
     ListView_DeleteAllItems(ruleProgramsListHandle_);
     const int index = SelectedWatchedIndex();
-    if (index < 0 || index >= static_cast<int>(app_.Configuration().watchedProcesses.size()))
+    const bool selected = index >= 0 && index < static_cast<int>(app_.Configuration().watchedProcesses.size());
+    for (int id : {IdEditRuleActions, IdTransferCatalogProgram, IdRemoveRuleAction, IdRemoveWatchedProcess})
+        EnableWindow(GetDlgItem(windowHandle_, id), selected);
+    if (!selected)
     {
         return;
     }
@@ -2433,7 +2502,7 @@ void MainWindow::CaptureWindowPlacement()
     config.windowWidth = rect.right - rect.left;
     config.windowHeight = rect.bottom - rect.top;
     config.hasWindowPlacement = true;
-    config.startMaximized = ShouldRestoreMaximized(windowHandle_);
+    config.startMaximized = false;
 }
 
 void MainWindow::RestoreWindowPlacement(int showCommand)
@@ -2456,7 +2525,7 @@ void MainWindow::RestoreWindowPlacement(int showCommand)
             SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
-    ShowWindow(windowHandle_, config.startMaximized ? SW_MAXIMIZE : showCommand);
+    ShowWindow(windowHandle_, showCommand == SW_SHOWMAXIMIZED ? SW_SHOWNORMAL : showCommand);
     UpdateWindow(windowHandle_);
 }
 
@@ -2478,7 +2547,8 @@ void MainWindow::ShowFromTray()
         SWP_NOZORDER | SWP_NOACTIVATE);
 
     ShowWindow(windowHandle_, SW_SHOW);
-    ShowWindow(windowHandle_, ShouldRestoreMaximized(windowHandle_) ? SW_MAXIMIZE : SW_RESTORE);
+    ShowWindow(windowHandle_, SW_RESTORE);
+    RedrawWindow(windowHandle_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
     SetForegroundWindow(windowHandle_);
 }
 
@@ -2586,13 +2656,29 @@ void MainWindow::EditRuleProgram()
     int relativeIndex = actionIndex - static_cast<int>(rule.programsToLaunch.size());
     if (relativeIndex < static_cast<int>(rule.processesToStop.size()))
     {
-        EditRuleActions(1, relativeIndex);
+        auto action = rule.processesToStop[static_cast<size_t>(relativeIndex)];
+        if (ShowStopProcessActionDialog(app_.InstanceHandle(), windowHandle_, action))
+        {
+            rule.processesToStop[static_cast<size_t>(relativeIndex)] = std::move(action);
+            PopulateRulePrograms();
+            ListView_SetItemState(ruleProgramsListHandle_, actionIndex,
+                LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            SaveConfiguration();
+        }
         return;
     }
     relativeIndex -= static_cast<int>(rule.processesToStop.size());
     if (relativeIndex < static_cast<int>(rule.homeAssistantActions.size()))
     {
-        EditRuleActions(2, relativeIndex);
+        auto action = rule.homeAssistantActions[static_cast<size_t>(relativeIndex)];
+        if (ShowHomeAssistantActionDialog(app_.InstanceHandle(), windowHandle_, action))
+        {
+            rule.homeAssistantActions[static_cast<size_t>(relativeIndex)] = std::move(action);
+            PopulateRulePrograms();
+            ListView_SetItemState(ruleProgramsListHandle_, actionIndex,
+                LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            SaveConfiguration();
+        }
         return;
     }
     relativeIndex -= static_cast<int>(rule.homeAssistantActions.size());

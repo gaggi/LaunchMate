@@ -5,7 +5,7 @@
 
 #include <initializer_list>
 
-inline LRESULT CALLBACK HostedTabSubclassProc(
+inline LRESULT CALLBACK HostedPanelSubclassProc(
     HWND tab,
     UINT message,
     WPARAM wParam,
@@ -17,21 +17,21 @@ inline LRESULT CALLBACK HostedTabSubclassProc(
     {
         return SendMessageW(reinterpret_cast<HWND>(referenceData), message, wParam, lParam);
     }
-    if (message == WM_CTLCOLORSTATIC)
+    if (message == WM_CTLCOLORSTATIC || message == WM_CTLCOLORBTN ||
+        message == WM_CTLCOLOREDIT || message == WM_CTLCOLORLISTBOX)
     {
-        SetBkMode(reinterpret_cast<HDC>(wParam), TRANSPARENT);
-        return reinterpret_cast<LRESULT>(GetStockObject(HOLLOW_BRUSH));
+        return SendMessageW(reinterpret_cast<HWND>(referenceData), message, wParam, lParam);
     }
     if (message == WM_NCDESTROY)
     {
-        RemoveWindowSubclass(tab, HostedTabSubclassProc, subclassId);
+        RemoveWindowSubclass(tab, HostedPanelSubclassProc, subclassId);
     }
     return DefSubclassProc(tab, message, wParam, lParam);
 }
 
-inline void HostControlsInTab(HWND owner, HWND tab, std::initializer_list<HWND> controls)
+inline void HostControlsInPanel(HWND owner, HWND tab, std::initializer_list<HWND> controls)
 {
-    SetWindowSubclass(tab, HostedTabSubclassProc, 1, reinterpret_cast<DWORD_PTR>(owner));
+    SetWindowSubclass(tab, HostedPanelSubclassProc, 1, reinterpret_cast<DWORD_PTR>(owner));
     for (HWND control : controls)
     {
         if (!control) continue;
@@ -43,4 +43,9 @@ inline void HostControlsInTab(HWND owner, HWND tab, std::initializer_list<HWND> 
         SetWindowPos(control, nullptr, position.x, position.y, rect.right - rect.left, rect.bottom - rect.top,
             SWP_NOZORDER | SWP_NOACTIVATE);
     }
+}
+
+inline void HostControlsInTab(HWND owner, HWND tab, std::initializer_list<HWND> controls)
+{
+    HostControlsInPanel(owner, tab, controls);
 }

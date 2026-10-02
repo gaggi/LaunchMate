@@ -184,12 +184,12 @@ namespace
         return true;
     }
 
-    std::wstring IniSummary(const std::filesystem::path& path)
+    bool ReadIniValues(const std::filesystem::path& path, std::array<std::string, 3>& values)
     {
         std::string contents;
-        if (!ReadIni(path, contents)) return L"app.ini: missing, unreadable, or unsupported encoding";
+        if (!ReadIni(path, contents)) return false;
         bool inGraphics = false;
-        std::array<std::string, 3> values{};
+        values = {};
         size_t cursor = 0;
         while (cursor < contents.size())
         {
@@ -203,12 +203,23 @@ namespace
                 {
                     const auto key = LowerAscii(Trim(line.substr(0, equal)));
                     for (size_t index = 0; index < kIniSettings.size(); ++index)
-                        if (key == LowerAscii(kIniSettings[index].first)) values[index] = Trim(line.substr(equal + 1));
+                        if (key == LowerAscii(kIniSettings[index].first))
+                        {
+                            const auto value = line.substr(equal + 1);
+                            values[index] = Trim(value.substr(0, value.find_first_of(";#")));
+                        }
                 }
             }
             if (end == std::string::npos) break;
             cursor = end + 1;
         }
+        return true;
+    }
+
+    std::wstring IniSummary(const std::filesystem::path& path)
+    {
+        std::array<std::string, 3> values{};
+        if (!ReadIniValues(path, values)) return L"app.ini: missing, unreadable, or unsupported encoding";
         std::wstring summary = L"app.ini [Graphics]:";
         for (size_t index = 0; index < kIniSettings.size(); ++index)
         {
@@ -219,7 +230,7 @@ namespace
         return summary;
     }
 
-    bool ApplyIniSettings(const std::filesystem::path& path, std::wstring& error)
+    bool ApplyIniSettings(const std::filesystem::path& path, const std::array<std::string, 3>& values, std::wstring& error)
     {
         std::string contents;
         if (!ReadIni(path, contents)) { error = L"The app.ini file is missing, unreadable, or uses UTF-16."; return false; }
@@ -258,13 +269,16 @@ namespace
             {
                 if (key == LowerAscii(kIniSettings[setting].first))
                 {
-                    lines[index] = kIniSettings[setting].first + "=" + kIniSettings[setting].second;
+                    const auto equalInOriginal = lines[index].find('=');
+                    const auto comment = lines[index].find_first_of(";#", equalInOriginal + 1);
+                    lines[index] = lines[index].substr(0, equalInOriginal + 1) + values[setting] +
+                        (comment == std::string::npos ? "" : " " + lines[index].substr(comment));
                     found[setting] = true;
                 }
             }
         }
         for (size_t setting = 0; setting < kIniSettings.size(); ++setting)
-            if (!found[setting]) lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(graphicsEnd++), kIniSettings[setting].first + "=" + kIniSettings[setting].second);
+            if (!found[setting]) lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(graphicsEnd++), kIniSettings[setting].first + "=" + values[setting]);
         std::string updated;
         for (const auto& line : lines) updated += line + newline;
         if (updated == contents) return true;
@@ -375,21 +389,43 @@ namespace
     {
         const std::wstring script = L"$ErrorActionPreference='Stop'; $p=@((Get-MpPreference).ExclusionPath); "
             L"if ($p -match '^N/A:|Must be an administrator to view exclusions') { exit 3 }; "
-            L"[int]($p -contains '" + EscapePowerShell(install) + L"'); [int]($p -contains '" + EscapePowerShell(documents) + L"')";
+            L"'LM_DEFENDER:' + [int]($p -contains '" + EscapePowerShell(install) + L"') + ':' + [int]($p -contains '" + EscapePowerShell(documents) + L"')";
         std::string output;
         DefenderState state;
         if (!RunPowerShell(script, output)) return state;
-        const size_t first = output.find_first_of("01");
-        const size_t second = first == std::string::npos ? first : output.find_first_of("01", first + 1);
-        if (second == std::string::npos) return state;
+        const std::string marker = "LM_DEFENDER:";
+        const size_t position = output.find(marker);
+        if (position == std::string::npos) return state;
+        const size_t first = position + marker.size(), second = first + 2;
+        if (output.size() <= second || output[first + 1] != ':' ||
+            (output[first] != '0' && output[first] != '1') || (output[second] != '0' && output[second] != '1')) return state;
         state.available = true;
         state.installExcluded = output[first] == '1';
         state.documentsExcluded = output[second] == '1';
         return state;
     }
 
+    std::wstring DefenderExclusionScript(const std::wstring& install, const std::wstring& documents, bool remove)
+    {
+        const std::wstring change = remove
+            ? L"if ($paths -contains $target) { Remove-MpPreference -ExclusionPath $target -ErrorAction Stop }"
+            : L"if ($paths -notcontains $target) { Add-MpPreference -ExclusionPath $target -ErrorAction Stop }";
+        const std::wstring failed = remove ? L"$paths -contains $target" : L"$paths -notcontains $target";
+        return L"$ErrorActionPreference='Stop'; try { "
+            L"$targets=@('" + EscapePowerShell(install) + L"','" + EscapePowerShell(documents) + L"'); "
+            L"$paths=@((Get-MpPreference).ExclusionPath); "
+            L"if ($paths -match '^N/A:|Must be an administrator to view exclusions') { exit 3 }; "
+            L"foreach ($target in $targets) { " + change + L" }; "
+            L"$paths=@((Get-MpPreference).ExclusionPath); "
+            L"foreach ($target in $targets) { if (" + failed + L") { exit 2 } }; "
+            L"exit 0 } catch { exit 4 }";
+    }
+
     struct DiagnosticResult
     {
+        DefenderState defender;
+        std::array<std::string, 3> iniValues{};
+        bool iniReadable{};
         std::wstring summary;
         std::vector<PowerSchemeInfo> schemes;
         std::filesystem::path documents;
@@ -403,8 +439,11 @@ namespace
         std::filesystem::path documents;
         std::filesystem::path install;
         bool defenderVerifiedThisSession{};
+        bool removeDefenderExclusions{};
         bool loaded{};
         bool refreshAgain{};
+        bool iniDirty{};
+        bool syncingIni{};
         BackgroundTask<DiagnosticResult> refresh;
     };
 
@@ -625,6 +664,7 @@ namespace
             }
             AddListViewRow(list, {action.processName, PriorityText(action.cpuPriorityClass), IoPriorityText(action.ioPriority), MemoryPriorityText(action.memoryPriority), affinity});
         }
+        UpdateListActionButtons(list, GetDlgItem(dialog, IDC_PERF_ACTION_EDIT), GetDlgItem(dialog, IDC_PERF_ACTION_REMOVE));
     }
 
     constexpr wchar_t kDwmRegistryPath[] = L"SOFTWARE\\Microsoft\\Windows\\Dwm";
@@ -782,23 +822,9 @@ namespace
     {
         if (message == WM_INITDIALOG)
         {
-            LOGFONTW font{};
-            GetObjectW(reinterpret_cast<HFONT>(SendMessageW(dialog, WM_GETFONT, 0, 0)), sizeof(font), &font);
-            font.lfHeight = -MulDiv(10, GetDpiForWindow(dialog), 72);
-            font.lfWeight = FW_SEMIBOLD;
-            const HFONT heading = CreateFontIndirectW(&font);
-            SetWindowLongPtrW(dialog, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(heading));
-            if (heading) SendDlgItemMessageW(dialog, IDC_MPO_VALUES_GROUP, WM_SETFONT,
-                reinterpret_cast<WPARAM>(heading), FALSE);
             UiTheme::Apply(dialog);
             RefreshMpoStatus(dialog);
             return TRUE;
-        }
-        if (message == WM_NCDESTROY)
-        {
-            DeleteObject(reinterpret_cast<HFONT>(GetWindowLongPtrW(dialog, GWLP_USERDATA)));
-            SetWindowLongPtrW(dialog, GWLP_USERDATA, 0);
-            return FALSE;
         }
         if (message != WM_COMMAND) return FALSE;
         switch (LOWORD(wParam))
@@ -825,6 +851,18 @@ namespace
         BackgroundTask<std::vector<std::wstring>> refresh;
     };
 
+    bool AllServicesSelected(HWND dialog)
+    {
+        for (size_t index = 0; index < IRacingServiceOptions().size(); ++index)
+            if (IsDlgButtonChecked(dialog, IDC_IRACING_SERVICE_FIRST + static_cast<int>(index)) != BST_CHECKED) return false;
+        return !IRacingServiceOptions().empty();
+    }
+
+    void UpdateServiceSelectionButton(HWND dialog)
+    {
+        SetDlgItemTextW(dialog, IDC_IRACING_SERVICE_ALL, AllServicesSelected(dialog) ? L"Deselect all" : L"Select all");
+    }
+
     INT_PTR CALLBACK ServicesDialogProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
     {
         auto* state = reinterpret_cast<ServicesDialogState*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
@@ -846,6 +884,7 @@ namespace
                 });
                 CheckDlgButton(dialog, id, selected ? BST_CHECKED : BST_UNCHECKED);
             }
+            UpdateServiceSelectionButton(dialog);
             const bool started = SetTimer(dialog, 83, 100, nullptr) &&
                 state->refresh.Start([](const std::atomic_bool& cancelled)
                 {
@@ -894,8 +933,18 @@ namespace
         switch (LOWORD(wParam))
         {
         case IDC_IRACING_SERVICE_ALL:
+        {
+            const UINT checked = AllServicesSelected(dialog) ? BST_UNCHECKED : BST_CHECKED;
             for (size_t index = 0; index < IRacingServiceOptions().size(); ++index)
-                CheckDlgButton(dialog, IDC_IRACING_SERVICE_FIRST + static_cast<int>(index), BST_CHECKED);
+                CheckDlgButton(dialog, IDC_IRACING_SERVICE_FIRST + static_cast<int>(index), checked);
+            UpdateServiceSelectionButton(dialog);
+            return TRUE;
+        }
+        }
+        if (LOWORD(wParam) >= IDC_IRACING_SERVICE_FIRST &&
+            LOWORD(wParam) < IDC_IRACING_SERVICE_FIRST + IRacingServiceOptions().size() && HIWORD(wParam) == BN_CLICKED)
+        {
+            UpdateServiceSelectionButton(dialog);
             return TRUE;
         }
         return FALSE;
@@ -937,7 +986,7 @@ namespace
         if (state.install.empty()) summary += L"\r\n  iRacing executable path is unavailable";
         else
         {
-            const auto defender = ReadDefender(state.install.wstring(), state.documents.wstring());
+            const auto& defender = state.defender;
             if (!defender.available)
                 summary += defenderVerifiedThisSession
                     ? L"\r\n  added and verified with administrator rights this session; current list requires administrator rights to view"
@@ -957,18 +1006,25 @@ namespace
         SetDlgItemTextW(dialog, IDC_IRACING_STATUS, L"Loading system settings...");
         EnableWindow(GetDlgItem(dialog, IDC_IRACING_REFRESH), FALSE);
         EnableWindow(GetDlgItem(dialog, IDC_IRACING_INI), FALSE);
+        for (int id : {IDC_IRACING_CAR_PRELOAD, IDC_IRACING_TRACK_PRELOAD, IDC_IRACING_STREAMING_SIZE})
+            EnableWindow(GetDlgItem(dialog, id), FALSE);
         EnableWindow(GetDlgItem(dialog, IDC_IRACING_DEFENDER), FALSE);
         const bool started = SetTimer(dialog, 82, 100, nullptr) && state.refresh.Start(
             [rule = *state.rule, verified = state.defenderVerifiedThisSession](const std::atomic_bool& cancelled)
         {
             DiagnosticResult result;
             result.documents = IRacingDocuments();
+            if (IsIRacingRule(rule) && !result.documents.empty())
+                result.iniReadable = ReadIniValues(result.documents / L"app.ini", result.iniValues);
             if (!rule.executablePath.empty())
             {
                 const std::filesystem::path executable(rule.executablePath);
                 if (_wcsicmp(executable.filename().c_str(), L"iRacingSim64DX11.exe") == 0)
                     result.install = executable.parent_path();
             }
+            if (cancelled) return result;
+            if (IsIRacingRule(rule) && !result.install.empty() && !result.documents.empty())
+                result.defender = ReadDefender(result.install.wstring(), result.documents.wstring());
             if (cancelled) return result;
             result.schemes = EnumeratePowerSchemes();
             if (!cancelled) result.summary = BuildStatus(rule, result, verified);
@@ -990,6 +1046,9 @@ namespace
             UiTheme::Apply(dialog);
             state = reinterpret_cast<DialogState*>(lParam);
             SetWindowLongPtrW(dialog, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+            const auto name = state->rule->displayName.empty() ? state->rule->processName : state->rule->displayName;
+            const auto caption = (name.empty() ? std::wstring(L"iRacing") : name) + L" - Specific settings";
+            SetDlgItemTextW(dialog, IDC_IRACING_INI_GROUP, caption.c_str());
             SendDlgItemMessageW(dialog, IDC_IRACING_PLAN, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Loading power plans..."));
             SendDlgItemMessageW(dialog, IDC_IRACING_PLAN, CB_SETCURSEL, 0, 0);
             EnableWindow(GetDlgItem(dialog, IDC_IRACING_PLAN), FALSE);
@@ -999,6 +1058,9 @@ namespace
             {
                 ShowWindow(GetDlgItem(dialog, IDC_IRACING_INI), SW_HIDE);
                 ShowWindow(GetDlgItem(dialog, IDC_IRACING_DEFENDER), SW_HIDE);
+                for (int id : {IDC_IRACING_INI_GROUP, IDC_IRACING_CAR_PRELOAD, IDC_IRACING_TRACK_PRELOAD,
+                    IDC_IRACING_STREAMING_SIZE, IDC_IRACING_STREAMING_LABEL, IDC_IRACING_INI_HINT})
+                    ShowWindow(GetDlgItem(dialog, id), SW_HIDE);
             }
             RefreshStatus(dialog, *state);
             return TRUE;
@@ -1052,8 +1114,25 @@ namespace
             SendDlgItemMessageW(dialog, IDC_IRACING_PLAN, CB_SETCURSEL, selected, 0);
             state->loaded = true;
             EnableWindow(GetDlgItem(dialog, IDC_IRACING_PLAN), TRUE);
-            EnableWindow(GetDlgItem(dialog, IDC_IRACING_INI), TRUE);
-            EnableWindow(GetDlgItem(dialog, IDC_IRACING_DEFENDER), TRUE);
+            EnableWindow(GetDlgItem(dialog, IDC_IRACING_INI), result->iniReadable);
+            for (int id : {IDC_IRACING_CAR_PRELOAD, IDC_IRACING_TRACK_PRELOAD, IDC_IRACING_STREAMING_SIZE})
+                EnableWindow(GetDlgItem(dialog, id), result->iniReadable);
+            if (!state->iniDirty)
+            {
+                state->syncingIni = true;
+                CheckDlgButton(dialog, IDC_IRACING_CAR_PRELOAD, result->iniValues[0] == "1" ? BST_CHECKED : BST_UNCHECKED);
+                CheckDlgButton(dialog, IDC_IRACING_TRACK_PRELOAD, result->iniValues[1] == "1" ? BST_CHECKED : BST_UNCHECKED);
+                const auto& size = result->iniValues[2];
+                SetDlgItemTextW(dialog, IDC_IRACING_STREAMING_SIZE,
+                    size.empty() ? L"256" : std::wstring(size.begin(), size.end()).c_str());
+                state->syncingIni = false;
+            }
+            state->removeDefenderExclusions = result->defender.available
+                ? result->defender.installExcluded && result->defender.documentsExcluded
+                : state->defenderVerifiedThisSession;
+            SetDlgItemTextW(dialog, IDC_IRACING_DEFENDER, state->removeDefenderExclusions
+                ? L"Remove Defender exclusions..." : L"Add Defender exclusions...");
+            EnableWindow(GetDlgItem(dialog, IDC_IRACING_DEFENDER), !state->install.empty() && !state->documents.empty());
             SetDlgItemTextW(dialog, IDC_IRACING_STATUS, result->summary.c_str());
             return TRUE;
         }
@@ -1075,8 +1154,24 @@ namespace
                     RefreshPerformanceActions(dialog, *state);
                 return TRUE;
             }
+            if (header->idFrom == IDC_PERF_ACTION_LIST && header->code == LVN_ITEMCHANGED)
+            {
+                UpdateListActionButtons(header->hwndFrom, GetDlgItem(dialog, IDC_PERF_ACTION_EDIT), GetDlgItem(dialog, IDC_PERF_ACTION_REMOVE));
+                return TRUE;
+            }
         }
         if (message != WM_COMMAND) return FALSE;
+        if ((LOWORD(wParam) == IDC_IRACING_CAR_PRELOAD || LOWORD(wParam) == IDC_IRACING_TRACK_PRELOAD) &&
+            HIWORD(wParam) == BN_CLICKED)
+        {
+            state->iniDirty = true;
+            return TRUE;
+        }
+        if (LOWORD(wParam) == IDC_IRACING_STREAMING_SIZE && HIWORD(wParam) == EN_CHANGE)
+        {
+            if (!state->syncingIni) state->iniDirty = true;
+            return TRUE;
+        }
         if (LOWORD(wParam) == IDC_PERF_ACTION_ADD)
         {
             ProcessPerformanceAction action;
@@ -1121,49 +1216,60 @@ namespace
                 return TRUE;
             }
             const auto path = state->documents / L"app.ini";
-            const std::wstring prompt = L"Set carPreloadAll=1, trackTexturePreload=1 and streamingTextureSize=256 in:\n" + path.wstring() +
-                L"\n\nLaunchMate will first save a timestamped backup. Apply now?";
-            if (MessageBoxW(dialog, prompt.c_str(), L"iRacing app.ini", MB_YESNO | MB_ICONQUESTION) == IDYES)
+            BOOL valid = FALSE;
+            const UINT size = GetDlgItemInt(dialog, IDC_IRACING_STREAMING_SIZE, &valid, FALSE);
+            if (!valid || size > INT_MAX)
             {
-                std::wstring error;
-                if (!ApplyIniSettings(path, error)) MessageBoxW(dialog, error.c_str(), L"LaunchMate", MB_OK | MB_ICONERROR);
+                MessageBoxW(dialog, L"Enter a valid non-negative streamingTextureSize.", L"LaunchMate", MB_OK | MB_ICONERROR);
+                return TRUE;
+            }
+            const std::array<std::string, 3> values{
+                IsDlgButtonChecked(dialog, IDC_IRACING_CAR_PRELOAD) == BST_CHECKED ? "1" : "0",
+                IsDlgButtonChecked(dialog, IDC_IRACING_TRACK_PRELOAD) == BST_CHECKED ? "1" : "0",
+                std::to_string(size)};
+            std::wstring error;
+            if (!ApplyIniSettings(path, values, error)) MessageBoxW(dialog, error.c_str(), L"LaunchMate", MB_OK | MB_ICONERROR);
+            else
+            {
+                state->iniDirty = false;
                 RefreshStatus(dialog, *state);
+                MessageBoxW(dialog, L"The selected values have been saved to app.ini.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
             }
             return TRUE;
         }
         case IDC_IRACING_DEFENDER:
         {
-            if (state->install.empty() || state->documents.empty() || !std::filesystem::exists(state->install) || !std::filesystem::exists(state->documents))
+            const bool remove = state->removeDefenderExclusions;
+            if (state->install.empty() || state->documents.empty() ||
+                (!remove && (!std::filesystem::exists(state->install) || !std::filesystem::exists(state->documents))))
             {
                 MessageBoxW(dialog, L"Both iRacing folders must exist before exclusions can be added.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
                 return TRUE;
             }
             // The elevated script checks and verifies existing exclusions itself;
             // do not run another synchronous Defender query on the UI thread.
-            const std::wstring prompt = L"Add permanent Microsoft Defender folder exclusions for:\n" + state->install.wstring() +
-                L"\n" + state->documents.wstring() + L"\n\nFiles in these folders will receive less antivirus scanning. Administrator approval is required.";
-            if (MessageBoxW(dialog, prompt.c_str(), L"Defender exclusions", MB_YESNO | MB_ICONWARNING) != IDYES) return TRUE;
-            const std::wstring script = L"$ErrorActionPreference='Stop'; try { "
-                L"$targets=@('" + EscapePowerShell(state->install.wstring()) + L"','" + EscapePowerShell(state->documents.wstring()) + L"'); "
-                L"$paths=@((Get-MpPreference).ExclusionPath); "
-                L"if ($paths -match '^N/A:|Must be an administrator to view exclusions') { exit 3 }; "
-                L"foreach ($target in $targets) { if ($paths -notcontains $target) { Add-MpPreference -ExclusionPath $target -ErrorAction Stop } }; "
-                L"$paths=@((Get-MpPreference).ExclusionPath); "
-                L"foreach ($target in $targets) { if ($paths -notcontains $target) { exit 2 } }; "
-                L"exit 0 } catch { exit 4 }";
+            const std::wstring prompt = (remove ? std::wstring(L"Remove Microsoft Defender folder exclusions for:\n") :
+                std::wstring(L"Add permanent Microsoft Defender folder exclusions for:\n")) + state->install.wstring() +
+                L"\n" + state->documents.wstring() + (remove
+                    ? L"\n\nFiles in these folders will be scanned again. Administrator approval is required."
+                    : L"\n\nFiles in these folders will receive less antivirus scanning. Administrator approval is required.");
+            if (MessageBoxW(dialog, prompt.c_str(), L"Defender exclusions", MB_YESNO | (remove ? MB_ICONQUESTION : MB_ICONWARNING)) != IDYES) return TRUE;
+            const auto script = DefenderExclusionScript(state->install.wstring(), state->documents.wstring(), remove);
             const DWORD result = RunElevatedPowerShell(script);
             if (result == 0)
             {
-                state->defenderVerifiedThisSession = true;
-                MessageBoxW(dialog, L"Both Defender exclusions were verified in the administrator session.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
+                state->defenderVerifiedThisSession = !remove;
+                state->removeDefenderExclusions = !remove;
+                MessageBoxW(dialog, remove ? L"Both Defender exclusions were removed and verified in the administrator session." :
+                    L"Both Defender exclusions were verified in the administrator session.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
             }
             else
             {
                 const wchar_t* message = result == 2
-                    ? L"Defender did not retain one or both exclusions. Check Windows Security or organization policies."
+                    ? L"Defender did not apply the requested change to one or both exclusions. Check Windows Security or organization policies."
                     : result == 3
                         ? L"Defender still did not allow the exclusions to be viewed with administrator rights."
-                        : L"The Defender exclusions could not be added. Check the administrator prompt and Defender settings.";
+                        : L"The Defender exclusions could not be changed. Check the administrator prompt and Defender settings.";
                 MessageBoxW(dialog, message, L"LaunchMate", MB_OK | MB_ICONERROR);
             }
             RefreshStatus(dialog, *state);

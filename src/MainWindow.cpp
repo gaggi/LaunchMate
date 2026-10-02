@@ -246,7 +246,7 @@ namespace
             0,
             L"EDIT",
             text,
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
             x,
             y,
             w,

@@ -76,8 +76,10 @@ namespace UiTheme
     {
         RECT rect{};
         GetWindowRect(control, &rect);
-        SetWindowLongPtrW(control, GWL_EXSTYLE, GetWindowLongPtrW(control, GWL_EXSTYLE) & ~WS_EX_CLIENTEDGE);
-        SetWindowLongPtrW(control, GWL_STYLE, GetWindowLongPtrW(control, GWL_STYLE) | WS_BORDER);
+        // Use the same native, themed input frame for dialog controls and dynamically created fields.
+        SetWindowTheme(control, L"Explorer", nullptr);
+        SetWindowLongPtrW(control, GWL_EXSTYLE, GetWindowLongPtrW(control, GWL_EXSTYLE) | WS_EX_CLIENTEDGE);
+        SetWindowLongPtrW(control, GWL_STYLE, GetWindowLongPtrW(control, GWL_STYLE) & ~WS_BORDER);
         SetWindowPos(control, nullptr, 0, 0, rect.right - rect.left,
             MulDiv(22, GetDpiForWindow(control), 96),
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
@@ -153,7 +155,7 @@ namespace UiTheme
     }
 
     inline LRESULT CALLBACK GroupPaintProc(HWND group, UINT message, WPARAM wParam, LPARAM lParam,
-        UINT_PTR subclassId, DWORD_PTR)
+        UINT_PTR subclassId, DWORD_PTR headingFont)
     {
         if (message == WM_ERASEBKGND) return 1;
         if (message == WM_PAINT)
@@ -196,7 +198,11 @@ namespace UiTheme
             EndPaint(group, &paint);
             return 0;
         }
-        if (message == WM_NCDESTROY) RemoveWindowSubclass(group, GroupPaintProc, subclassId);
+        if (message == WM_NCDESTROY)
+        {
+            RemoveWindowSubclass(group, GroupPaintProc, subclassId);
+            DeleteObject(reinterpret_cast<HFONT>(headingFont));
+        }
         return DefSubclassProc(group, message, wParam, lParam);
     }
 
@@ -247,7 +253,18 @@ namespace UiTheme
             {
                 // Native group-box painting can restore a white background when shown from the tray.
                 SetWindowLongPtrW(control, GWL_STYLE, GetWindowLongPtrW(control, GWL_STYLE) | WS_CLIPSIBLINGS);
-                SetWindowSubclass(control, GroupPaintProc, 1, 0);
+                DWORD_PTR heading{};
+                if (!GetWindowSubclass(control, GroupPaintProc, 1, &heading))
+                {
+                    LOGFONTW font{};
+                    GetObjectW(reinterpret_cast<HFONT>(SendMessageW(control, WM_GETFONT, 0, 0)), sizeof(font), &font);
+                    font.lfHeight = -MulDiv(10, GetDpiForWindow(control), 72);
+                    font.lfWeight = FW_SEMIBOLD;
+                    const HFONT handle = CreateFontIndirectW(&font);
+                    heading = reinterpret_cast<DWORD_PTR>(handle);
+                    if (handle) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(handle), FALSE);
+                }
+                SetWindowSubclass(control, GroupPaintProc, 1, heading);
             }
             return TRUE;
         }, 0);

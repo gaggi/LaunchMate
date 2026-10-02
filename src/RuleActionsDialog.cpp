@@ -71,6 +71,10 @@ namespace
             GetDlgItem(dialog, IDC_ACTION_MONITOR_RESTORE),
             GetDlgItem(dialog, IDC_ACTION_MONITOR_RESTORE_DELAY_LABEL),
             GetDlgItem(dialog, IDC_ACTION_MONITOR_RESTORE_DELAY),
+            GetDlgItem(dialog, IDC_ACTION_MONITOR_APPLY_GROUP),
+            GetDlgItem(dialog, IDC_ACTION_MONITOR_RESTORE_GROUP),
+            GetDlgItem(dialog, IDC_ACTION_MONITOR_APPLY_HINT),
+            GetDlgItem(dialog, IDC_ACTION_MONITOR_RESTORE_HINT),
             GetDlgItem(dialog, IDC_ACTION_IRACING_HINT)});
     }
 
@@ -327,7 +331,11 @@ namespace
             IDC_ACTION_MONITOR_DELAY,
             IDC_ACTION_MONITOR_RESTORE,
             IDC_ACTION_MONITOR_RESTORE_DELAY_LABEL,
-            IDC_ACTION_MONITOR_RESTORE_DELAY})
+            IDC_ACTION_MONITOR_RESTORE_DELAY,
+            IDC_ACTION_MONITOR_APPLY_GROUP,
+            IDC_ACTION_MONITOR_RESTORE_GROUP,
+            IDC_ACTION_MONITOR_APPLY_HINT,
+            IDC_ACTION_MONITOR_RESTORE_HINT})
         {
             ShowWindow(FindActionControl(dialog, id), monitorCommand);
         }
@@ -385,6 +393,7 @@ namespace
             ListView_DeleteAllItems(list);
         }
         ShowTabControls(dialog, state);
+        UpdateListActionButtons(list, FindActionControl(dialog, IDC_ACTION_EDIT), FindActionControl(dialog, IDC_ACTION_REMOVE));
     }
 
     bool EditAction(HWND dialog, ActionsState& state, bool add)
@@ -502,6 +511,11 @@ namespace
             if (header->idFrom == IDC_ACTION_LIST && header->code == NM_DBLCLK)
             {
                 EditAction(dialog, *state, false);
+                return TRUE;
+            }
+            if (header->idFrom == IDC_ACTION_LIST && header->code == LVN_ITEMCHANGED)
+            {
+                UpdateListActionButtons(header->hwndFrom, FindActionControl(dialog, IDC_ACTION_EDIT), FindActionControl(dialog, IDC_ACTION_REMOVE));
                 return TRUE;
             }
         }

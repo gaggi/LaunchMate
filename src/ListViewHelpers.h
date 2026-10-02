@@ -129,6 +129,13 @@ inline int SelectedListViewRow(HWND list)
     return ListView_GetItem(list, &item) ? static_cast<int>(item.lParam) : -1;
 }
 
+inline void UpdateListActionButtons(HWND list, HWND edit, HWND remove)
+{
+    const bool selected = ListView_GetNextItem(list, -1, LVNI_SELECTED) >= 0;
+    EnableWindow(edit, selected);
+    EnableWindow(remove, selected);
+}
+
 inline void SortListViewByColumn(HWND list, int column)
 {
     const auto previousState = reinterpret_cast<INT_PTR>(GetPropW(list, L"LaunchMate.ListViewSort"));

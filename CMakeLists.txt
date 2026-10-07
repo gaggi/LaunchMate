@@ -65,6 +65,7 @@ target_compile_definitions(LaunchMate PRIVATE
 )
 
 target_link_libraries(LaunchMate PRIVATE
+    bcrypt
     comctl32
     uxtheme
     dxva2

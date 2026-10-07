@@ -11,6 +11,7 @@
 #include <sstream>
 #include <vector>
 #include <windows.h>
+#include <bcrypt.h>
 #include <shellapi.h>
 #include <winhttp.h>
 
@@ -340,21 +341,58 @@ namespace
         return false;
     }
 
-    std::wstring EscapeBatchValue(const std::wstring& value)
+    std::wstring Sha256Hex(const std::filesystem::path& path)
     {
-        std::wstring escaped;
-        for (const wchar_t ch : value)
+        BCRYPT_ALG_HANDLE algorithm = nullptr;
+        if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0) return {};
+        BCRYPT_HASH_HANDLE hash = nullptr;
+        std::wstring result;
+        if (BCryptCreateHash(algorithm, &hash, nullptr, 0, nullptr, 0, 0) >= 0)
         {
-            if (ch == L'%')
+            std::ifstream input(path, std::ios::binary);
+            bool hashed = static_cast<bool>(input);
+            std::vector<char> buffer(64 * 1024);
+            while (hashed && input)
             {
-                escaped += L"%%";
+                input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+                const auto count = input.gcount();
+                if (count > 0 && BCryptHashData(hash, reinterpret_cast<PUCHAR>(buffer.data()), static_cast<ULONG>(count), 0) < 0)
+                    hashed = false;
             }
-            else
+            UCHAR digest[32]{};
+            if (hashed && !input.bad() && BCryptFinishHash(hash, digest, sizeof(digest), 0) >= 0)
             {
-                escaped.push_back(ch);
+                constexpr wchar_t kHex[] = L"0123456789abcdef";
+                for (const UCHAR value : digest)
+                {
+                    result.push_back(kHex[value >> 4]);
+                    result.push_back(kHex[value & 0x0f]);
+                }
             }
+            BCryptDestroyHash(hash);
         }
-        return escaped;
+        BCryptCloseAlgorithmProvider(algorithm, 0);
+        return result;
+    }
+
+    std::filesystem::path CurrentExecutablePath()
+    {
+        wchar_t modulePath[MAX_PATH] = {};
+        const DWORD length = GetModuleFileNameW(nullptr, modulePath, static_cast<DWORD>(std::size(modulePath)));
+        return length == 0 || length >= std::size(modulePath) ? std::filesystem::path{} : std::filesystem::path(modulePath);
+    }
+
+    // The update helper runs with LaunchMate's rights; in a protected folder such as
+    // Program Files its copy would fail after LaunchMate had already exited.
+    bool CanReplaceExecutable(const std::filesystem::path& executable)
+    {
+        const auto probe = executable.parent_path() /
+            (L".launchmate-update-check-" + std::to_wstring(GetCurrentProcessId()));
+        const HANDLE file = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+            FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return false;
+        CloseHandle(file);
+        return true;
     }
 }
 
@@ -421,6 +459,7 @@ UpdateCheckResult UpdateChecker::CheckForUpdate()
 
                 result.release.assetName = assetName;
                 result.release.assetDownloadUrl = ReadWideString(assetObject, "browser_download_url");
+                result.release.assetDigest = ReadWideString(assetObject, "digest");
                 break;
             }
         }
@@ -443,6 +482,14 @@ bool UpdateChecker::DownloadReleaseAsset(const UpdateReleaseInfo& release, std::
         return false;
     }
 
+    const auto executable = CurrentExecutablePath();
+    if (executable.empty() || !CanReplaceExecutable(executable))
+    {
+        errorMessage = L"LaunchMate cannot replace itself in \"" + executable.parent_path().wstring() +
+            L"\" without administrator rights. Please download the new version from the release page.";
+        return false;
+    }
+
     const auto updateDirectory = std::filesystem::temp_directory_path() / L"LaunchMate-updates";
     std::filesystem::create_directories(updateDirectory);
     downloadedPath = updateDirectory / (L"pending-" + (release.assetName.empty() ? std::wstring(L"LaunchMate-update.exe") : release.assetName));
@@ -461,47 +508,62 @@ bool UpdateChecker::DownloadReleaseAsset(const UpdateReleaseInfo& release, std::
         return false;
     }
 
+    constexpr std::wstring_view kSha256Prefix = L"sha256:";
+    if (release.assetDigest.starts_with(kSha256Prefix))
+    {
+        auto expected = release.assetDigest.substr(kSha256Prefix.size());
+        std::transform(expected.begin(), expected.end(), expected.begin(), [](wchar_t value)
+        {
+            return static_cast<wchar_t>(std::towlower(value));
+        });
+        if (Sha256Hex(downloadedPath) != expected)
+        {
+            std::error_code removeError;
+            std::filesystem::remove(downloadedPath, removeError);
+            errorMessage = L"The downloaded update does not match the checksum published on GitHub.";
+            return false;
+        }
+    }
+
     return true;
 }
 
 bool UpdateChecker::LaunchSelfUpdater(const std::filesystem::path& downloadedPath, DWORD processId, std::wstring& errorMessage)
 {
-    wchar_t modulePath[MAX_PATH] = {};
-    const DWORD length = GetModuleFileNameW(nullptr, modulePath, static_cast<DWORD>(std::size(modulePath)));
-    if (length == 0 || length >= std::size(modulePath))
+    const auto currentExecutablePath = CurrentExecutablePath();
+    if (currentExecutablePath.empty())
     {
         errorMessage = L"Could not determine the current LaunchMate executable path.";
         return false;
     }
 
-    const auto currentExecutablePath = std::filesystem::path(modulePath);
+    // The script itself stays ASCII; paths arrive as arguments, because cmd reads
+    // batch files in the OEM code page and would garble e.g. umlauts in user names.
     const auto scriptPath = downloadedPath.parent_path() / L"launchmate-self-update.cmd";
-
-    std::wofstream script(scriptPath, std::ios::binary | std::ios::trunc);
+    std::ofstream script(scriptPath, std::ios::binary | std::ios::trunc);
     if (!script)
     {
         errorMessage = L"Could not create the temporary update helper.";
         return false;
     }
 
-    script << L"@echo off\r\n";
-    script << L"setlocal\r\n";
-    script << L"set \"TARGET=" << EscapeBatchValue(currentExecutablePath.wstring()) << L"\"\r\n";
-    script << L"set \"UPDATE=" << EscapeBatchValue(downloadedPath.wstring()) << L"\"\r\n";
-    script << L"set \"PID=" << processId << L"\"\r\n";
-    script << L":wait\r\n";
-    script << L"tasklist /FI \"PID eq %PID%\" | find \"%PID%\" >nul\r\n";
-    script << L"if not errorlevel 1 (\r\n";
-    script << L"    timeout /t 1 /nobreak >nul\r\n";
-    script << L"    goto wait\r\n";
-    script << L")\r\n";
-    script << L"copy /Y \"%UPDATE%\" \"%TARGET%\" >nul\r\n";
-    script << L"if errorlevel 1 goto cleanup\r\n";
-    script << L"start \"\" \"%TARGET%\"\r\n";
-    script << L":cleanup\r\n";
-    script << L"del /Q \"%UPDATE%\" >nul 2>nul\r\n";
-    script << L"del /Q \"%~f0\" >nul 2>nul\r\n";
-    script << L"endlocal\r\n";
+    script << "@echo off\r\n";
+    script << "setlocal\r\n";
+    script << "set \"TARGET=%~1\"\r\n";
+    script << "set \"UPDATE=%~2\"\r\n";
+    script << "set \"PID=%~3\"\r\n";
+    script << ":wait\r\n";
+    script << "tasklist /FI \"PID eq %PID%\" | find \"%PID%\" >nul\r\n";
+    script << "if not errorlevel 1 (\r\n";
+    script << "    timeout /t 1 /nobreak >nul\r\n";
+    script << "    goto wait\r\n";
+    script << ")\r\n";
+    script << "copy /Y \"%UPDATE%\" \"%TARGET%\" >nul\r\n";
+    script << "rem Start LaunchMate even if the copy failed, so the previous version keeps running.\r\n";
+    script << "start \"\" \"%TARGET%\"\r\n";
+    script << "del /Q \"%UPDATE%\" >nul 2>nul\r\n";
+    script << "del /Q \"%~f0\" >nul 2>nul\r\n";
+    script << "endlocal\r\n";
 
     script.close(); // The helper must be complete and unlocked before it is launched.
     if (!script.good())
@@ -510,7 +572,9 @@ bool UpdateChecker::LaunchSelfUpdater(const std::filesystem::path& downloadedPat
         return false;
     }
 
-    const std::wstring commandLine = L"\"C:\\Windows\\System32\\cmd.exe\" /c \"" + scriptPath.wstring() + L"\"";
+    // The outer quotes keep cmd /c from stripping the quotes of the first argument.
+    const std::wstring commandLine = L"\"C:\\Windows\\System32\\cmd.exe\" /c \"\"" + scriptPath.wstring() + L"\" \"" +
+        currentExecutablePath.wstring() + L"\" \"" + downloadedPath.wstring() + L"\" " + std::to_wstring(processId) + L"\"";
     std::vector<wchar_t> commandBuffer(commandLine.begin(), commandLine.end());
     commandBuffer.push_back(L'\0');
 

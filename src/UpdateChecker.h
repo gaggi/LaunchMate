@@ -11,6 +11,8 @@ struct UpdateReleaseInfo
     std::wstring releasePageUrl;
     std::wstring assetName;
     std::wstring assetDownloadUrl;
+    // GitHub's asset digest, e.g. "sha256:<hex>"; empty for releases without one.
+    std::wstring assetDigest;
 };
 
 enum class UpdateCheckState

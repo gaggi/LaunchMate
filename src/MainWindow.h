@@ -5,6 +5,7 @@
 #include "TrayIcon.h"
 #include "UpdateChecker.h"
 #include "BackgroundTask.h"
+#include "StatusPanel.h"
 #include <array>
 #include <thread>
 #include <unordered_map>
@@ -33,8 +34,6 @@ private:
     {
         IdToggleMonitoring = 2001,
         IdMonitorPowerSetups,
-        IdSaveConfig,
-        IdCheckForUpdates,
         IdDetectInstalledApps,
         IdTransferCatalogProgram,
         IdAddCatalogProgram,
@@ -43,20 +42,12 @@ private:
         IdRemoveWatchedProcess,
         IdRemoveRuleAction,
         IdEditRuleActions,
-        IdSettingsMinimizeToTray,
-        IdSettingsCloseToTray,
-        IdSettingsStartWithWindows,
-        IdSettingsStartAsAdministrator,
-        IdSettingsUseEtw,
-        IdSettingsStartInTray,
-        IdSettingsStartMonitoringOnLaunch,
-        IdSettingsCheckForUpdatesOnStartup,
         IdCatalogSearch,
         IdCatalogList,
         IdWatchedList,
         IdRuleProgramsList,
         IdSourceTabs,
-        IdMpoSettings
+        IdSettings
     };
 
     static constexpr UINT kTrayCallbackMessage = WM_APP + 1;
@@ -103,18 +94,18 @@ private:
     void HandleTrayCommand(UINT command);
     void StartUpdateCheck(bool interactive);
     void BeginUpdateInstall(UpdateReleaseInfo release);
-    void UpdateSettingsFromUi();
-    void UpdateSettingsUi();
+    void ShowSettingsDialog();
+    static INT_PTR CALLBACK SettingsDialogProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam);
+    void RefreshStatusPanel();
     LaunchProgram SelectLaunchProgram();
     WatchedProcessRule SelectWatchedProcess();
     int SelectedWatchedIndex() const;
 
     App& app_;
     HWND windowHandle_{nullptr};
-    HWND toggleButtonHandle_{nullptr};
+    StatusPanel statusPanel_;
     HWND watchedHeadingHandle_{nullptr};
     HWND actionsHeadingHandle_{nullptr};
-    std::array<HWND, 3> settingsGroups_{};
     HWND catalogSearchHandle_{nullptr};
     HWND catalogListHandle_{nullptr};
     HWND sourceTabsHandle_{nullptr};
@@ -123,14 +114,6 @@ private:
     HWND removeCatalogButtonHandle_{nullptr};
     HWND watchedListHandle_{nullptr};
     HWND ruleProgramsListHandle_{nullptr};
-    HWND minimizeToTrayHandle_{nullptr};
-    HWND closeToTrayHandle_{nullptr};
-    HWND startWithWindowsHandle_{nullptr};
-    HWND startAsAdministratorHandle_{nullptr};
-    HWND useEtwHandle_{nullptr};
-    HWND startInTrayHandle_{nullptr};
-    HWND startMonitoringHandle_{nullptr};
-    HWND checkForUpdatesHandle_{nullptr};
     HFONT headingFont_{nullptr};
     HFONT uiFont_{nullptr};
     UINT dpi_{96};

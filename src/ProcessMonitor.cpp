@@ -582,6 +582,10 @@ void ProcessMonitor::Stop()
     serviceOwnerKey_.clear();
     activeRules_.clear();
     watchedInstances_.clear();
+    {
+        std::scoped_lock lock(processStatesMutex_);
+        runningSince_.clear();
+    }
     if (HasPendingIRacingServiceRestore())
     {
         std::wstring serviceReport;
@@ -604,6 +608,24 @@ void ProcessMonitor::RecoverIRacingServices()
 bool ProcessMonitor::IsRunning() const noexcept
 {
     return running_.load();
+}
+
+bool ProcessMonitor::IsUsingEtw() const noexcept
+{
+    return usingEtw_.load();
+}
+
+std::vector<ULONGLONG> ProcessMonitor::GetRunningSince(const std::vector<WatchedProcessRule>& rules) const
+{
+    std::vector<ULONGLONG> since;
+    since.reserve(rules.size());
+    std::scoped_lock lock(processStatesMutex_);
+    for (const auto& rule : rules)
+    {
+        const auto found = runningSince_.find(NormalizeProcessKey(rule.processName.empty() ? rule.executablePath : rule.processName));
+        since.push_back(found != runningSince_.end() ? found->second : 0);
+    }
+    return since;
 }
 
 std::vector<std::wstring> ProcessMonitor::GetProcessStates(const std::vector<WatchedProcessRule>& rules) const
@@ -1116,6 +1138,8 @@ void ProcessMonitor::CacheProcessState(const std::wstring& processKey, bool runn
     std::scoped_lock lock(processStatesMutex_);
     cachedProcessStates_[processKey] = running;
     cachedProcessStatesKnown_ = true;
+    if (!running) runningSince_.erase(processKey);
+    else runningSince_.try_emplace(processKey, GetTickCount64());
 }
 
 void ProcessMonitor::CacheProcessStates(const RuntimeConfiguration& configuration, const ProcessSnapshot& snapshot)
@@ -1126,6 +1150,16 @@ void ProcessMonitor::CacheProcessStates(const RuntimeConfiguration& configuratio
         states.emplace(rule.processKey, IsProcessRunning(snapshot, rule.processKey));
 
     std::scoped_lock lock(processStatesMutex_);
+    std::erase_if(runningSince_, [&states](const auto& entry)
+    {
+        const auto state = states.find(entry.first);
+        return state == states.end() || !state->second;
+    });
+    const auto now = GetTickCount64();
+    for (const auto& [processKey, running] : states)
+    {
+        if (running) runningSince_.try_emplace(processKey, now);
+    }
     cachedProcessStates_ = std::move(states);
     cachedProcessStatesKnown_ = true;
 }

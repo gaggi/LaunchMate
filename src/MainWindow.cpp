@@ -1238,7 +1238,6 @@ bool MainWindow::Create(int showCommand)
     LayoutControls(client.right, client.bottom);
     SyncCatalogProgramsFromConfiguration();
     PopulateLists();
-    UpdateSettingsUi();
     RestoreWindowPlacement(app_.Configuration().startInTray ? SW_HIDE : showCommand);
     // Refresh an older normal logon task once this instance has already been
     // elevated.  This is the one-time migration to a highest-privilege task.
@@ -1269,9 +1268,61 @@ void MainWindow::SetStatus(const std::wstring& text)
 
 void MainWindow::SyncMonitoringState()
 {
-    EnableWindow(toggleButtonHandle_, !monitorStopping_);
-    SetWindowTextW(toggleButtonHandle_, monitorStopping_ ? L"Stopping..."
-        : app_.Monitor().IsRunning() ? L"Stop monitoring" : L"Start monitoring");
+    RefreshStatusPanel();
+}
+
+namespace
+{
+    std::wstring DescribeRunningTime(ULONGLONG milliseconds)
+    {
+        const auto minutes = milliseconds / 60000;
+        if (minutes == 0) return L"just started";
+        if (minutes < 60) return L"running for " + std::to_wstring(minutes) + L" min";
+        return L"running for " + std::to_wstring(minutes / 60) + L" h " + std::to_wstring(minutes % 60) + L" min";
+    }
+}
+
+void MainWindow::RefreshStatusPanel()
+{
+    if (!statusPanel_.Handle()) return;
+    auto& monitor = app_.Monitor();
+    if (monitorStopping_)
+    {
+        statusPanel_.SetState(StatusPanel::Tone::Busy, L"Stopping monitoring...",
+            L"Closing started apps and restoring services, power plan and displays.", L"Stopping...", false);
+        return;
+    }
+    if (!monitor.IsRunning())
+    {
+        statusPanel_.SetState(StatusPanel::Tone::Neutral, L"Monitoring is off",
+            L"Start monitoring to run your rules automatically.", L"Start monitoring", true);
+        return;
+    }
+
+    const auto& rules = app_.Configuration().watchedProcesses;
+    const auto runningSince = monitor.GetRunningSince(rules);
+    const auto now = GetTickCount64();
+    const auto ruleName = [](const WatchedProcessRule& rule)
+    {
+        return rule.displayName.empty() ? rule.processName : rule.displayName;
+    };
+    std::wstring detail = monitor.IsUsingEtw() ? L"ETW" : L"Process polling";
+    std::vector<size_t> enabledRules;
+    bool anyRunning = false;
+    for (size_t index = 0; index < rules.size(); ++index)
+    {
+        if (rules[index].enabled) enabledRules.push_back(index);
+        if (index >= runningSince.size() || runningSince[index] == 0) continue;
+        anyRunning = true;
+        detail += L"  \u00B7  " + ruleName(rules[index]) + L" " + DescribeRunningTime(now - runningSince[index]);
+    }
+    if (!anyRunning)
+    {
+        detail += enabledRules.empty() ? L"  \u00B7  No enabled rules"
+            : enabledRules.size() == 1 ? L"  \u00B7  Waiting for " + ruleName(rules[enabledRules.front()])
+            : L"  \u00B7  Waiting for " + std::to_wstring(enabledRules.size()) + L" watched programs";
+    }
+    statusPanel_.SetState(StatusPanel::Tone::Active, L"Monitoring active", detail, L"Stop monitoring", true);
 }
 
 LRESULT CALLBACK MainWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -1310,9 +1361,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         {
         case IdToggleMonitoring: ToggleMonitoring(); return 0;
         case IdMonitorPowerSetups: ManageMonitorPowerSetups(); return 0;
-        case IdSaveConfig: SaveConfiguration(); return 0;
-        case IdCheckForUpdates: StartUpdateCheck(true); return 0;
-        case IdMpoSettings: ShowMpoSettingsDialog(app_.InstanceHandle(), windowHandle_); return 0;
+        case IdSettings: ShowSettingsDialog(); return 0;
         case IdDetectInstalledApps:
             StartSourceRefresh();
             return 0;
@@ -1323,19 +1372,35 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         case IdRemoveWatchedProcess: RemoveWatchedProcess(); return 0;
         case IdRemoveRuleAction: RemoveSelectedRuleAction(); return 0;
         case IdEditRuleActions: EditRuleActions(); return 0;
-        default:
-            if (controlId >= IdSettingsMinimizeToTray && controlId <= IdSettingsCheckForUpdatesOnStartup)
-            {
-                UpdateSettingsFromUi();
-                return 0;
-            }
-            break;
         }
         break;
     }
     case WM_NOTIFY:
     {
         const auto* header = reinterpret_cast<NMHDR*>(lParam);
+        if (header && header->idFrom == IdWatchedList && header->code == NM_CUSTOMDRAW)
+        {
+            // Color the status column: green while running, muted otherwise.
+            auto* draw = reinterpret_cast<NMLVCUSTOMDRAW*>(lParam);
+            switch (draw->nmcd.dwDrawStage)
+            {
+            case CDDS_PREPAINT: return CDRF_NOTIFYITEMDRAW;
+            case CDDS_ITEMPREPAINT: return CDRF_NOTIFYSUBITEMDRAW;
+            case CDDS_ITEMPREPAINT | CDDS_SUBITEM:
+            {
+                draw->clrText = UiTheme::Text;
+                if (draw->iSubItem == 1)
+                {
+                    wchar_t text[64]{};
+                    ListView_GetItemText(header->hwndFrom, static_cast<int>(draw->nmcd.dwItemSpec), 1, text,
+                        static_cast<int>(std::size(text)));
+                    draw->clrText = wcsncmp(text, L"Running", 7) == 0 ? RGB(59, 109, 17) : RGB(136, 135, 128);
+                }
+                return CDRF_NEWFONT;
+            }
+            default: return CDRF_DODEFAULT;
+            }
+        }
         if (header && header->idFrom == IdSourceTabs && header->code == TCN_SELCHANGE)
         {
             SwitchSourceTab();
@@ -1567,17 +1632,18 @@ void MainWindow::CreateFonts()
             SendMessageW(control, WM_SETFONT, static_cast<WPARAM>(value), TRUE);
             return TRUE;
         }, reinterpret_cast<LPARAM>(uiFont_));
-    for (HWND control : {watchedHeadingHandle_, actionsHeadingHandle_,
-        settingsGroups_[0], settingsGroups_[1], settingsGroups_[2]})
+    for (HWND control : {watchedHeadingHandle_, actionsHeadingHandle_})
         if (control) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(headingFont_), TRUE);
+    if (statusPanel_.Handle()) statusPanel_.SetFonts(headingFont_, uiFont_);
     DeleteObject(oldUi);
     DeleteObject(oldHeading);
 }
 
 void MainWindow::CreateControls()
 {
-    toggleButtonHandle_ = CreateButtonControl(windowHandle_, IdToggleMonitoring, L"Start monitoring", 0, 0, 172, 32, uiFont_);
-    CreateButtonControl(windowHandle_, IdMonitorPowerSetups, L"Monitor configs", 0, 0, 148, 32, uiFont_);
+    statusPanel_.Create(app_.InstanceHandle(), windowHandle_, IdToggleMonitoring, headingFont_, uiFont_);
+    CreateButtonControl(windowHandle_, IdMonitorPowerSetups, L"Monitor configs", 0, 0, 140, 32, uiFont_);
+    CreateButtonControl(windowHandle_, IdSettings, L"Settings", 0, 0, 100, 32, uiFont_);
 
     sourceTabsHandle_ = CreateWindowExW(WS_EX_CONTROLPARENT, WC_TABCONTROLW, nullptr,
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPCHILDREN | TCS_FIXEDWIDTH,
@@ -1625,32 +1691,6 @@ void MainWindow::CreateControls()
     ConfigureListView(ruleProgramsListHandle_, {{L"", 0}, {L"Type", 2}, {L"Name", 3}, {L"Details", 6}});
     InitializeProgramIcons();
 
-    const wchar_t* groupNames[] = {L"Window behavior", L"Startup & updates", L"Monitoring"};
-    for (size_t i = 0; i < settingsGroups_.size(); ++i)
-    {
-        settingsGroups_[i] = CreateWindowExW(0, L"BUTTON", groupNames[i],
-            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | BS_GROUPBOX, 0, 0, 100, 126, windowHandle_, nullptr, nullptr, nullptr);
-        SendMessageW(settingsGroups_[i], WM_SETFONT, reinterpret_cast<WPARAM>(headingFont_), TRUE);
-    }
-    minimizeToTrayHandle_ = CreateCheckbox(windowHandle_, IdSettingsMinimizeToTray, L"Minimize to tray", 0, 0, 300, 24, uiFont_);
-    closeToTrayHandle_ = CreateCheckbox(windowHandle_, IdSettingsCloseToTray, L"Close to tray", 0, 0, 300, 24, uiFont_);
-    startInTrayHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartInTray, L"Start in tray", 0, 0, 300, 24, uiFont_);
-    startWithWindowsHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartWithWindows, L"Start with Windows", 0, 0, 300, 24, uiFont_);
-    startMonitoringHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartMonitoringOnLaunch, L"Start monitoring on launch", 0, 0, 300, 24, uiFont_);
-    checkForUpdatesHandle_ = CreateCheckbox(windowHandle_, IdSettingsCheckForUpdatesOnStartup, L"Check for updates on startup", 0, 0, 300, 24, uiFont_);
-    startAsAdministratorHandle_ = CreateCheckbox(windowHandle_, IdSettingsStartAsAdministrator, L"Start as Administrator", 0, 0, 300, 24, uiFont_);
-    useEtwHandle_ = CreateCheckbox(windowHandle_, IdSettingsUseEtw, L"Use ETW", 0, 0, 300, 24, uiFont_);
-    for (HWND group : settingsGroups_)
-        SetWindowLongPtrW(group, GWL_EXSTYLE, GetWindowLongPtrW(group, GWL_EXSTYLE) | WS_EX_CONTROLPARENT);
-    HostControlsInPanel(windowHandle_, settingsGroups_[0],
-        {minimizeToTrayHandle_, closeToTrayHandle_, startInTrayHandle_});
-    HostControlsInPanel(windowHandle_, settingsGroups_[1],
-        {startWithWindowsHandle_, startMonitoringHandle_, checkForUpdatesHandle_});
-    HostControlsInPanel(windowHandle_, settingsGroups_[2],
-        {startAsAdministratorHandle_, useEtwHandle_});
-    CreateButtonControl(windowHandle_, IdCheckForUpdates, L"Check for updates", 0, 0, 154, 28, uiFont_);
-    CreateButtonControl(windowHandle_, IdMpoSettings, L"MPO settings...", 0, 0, 136, 28, uiFont_);
-    CreateButtonControl(windowHandle_, IdSaveConfig, L"Save", 0, 0, 112, 28, uiFont_);
 }
 
 void MainWindow::LayoutControls(int width, int height)
@@ -1660,8 +1700,8 @@ void MainWindow::LayoutControls(int width, int height)
     const int w = MulDiv(width, 96, dpi_);
     const int h = MulDiv(height, 96, dpi_);
     const int content = w - 40;
-    const int settingsY = h - 182;
-    const int listBottom = settingsY - 18;
+    const int top = 92; // Below the status banner.
+    const int listBottom = h - 20;
     const int sourceWidth = (content - 72) * 46 / 100;
     const int rightX = 20 + sourceWidth + 72;
     const int rightWidth = w - 20 - rightX;
@@ -1675,22 +1715,25 @@ void MainWindow::LayoutControls(int width, int height)
     const auto button = [&](int id, int x, int y, int cw, int ch)
     { place(GetDlgItem(windowHandle_, id), x, y, cw, ch); };
 
-    place(toggleButtonHandle_, w - 192, 20, 172, 32);
-    button(IdMonitorPowerSetups, w - 352, 20, 148, 32);
-    place(sourceTabsHandle_, 20, 20, sourceWidth, listBottom - 20);
-    TabCtrl_SetItemSize(sourceTabsHandle_, px((sourceWidth - 8) / 3), px(UiTheme::TabHeight));
-    place(detectSourceButtonHandle_, 32, 62, 164, 28);
-    place(addCatalogButtonHandle_, 20 + sourceWidth - 90, 62, 36, 28);
-    place(removeCatalogButtonHandle_, 20 + sourceWidth - 48, 62, 36, 28);
-    place(catalogSearchHandle_, 32, 98, sourceWidth - 24, 22);
-    place(catalogListHandle_, 32, 130, sourceWidth - 24, listBottom - 142);
+    place(statusPanel_.Handle(), 20, 20, w - 40 - 140 - 100 - 24, 56);
+    button(IdMonitorPowerSetups, w - 20 - 100 - 12 - 140, 32, 140, 32);
+    button(IdSettings, w - 20 - 100, 32, 100, 32);
 
-    place(watchedHeadingHandle_, rightX, 72, rightWidth - 96, 24);
-    button(IdAddWatchedProcess, w - 98, 68, 36, 28);
-    button(IdRemoveWatchedProcess, w - 56, 68, 36, 28);
-    const int watchedHeight = (listBottom - 108 - 62) * 46 / 100;
-    place(watchedListHandle_, rightX, 108, rightWidth, watchedHeight);
-    const int actionsY = 108 + watchedHeight + 18;
+    place(sourceTabsHandle_, 20, top, sourceWidth, listBottom - top);
+    TabCtrl_SetItemSize(sourceTabsHandle_, px((sourceWidth - 8) / 3), px(UiTheme::TabHeight));
+    place(detectSourceButtonHandle_, 32, top + 42, 164, 28);
+    place(addCatalogButtonHandle_, 20 + sourceWidth - 90, top + 42, 36, 28);
+    place(removeCatalogButtonHandle_, 20 + sourceWidth - 48, top + 42, 36, 28);
+    place(catalogSearchHandle_, 32, top + 78, sourceWidth - 24, 22);
+    place(catalogListHandle_, 32, top + 110, sourceWidth - 24, listBottom - top - 122);
+
+    place(watchedHeadingHandle_, rightX, top + 4, rightWidth - 96, 24);
+    button(IdAddWatchedProcess, w - 98, top, 36, 28);
+    button(IdRemoveWatchedProcess, w - 56, top, 36, 28);
+    const int watchedTop = top + 36;
+    const int watchedHeight = (listBottom - watchedTop - 62) * 46 / 100;
+    place(watchedListHandle_, rightX, watchedTop, rightWidth, watchedHeight);
+    const int actionsY = watchedTop + watchedHeight + 18;
     const int actionsListY = actionsY + 38;
     place(actionsHeadingHandle_, rightX, actionsY, rightWidth - 144, 24);
     button(IdEditRuleActions, w - 152, actionsY - 2, 132, 28);
@@ -1698,26 +1741,6 @@ void MainWindow::LayoutControls(int width, int height)
     const int transferY = actionsListY + (listBottom - actionsListY - 72) / 2;
     button(IdTransferCatalogProgram, 20 + sourceWidth + 20, transferY, 32, 32);
     button(IdRemoveRuleAction, 20 + sourceWidth + 20, transferY + 40, 32, 32);
-
-    const int firstWidth = (content - 24) * 26 / 100;
-    const int secondWidth = (content - 24) * 40 / 100;
-    const int secondX = 20 + firstWidth + 12;
-    const int thirdX = secondX + secondWidth + 12;
-    const int thirdWidth = w - 20 - thirdX;
-    place(settingsGroups_[0], 20, settingsY, firstWidth, 126);
-    place(settingsGroups_[1], secondX, settingsY, secondWidth, 126);
-    place(settingsGroups_[2], thirdX, settingsY, thirdWidth, 126);
-    place(minimizeToTrayHandle_, 36, settingsY + 30, firstWidth - 32, 24);
-    place(closeToTrayHandle_, 36, settingsY + 58, firstWidth - 32, 24);
-    place(startInTrayHandle_, 36, settingsY + 86, firstWidth - 32, 24);
-    place(startWithWindowsHandle_, secondX + 16, settingsY + 30, secondWidth - 32, 24);
-    place(startMonitoringHandle_, secondX + 16, settingsY + 58, secondWidth - 32, 24);
-    place(checkForUpdatesHandle_, secondX + 16, settingsY + 86, secondWidth - 32, 24);
-    place(startAsAdministratorHandle_, thirdX + 16, settingsY + 30, thirdWidth - 32, 24);
-    place(useEtwHandle_, thirdX + 16, settingsY + 58, thirdWidth - 32, 24);
-    button(IdMpoSettings, w - 446, h - 44, 136, 28);
-    button(IdCheckForUpdates, w - 298, h - 44, 154, 28);
-    button(IdSaveConfig, w - 132, h - 44, 112, 28);
 
     if (sourceTabIndex_ == 0) ResizeListViewColumns(catalogListHandle_, {0, 2, 5}, px(24));
     else if (sourceTabIndex_ == 1) ResizeListViewColumns(catalogListHandle_, {0, 2, 5, 1, 2}, px(24));
@@ -1793,6 +1816,7 @@ void MainWindow::SyncProcessStateTimer(bool visible)
 
 void MainWindow::RefreshProcessStates()
 {
+    RefreshStatusPanel();
     const auto& rules = app_.Configuration().watchedProcesses;
     if (rules.empty()) return;
     const auto states = app_.Monitor().GetProcessStates(rules);
@@ -2360,7 +2384,6 @@ void MainWindow::ToggleMonitoring()
     }
     else
     {
-        UpdateSettingsFromUi();
         app_.Monitor().UpdateConfiguration(app_.Configuration());
         app_.Monitor().Start();
     }
@@ -2482,7 +2505,6 @@ bool MainWindow::ApplyMonitorPowerSetup(size_t index, bool interactive)
 
 void MainWindow::SaveConfiguration()
 {
-    UpdateSettingsFromUi();
     auto& config = app_.Configuration();
     // Changing administrator mode only affects the task when the task exists.
     // For a manually launched app it is just a saved application preference.
@@ -2496,7 +2518,6 @@ void MainWindow::SaveConfiguration()
             MessageBoxW(windowHandle_, L"Windows startup settings could not be applied. The previous settings were kept.", L"LaunchMate", MB_OK | MB_ICONERROR);
             config.startWithWindows = appliedStartWithWindows_;
             config.startAsAdministrator = appliedStartAsAdministrator_;
-            UpdateSettingsUi();
             return;
         }
     }
@@ -2999,35 +3020,73 @@ void MainWindow::BeginUpdateInstall(UpdateReleaseInfo release)
     }).detach();
 }
 
-void MainWindow::UpdateSettingsFromUi()
+void MainWindow::ShowSettingsDialog()
 {
-    auto& config = app_.Configuration();
-    config.minimizeToTray = SendMessageW(minimizeToTrayHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    config.closeToTray = SendMessageW(closeToTrayHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    config.startWithWindows = SendMessageW(startWithWindowsHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    config.startAsAdministrator = SendMessageW(startAsAdministratorHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    config.useEtw = SendMessageW(useEtwHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    if (config.useEtw)
-    {
-        config.startAsAdministrator = true;
-        SendMessageW(startAsAdministratorHandle_, BM_SETCHECK, BST_CHECKED, 0);
-    }
-    config.startInTray = SendMessageW(startInTrayHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    config.startMonitoringOnLaunch = SendMessageW(startMonitoringHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    config.checkForUpdatesOnStartup = SendMessageW(checkForUpdatesHandle_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    DialogBoxParamW(app_.InstanceHandle(), MAKEINTRESOURCEW(IDD_SETTINGS), windowHandle_,
+        SettingsDialogProc, reinterpret_cast<LPARAM>(this));
 }
 
-void MainWindow::UpdateSettingsUi()
+INT_PTR CALLBACK MainWindow::SettingsDialogProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
 {
-    const auto& config = app_.Configuration();
-    SendMessageW(minimizeToTrayHandle_, BM_SETCHECK, config.minimizeToTray ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(closeToTrayHandle_, BM_SETCHECK, config.closeToTray ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(startWithWindowsHandle_, BM_SETCHECK, config.startWithWindows ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(startAsAdministratorHandle_, BM_SETCHECK, config.startAsAdministrator ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(useEtwHandle_, BM_SETCHECK, config.useEtw ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(startInTrayHandle_, BM_SETCHECK, config.startInTray ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(startMonitoringHandle_, BM_SETCHECK, config.startMonitoringOnLaunch ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(checkForUpdatesHandle_, BM_SETCHECK, config.checkForUpdatesOnStartup ? BST_CHECKED : BST_UNCHECKED, 0);
+    auto* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
+    const auto setChecked = [dialog](int id, bool value)
+    {
+        CheckDlgButton(dialog, id, value ? BST_CHECKED : BST_UNCHECKED);
+    };
+    const auto isChecked = [dialog](int id) { return IsDlgButtonChecked(dialog, id) == BST_CHECKED; };
+    if (message == WM_INITDIALOG)
+    {
+        SetWindowLongPtrW(dialog, GWLP_USERDATA, lParam);
+        self = reinterpret_cast<MainWindow*>(lParam);
+        const auto& config = self->app_.Configuration();
+        setChecked(IDC_SETTINGS_MINIMIZE_TO_TRAY, config.minimizeToTray);
+        setChecked(IDC_SETTINGS_CLOSE_TO_TRAY, config.closeToTray);
+        setChecked(IDC_SETTINGS_START_IN_TRAY, config.startInTray);
+        setChecked(IDC_SETTINGS_START_WITH_WINDOWS, config.startWithWindows);
+        setChecked(IDC_SETTINGS_START_MONITORING, config.startMonitoringOnLaunch);
+        setChecked(IDC_SETTINGS_CHECK_UPDATES, config.checkForUpdatesOnStartup);
+        setChecked(IDC_SETTINGS_START_AS_ADMIN, config.startAsAdministrator);
+        setChecked(IDC_SETTINGS_USE_ETW, config.useEtw);
+        UiTheme::Apply(dialog);
+        return TRUE;
+    }
+    if (message != WM_COMMAND || !self) return FALSE;
+
+    switch (LOWORD(wParam))
+    {
+    case IDC_SETTINGS_USE_ETW:
+        // ETW needs administrator rights, so the two options move together.
+        if (isChecked(IDC_SETTINGS_USE_ETW)) setChecked(IDC_SETTINGS_START_AS_ADMIN, true);
+        return TRUE;
+    case IDC_SETTINGS_START_AS_ADMIN:
+        if (!isChecked(IDC_SETTINGS_START_AS_ADMIN)) setChecked(IDC_SETTINGS_USE_ETW, false);
+        return TRUE;
+    case IDC_SETTINGS_CHECK_NOW:
+        self->StartUpdateCheck(true);
+        return TRUE;
+    case IDC_SETTINGS_MPO:
+        ShowMpoSettingsDialog(self->app_.InstanceHandle(), dialog);
+        return TRUE;
+    case IDOK:
+    {
+        auto& config = self->app_.Configuration();
+        config.minimizeToTray = isChecked(IDC_SETTINGS_MINIMIZE_TO_TRAY);
+        config.closeToTray = isChecked(IDC_SETTINGS_CLOSE_TO_TRAY);
+        config.startInTray = isChecked(IDC_SETTINGS_START_IN_TRAY);
+        config.startWithWindows = isChecked(IDC_SETTINGS_START_WITH_WINDOWS);
+        config.startMonitoringOnLaunch = isChecked(IDC_SETTINGS_START_MONITORING);
+        config.checkForUpdatesOnStartup = isChecked(IDC_SETTINGS_CHECK_UPDATES);
+        config.useEtw = isChecked(IDC_SETTINGS_USE_ETW);
+        config.startAsAdministrator = config.useEtw || isChecked(IDC_SETTINGS_START_AS_ADMIN);
+        self->SaveConfiguration();
+        EndDialog(dialog, IDOK);
+        return TRUE;
+    }
+    case IDCANCEL:
+        EndDialog(dialog, IDCANCEL);
+        return TRUE;
+    }
+    return FALSE;
 }
 
 LaunchProgram MainWindow::SelectLaunchProgram()

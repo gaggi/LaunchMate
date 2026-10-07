@@ -28,7 +28,11 @@ public:
     void Stop();
     void RecoverIRacingServices();
     bool IsRunning() const noexcept;
+    bool IsUsingEtw() const noexcept;
     std::vector<std::wstring> GetProcessStates(const std::vector<WatchedProcessRule>& rules) const;
+    // GetTickCount64() value at which monitoring first saw each rule's process
+    // running; 0 when it is not running or monitoring is off.
+    std::vector<ULONGLONG> GetRunningSince(const std::vector<WatchedProcessRule>& rules) const;
 
 private:
     friend struct ProcessMonitorTestAccess;
@@ -154,6 +158,8 @@ private:
     mutable std::mutex processStatesMutex_;
     std::unordered_map<std::wstring, bool> cachedProcessStates_;
     bool cachedProcessStatesKnown_{false};
+    // Survives configuration updates, unlike cachedProcessStates_.
+    std::unordered_map<std::wstring, ULONGLONG> runningSince_;
     // Keep the settings that actually started a session, even if its rule is edited/deleted.
     std::unordered_map<std::wstring, RuntimeRule> activeRules_;
     std::map<std::wstring, std::vector<LaunchedProgramRecord>> startedPrograms_;

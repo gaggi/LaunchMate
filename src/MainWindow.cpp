@@ -1174,6 +1174,7 @@ MainWindow::MainWindow(App& app)
 
 MainWindow::~MainWindow()
 {
+    if (monitorStopThread_.joinable()) monitorStopThread_.join();
     if (programIconList_) ImageList_Destroy(programIconList_);
     if (headingFont_) DeleteObject(headingFont_);
     if (uiFont_) DeleteObject(uiFont_);
@@ -1268,7 +1269,9 @@ void MainWindow::SetStatus(const std::wstring& text)
 
 void MainWindow::SyncMonitoringState()
 {
-    SetWindowTextW(toggleButtonHandle_, app_.Monitor().IsRunning() ? L"Stop monitoring" : L"Start monitoring");
+    EnableWindow(toggleButtonHandle_, !monitorStopping_);
+    SetWindowTextW(toggleButtonHandle_, monitorStopping_ ? L"Stopping..."
+        : app_.Monitor().IsRunning() ? L"Stop monitoring" : L"Start monitoring");
 }
 
 LRESULT CALLBACK MainWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -1390,7 +1393,8 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             HideToTray();
             return 0;
         }
-        app_.Monitor().Stop();
+        // App's destructor stops monitoring once the window is gone, so restoring an
+        // active session never leaves a frozen window on screen.
         trayIcon_.Destroy();
         DestroyWindow(windowHandle_);
         return 0;
@@ -1505,6 +1509,14 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
                 app_.Log(*errorText);
                 MessageBoxW(windowHandle_, errorText->c_str(), L"LaunchMate Update", MB_OK | MB_ICONWARNING);
             }
+            return 0;
+        }
+
+        if (message == kMonitorStoppedMessage)
+        {
+            if (monitorStopThread_.joinable()) monitorStopThread_.join();
+            monitorStopping_ = false;
+            SyncMonitoringState();
             return 0;
         }
 
@@ -2334,9 +2346,17 @@ void MainWindow::SwitchSourceTab()
 
 void MainWindow::ToggleMonitoring()
 {
+    if (monitorStopping_) return;
     if (app_.Monitor().IsRunning())
     {
-        app_.Monitor().Stop();
+        monitorStopping_ = true;
+        const HWND window = windowHandle_;
+        auto& monitor = app_.Monitor();
+        monitorStopThread_ = std::thread([&monitor, window]
+        {
+            monitor.Stop();
+            PostMessageW(window, kMonitorStoppedMessage, 0, 0);
+        });
     }
     else
     {

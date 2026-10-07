@@ -6,6 +6,7 @@
 #include "UpdateChecker.h"
 #include "BackgroundTask.h"
 #include <array>
+#include <thread>
 #include <unordered_map>
 
 #include <windows.h>
@@ -59,6 +60,7 @@ private:
     };
 
     static constexpr UINT kTrayCallbackMessage = WM_APP + 1;
+    static constexpr UINT kMonitorStoppedMessage = WM_APP + 6;
 
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
@@ -177,6 +179,10 @@ private:
     static constexpr UINT_PTR kSourceRefreshTimer = 81;
     int sourceTabIndex_{0};
     bool exitRequested_{false};
+    // Stopping restores sessions (closing programs, services, displays), which can
+    // take seconds or wait for UAC, so it runs off the UI thread.
+    std::thread monitorStopThread_;
+    bool monitorStopping_{false};
     bool updateCheckInProgress_{false};
     bool updateInstallInProgress_{false};
     bool appliedStartWithWindows_{false};

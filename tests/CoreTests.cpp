@@ -1,5 +1,5 @@
 #include "AtomicFile.h"
-#include "BackgroundTask.h"
+#include "ui/BackgroundTask.h"
 #include <future>
 #include "JsonLite.h"
 #include "ProcessMonitor.h"

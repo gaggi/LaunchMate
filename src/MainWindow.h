@@ -4,7 +4,6 @@
 #include "MonitorPowerController.h"
 #include "TrayIcon.h"
 #include "UpdateChecker.h"
-#include "BackgroundTask.h"
 #include "ui/CardList.h"
 #include "ui/NavBar.h"
 #include "RuleActionsDialog.h"

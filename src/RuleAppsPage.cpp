@@ -21,8 +21,8 @@ namespace
     constexpr int kBrowseId = 104;
     constexpr int kRefreshId = 105;
     constexpr UINT_PTR kPollTimer = 1;
-    constexpr wchar_t kEditGlyph = L'';
-    constexpr wchar_t kRemoveGlyph = L'';
+    constexpr wchar_t kEditGlyph = L'\uE70F';
+    constexpr wchar_t kRemoveGlyph = L'\uE711';
 
     enum class Source
     {
@@ -321,7 +321,7 @@ namespace
             {
                 RowList::Row header;
                 header.header = true;
-                header.title = L"In this rule  ·  " + std::to_wstring(count);
+                header.title = L"In this rule  \u00B7  " + std::to_wstring(count);
                 rows.push_back(std::move(header));
             }
             if (starting_)
@@ -333,7 +333,7 @@ namespace
                     row.iconPath = program.filePath;
                     row.title = program.displayName.empty() ? StemOf(program.filePath) : program.displayName;
                     row.detail = program.waitTimeMilliseconds > 0 ? L"Starts after " + Seconds(program.waitTimeMilliseconds) : L"Starts right away";
-                    if (!program.arguments.empty()) row.detail += L"  ·  " + program.arguments;
+                    if (!program.arguments.empty()) row.detail += L"  \u00B7  " + program.arguments;
                     row.toggleLabel = L"Close on exit";
                     row.toggle = program.closeWhenGameStops ? 1 : 0;
                     row.iconButtons = {kEditGlyph, kRemoveGlyph};
@@ -384,7 +384,7 @@ namespace
                     candidate.processName = process.processName;
                     candidate.executablePath = process.executablePath;
                     wchar_t usage[64]{};
-                    swprintf_s(usage, L"CPU %.1f %%  ·  %.0f MB", process.hasCpuUsage ? process.cpuUsagePercent : 0.0,
+                    swprintf_s(usage, L"CPU %.1f %%  \u00B7  %.0f MB", process.hasCpuUsage ? process.cpuUsagePercent : 0.0,
                         static_cast<double>(process.memoryUsageBytes) / (1024.0 * 1024.0));
                     candidate.detail = usage;
                     // Without a path a launch is impossible; closing by name still works.
@@ -404,8 +404,8 @@ namespace
                     const auto separator = app.effect.find(L" - ");
                     const auto level = app.effect.substr(0, separator);
                     const auto reason = separator == std::wstring::npos ? std::wstring{} : app.effect.substr(separator + 3);
-                    candidate.detail = app.category + L"  ·  " + (app.running ? L"running" : L"installed, not running");
-                    if (!reason.empty()) candidate.detail += L"  ·  " + reason;
+                    candidate.detail = app.category + L"  \u00B7  " + (app.running ? L"running" : L"installed, not running");
+                    if (!reason.empty()) candidate.detail += L"  \u00B7  " + reason;
                     if (level == L"High") { candidate.pill = L"High impact"; candidate.pillTone = RowList::Tone::Warning; }
                     else if (level == L"Medium") candidate.pill = L"Medium impact";
                     else if (level == L"Low") candidate.pill = L"Low impact";

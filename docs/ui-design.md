@@ -15,7 +15,11 @@ themselves. This guide describes that look and the reusable controls in `src/ui`
 4. Create two fonts and pass them to the controls: text `Segoe UI` 9 pt regular,
    headings `Segoe UI` 10 pt semibold. Recreate them on `WM_DPICHANGED` and call
    `SetFonts` on each control.
-5. Keep `src/ui` identical across the apps. Improve a control in one app, then copy it
+5. Keep source files ASCII and write other characters as escapes, for example
+   `L"\u00B7"` for a middle dot or `L'\uE711'` for an icon glyph, and compile with
+   `/utf-8`. Otherwise MSVC reads UTF-8 sources in the system code page and shows
+   garbage such as "Â·" or broken icons.
+6. Keep `src/ui` identical across the apps. Improve a control in one app, then copy it
    to the others, instead of letting copies drift apart.
 
 ## Window layout

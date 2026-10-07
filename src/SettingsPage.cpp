@@ -155,7 +155,7 @@ namespace
                 if (!mpoError_.empty()) row.detail = mpoError_;
                 else if (!state.readable) row.detail = L"The current setting cannot be read.";
                 else row.detail = std::wstring(state.disabled ? L"Disabled" : state.customized ? L"Partly changed" : L"Windows default") +
-                    L"  ·  May help with flickering or stutter from overlays. Needs a Windows restart.";
+                    L"  \u00B7  May help with flickering or stutter from overlays. Needs a Windows restart.";
                 row.button = state.customized ? L"Restore default" : L"Disable MPO";
                 row.buttonEnabled = state.readable;
                 if (state.disabled) { row.pill = L"Disabled"; row.pillTone = RowList::Tone::Warning; }

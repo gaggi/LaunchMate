@@ -96,6 +96,8 @@ else()
 endif()
 
 if(MSVC)
+    # Sources are UTF-8; without this MSVC reads them as the system code page.
+    target_compile_options(LaunchMate PRIVATE /utf-8)
     target_compile_options(LaunchMate PRIVATE
         $<$<CONFIG:Release>:/O2 /Oi /Gy /GF /Gw>
         $<$<CONFIG:RelWithDebInfo>:/O2 /Oi /Gy /GF /Gw>

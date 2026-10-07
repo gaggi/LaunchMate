@@ -89,8 +89,8 @@ namespace
             {
                 RowList::Row header;
                 header.header = true;
-                header.title = disable ? L"Disable while racing  ·  their start type is restored afterwards"
-                                       : L"Stop while racing  ·  restarted afterwards if they were running";
+                header.title = disable ? L"Disable while racing  \u00B7  their start type is restored afterwards"
+                                       : L"Stop while racing  \u00B7  restarted afterwards if they were running";
                 rows.push_back(std::move(header));
                 rowServices_.push_back(nullptr);
                 for (const auto& service : services_)

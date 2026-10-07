@@ -17,7 +17,7 @@ namespace
     constexpr int kLayoutId = 104;
     constexpr int kDetectId = 105;
     constexpr int kApplyId = 106;
-    constexpr wchar_t kRemoveGlyph = L'';
+    constexpr wchar_t kRemoveGlyph = L'\uE711';
 
     bool IsSameDisplay(const MonitorPowerSetup::DisplayPath& left, const MonitorPowerSetup::DisplayPath& right)
     {

@@ -171,7 +171,7 @@ private:
             SelectObject(dc, glyphFont_);
             RECT star = StarRect(rect);
             SetTextColor(dc, tile.primary ? RGB(55, 138, 221) : RGB(160, 165, 172));
-            DrawTextW(dc, tile.primary ? L"" : L"", 1, &star, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(dc, tile.primary ? L"\uE735" : L"\uE734", 1, &star, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         }
         SelectObject(dc, oldFont);
         BitBlt(target, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);

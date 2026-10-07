@@ -2,22 +2,28 @@
 
 #include "Models.h"
 
+#include <functional>
+#include <vector>
 #include <windows.h>
 
-bool ShowRuleActionsDialog(
+// Sections of a rule, in the order the monitor runs them at the start of a session.
+enum class RuleSection
+{
+    StartPrograms = 0,
+    StopProcesses = 1,
+    HomeAssistant = 2,
+    MonitorConfig = 3,
+    Performance = 4,
+    WindowsServices = 5
+};
+
+// One section of a rule as an embedded page (a child dialog of `parent`). Edits apply
+// to `rule` immediately and `changed` runs after each one, so the caller can save.
+// `rule` and `monitorSetups` must outlive the page; DestroyWindow ends it.
+HWND CreateRuleSectionPane(
     HINSTANCE instanceHandle,
-    HWND owner,
+    HWND parent,
     WatchedProcessRule& rule,
     const std::vector<MonitorPowerSetup>& monitorSetups,
-    int initialTab = 0,
-    int initialActionIndex = -1);
-
-bool ShowStopProcessActionDialog(
-    HINSTANCE instanceHandle,
-    HWND owner,
-    ProcessStopAction& action);
-
-bool ShowHomeAssistantActionDialog(
-    HINSTANCE instanceHandle,
-    HWND owner,
-    HomeAssistantAction& action);
+    RuleSection section,
+    std::function<void()> changed);

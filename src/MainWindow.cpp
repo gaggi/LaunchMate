@@ -272,78 +272,17 @@ namespace
         return dialog.lpstrFile;
     }
 
-    struct ProgramOptionsDialogState
-    {
-        LaunchProgram* program{nullptr};
-        bool accepted{false};
-    };
-
-    INT_PTR CALLBACK ProgramOptionsDialogProc(HWND dialogHandle, UINT message, WPARAM wParam, LPARAM lParam)
-    {
-        auto* state = reinterpret_cast<ProgramOptionsDialogState*>(GetWindowLongPtrW(dialogHandle, GWLP_USERDATA));
-
-        switch (message)
-        {
-        case WM_INITDIALOG:
-        {
-            UiTheme::Apply(dialogHandle);
-            state = reinterpret_cast<ProgramOptionsDialogState*>(lParam);
-            SetWindowLongPtrW(dialogHandle, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-            if (state && state->program)
-            {
-                SetDlgItemTextW(dialogHandle, IDC_PROGRAM_ARGS, state->program->arguments.c_str());
-                SetDlgItemInt(dialogHandle, IDC_PROGRAM_DELAY, static_cast<UINT>(state->program->waitTimeMilliseconds), FALSE);
-                SetDlgItemInt(dialogHandle, IDC_PROGRAM_CLOSE_DELAY, static_cast<UINT>(state->program->closeDelayMilliseconds), FALSE);
-            }
-            return TRUE;
-        }
-        case WM_COMMAND:
-            switch (LOWORD(wParam))
-            {
-            case IDC_PROGRAM_OK:
-                if (state && state->program)
-                {
-                    wchar_t argsBuffer[1024] = {};
-                    GetDlgItemTextW(dialogHandle, IDC_PROGRAM_ARGS, argsBuffer, static_cast<int>(std::size(argsBuffer)));
-
-                    BOOL translated = FALSE;
-                    const UINT delayValue = GetDlgItemInt(dialogHandle, IDC_PROGRAM_DELAY, &translated, FALSE);
-                    BOOL closeDelayTranslated = FALSE;
-                    const UINT closeDelayValue = GetDlgItemInt(dialogHandle, IDC_PROGRAM_CLOSE_DELAY, &closeDelayTranslated, FALSE);
-                    state->program->arguments = argsBuffer;
-                    state->program->waitTimeMilliseconds = translated ? static_cast<int>(delayValue) : 0;
-                    state->program->closeDelayMilliseconds = closeDelayTranslated ? static_cast<int>(closeDelayValue) : 0;
-                    state->accepted = true;
-                }
-                EndDialog(dialogHandle, IDOK);
-                return TRUE;
-            case IDC_PROGRAM_CANCEL:
-            case IDCANCEL:
-                EndDialog(dialogHandle, IDCANCEL);
-                return TRUE;
-            }
-            break;
-        }
-
-        return FALSE;
-    }
-
-    bool ShowProgramOptionsDialog(HINSTANCE instanceHandle, HWND owner, LaunchProgram& program)
-    {
-        ProgramOptionsDialogState state;
-        state.program = &program;
-        DialogBoxParamW(instanceHandle, MAKEINTRESOURCEW(IDD_PROGRAM_OPTIONS), owner, ProgramOptionsDialogProc, reinterpret_cast<LPARAM>(&state));
-        return state.accepted;
-    }
-
     struct MonitorPowerSetupDialogState
     {
         static constexpr int kEnabledControlBase = 3000;
         static constexpr int kPrimaryControlBase = 4000;
 
-        std::vector<MonitorPowerSetup>* setups{nullptr};
-        std::vector<MonitorPowerSetup::DisplayPath>* detectedDisplays{nullptr};
-        std::function<void()> saveCallback;
+        // Edited copies; saved whenever they form a valid set.
+        std::vector<MonitorPowerSetup> workingSetups;
+        std::vector<MonitorPowerSetup::DisplayPath> workingDetectedDisplays;
+        std::vector<MonitorPowerSetup>* setups{&workingSetups};
+        std::vector<MonitorPowerSetup::DisplayPath>* detectedDisplays{&workingDetectedDisplays};
+        std::function<void(const std::vector<MonitorPowerSetup>&, const std::vector<MonitorPowerSetup::DisplayPath>&)> saveCallback;
         std::function<bool(size_t)> applyCallback;
         std::vector<HWND> rowControls;
         std::vector<HWND> enabledChecks;
@@ -465,11 +404,11 @@ namespace
     void PopulateMonitorSetupRows(HWND dialogHandle, MonitorPowerSetupDialogState& state, const MonitorPowerSetup& setup)
     {
         DestroyMonitorSetupRows(state);
-        CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"Monitor", 0, 150, 52, 52, 10);
-        CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"Name", 0, 207, 52, 180, 10);
-        CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"Enabled", 0, 395, 52, 45, 10);
-        CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"Primary", 0, 455, 52, 45, 10);
-        CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"", SS_ETCHEDHORZ, 150, 65, 350, 1);
+        CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"Monitor", 0, 112, 36, 50, 10);
+        CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"Name", 0, 166, 36, 120, 10);
+        CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"Enabled", 0, 292, 36, 40, 10);
+        CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"Primary", 0, 338, 36, 42, 10);
+        CreateMonitorSetupRowControl(dialogHandle, state, L"STATIC", L"", SS_ETCHEDHORZ, 112, 49, 268, 1);
 
         if (setup.displayPaths.empty())
         {
@@ -477,28 +416,28 @@ namespace
                 dialogHandle,
                 state,
                 L"STATIC",
-                L"No monitors detected yet. Activate the desired monitors in Windows and click Detect Current.",
+                L"No monitors detected yet. Activate the desired monitors in Windows and click Detect current.",
                 0,
-                150,
-                70,
-                350,
-                12);
+                112,
+                54,
+                268,
+                24);
             return;
         }
 
         for (size_t index = 0; index < setup.displayPaths.size(); ++index)
         {
             const auto& path = setup.displayPaths[index];
-            const LONG y = 70 + static_cast<LONG>(index) * 24;
+            const LONG y = 54 + static_cast<LONG>(index) * 20;
             CreateMonitorSetupRowControl(
                 dialogHandle,
                 state,
                 L"STATIC",
                 L"Monitor " + std::to_wstring(index + 1),
                 0,
-                150,
+                112,
                 y + 2,
-                52,
+                50,
                 12);
             CreateMonitorSetupRowControl(
                 dialogHandle,
@@ -506,9 +445,9 @@ namespace
                 L"STATIC",
                 path.monitorName.empty() ? path.displayName : path.monitorName,
                 SS_CENTERIMAGE | SS_ENDELLIPSIS,
-                207,
+                166,
                 y + 2,
-                180,
+                120,
                 12);
             HWND enabled = CreateMonitorSetupRowControl(
                 dialogHandle,
@@ -516,7 +455,7 @@ namespace
                 L"BUTTON",
                 L"",
                 BS_AUTOCHECKBOX,
-                405,
+                302,
                 y,
                 14,
                 14,
@@ -527,7 +466,7 @@ namespace
                 L"BUTTON",
                 L"",
                 BS_RADIOBUTTON,
-                466,
+                350,
                 y,
                 14,
                 14,
@@ -599,21 +538,14 @@ namespace
         }
     }
 
-    bool ValidateMonitorPowerSetups(HWND dialogHandle, const MonitorPowerSetupDialogState& state)
+    // Empty when the configs can be saved; otherwise what still needs fixing.
+    std::wstring ValidateMonitorPowerSetups(const MonitorPowerSetupDialogState& state)
     {
         std::vector<DWORD> assignedHotkeys;
         for (const auto& setup : *state.setups)
         {
-            if (setup.name.empty())
-            {
-                MessageBoxW(dialogHandle, L"Each monitor config needs a name.", L"LaunchMate", MB_OK | MB_ICONWARNING);
-                return false;
-            }
-            if (setup.displayPaths.empty())
-            {
-                MessageBoxW(dialogHandle, L"Capture the current Windows display state for each monitor config before saving.", L"LaunchMate", MB_OK | MB_ICONWARNING);
-                return false;
-            }
+            if (setup.name.empty()) return L"Each monitor config needs a name.";
+            if (setup.displayPaths.empty()) return L"Click Detect current to capture the monitors for " + setup.name + L".";
             const auto enabledCount = std::count_if(setup.displayPaths.begin(), setup.displayPaths.end(), [](const auto& display)
             {
                 return display.enabled;
@@ -623,22 +555,26 @@ namespace
                 return display.enabled && display.isPrimary;
             });
             if (enabledCount == 0 || primaryCount != 1)
-            {
-                MessageBoxW(dialogHandle, L"Each monitor config must enable at least one monitor and select exactly one enabled monitor as Primary.", L"LaunchMate", MB_OK | MB_ICONWARNING);
-                return false;
-            }
+                return setup.name + L" needs at least one enabled monitor and exactly one enabled primary monitor.";
             if (setup.hotkeyVirtualKey != 0)
             {
                 const DWORD hotkey = MAKELONG(setup.hotkeyModifiers, setup.hotkeyVirtualKey);
                 if (std::find(assignedHotkeys.begin(), assignedHotkeys.end(), hotkey) != assignedHotkeys.end())
-                {
-                    MessageBoxW(dialogHandle, L"Each monitor config hotkey must be unique.", L"LaunchMate", MB_OK | MB_ICONWARNING);
-                    return false;
-                }
+                    return L"Each monitor config hotkey must be unique.";
                 assignedHotkeys.push_back(hotkey);
             }
         }
-        return true;
+        return {};
+    }
+
+    // Saves the working copies once they are valid and says what is missing otherwise.
+    void CommitMonitorPowerSetups(HWND dialogHandle, MonitorPowerSetupDialogState& state)
+    {
+        StoreSelectedMonitorPowerSetup(dialogHandle, state);
+        const auto problem = ValidateMonitorPowerSetups(state);
+        if (problem.empty() && state.saveCallback) state.saveCallback(*state.setups, *state.detectedDisplays);
+        SetDlgItemTextW(dialogHandle, IDC_MONITOR_SETUP_STATUS,
+            problem.empty() ? L"Changes are saved automatically." : (L"Not saved yet: " + problem).c_str());
     }
 
     INT_PTR CALLBACK MonitorPowerSetupsDialogProc(HWND dialogHandle, UINT message, WPARAM wParam, LPARAM lParam)
@@ -652,24 +588,25 @@ namespace
             UiTheme::Apply(dialogHandle);
             state = reinterpret_cast<MonitorPowerSetupDialogState*>(lParam);
             SetWindowLongPtrW(dialogHandle, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-            if (state == nullptr)
-            {
-                return FALSE;
-            }
-
             PopulateMonitorPowerSetupList(dialogHandle, *state);
             LoadSelectedMonitorPowerSetup(dialogHandle, *state);
-            return TRUE;
+            const auto problem = ValidateMonitorPowerSetups(*state);
+            SetDlgItemTextW(dialogHandle, IDC_MONITOR_SETUP_STATUS,
+                problem.empty() ? L"Changes are saved automatically." : (L"Not saved yet: " + problem).c_str());
+            return FALSE;
         }
+        case WM_DESTROY:
+            // The hotkey control does not report edits, so capture them when the page closes.
+            if (state) CommitMonitorPowerSetups(dialogHandle, *state);
+            return FALSE;
+        case WM_NCDESTROY:
+            delete state;
+            SetWindowLongPtrW(dialogHandle, GWLP_USERDATA, 0);
+            return FALSE;
         case WM_COMMAND:
-            if (state == nullptr)
+            if (state == nullptr || state->syncingControls)
             {
                 return FALSE;
-            }
-
-            if (state->syncingControls)
-            {
-                return TRUE;
             }
 
             if (LOWORD(wParam) >= MonitorPowerSetupDialogState::kEnabledControlBase &&
@@ -681,7 +618,7 @@ namespace
                 {
                     SendMessageW(state->primaryRadios[index], BM_SETCHECK, BST_UNCHECKED, 0);
                 }
-                StoreSelectedMonitorPowerSetup(dialogHandle, *state);
+                CommitMonitorPowerSetups(dialogHandle, *state);
                 return TRUE;
             }
 
@@ -694,7 +631,7 @@ namespace
                 {
                     SendMessageW(state->primaryRadios[index], BM_SETCHECK, index == selected ? BST_CHECKED : BST_UNCHECKED, 0);
                 }
-                StoreSelectedMonitorPowerSetup(dialogHandle, *state);
+                CommitMonitorPowerSetups(dialogHandle, *state);
                 return TRUE;
             }
 
@@ -703,7 +640,7 @@ namespace
             case IDC_MONITOR_SETUP_LIST:
                 if (HIWORD(wParam) == LBN_SELCHANGE)
                 {
-                    StoreSelectedMonitorPowerSetup(dialogHandle, *state);
+                    CommitMonitorPowerSetups(dialogHandle, *state);
                     state->selectedIndex = static_cast<int>(SendMessageW(GetDlgItem(dialogHandle, IDC_MONITOR_SETUP_LIST), LB_GETCURSEL, 0, 0));
                     LoadSelectedMonitorPowerSetup(dialogHandle, *state);
                 }
@@ -711,7 +648,7 @@ namespace
             case IDC_MONITOR_SETUP_NAME:
                 if (HIWORD(wParam) == EN_CHANGE)
                 {
-                    StoreSelectedMonitorPowerSetup(dialogHandle, *state);
+                    CommitMonitorPowerSetups(dialogHandle, *state);
                     PopulateMonitorPowerSetupList(dialogHandle, *state);
                 }
                 return TRUE;
@@ -720,7 +657,7 @@ namespace
                 StoreSelectedMonitorPowerSetup(dialogHandle, *state);
                 MonitorPowerSetup setup;
                 setup.name = L"New setup";
-                if (state->detectedDisplays != nullptr && !state->detectedDisplays->empty())
+                if (!state->detectedDisplays->empty())
                 {
                     setup.displayPaths = *state->detectedDisplays;
                 }
@@ -732,6 +669,7 @@ namespace
                 state->selectedIndex = static_cast<int>(state->setups->size()) - 1;
                 PopulateMonitorPowerSetupList(dialogHandle, *state);
                 LoadSelectedMonitorPowerSetup(dialogHandle, *state);
+                CommitMonitorPowerSetups(dialogHandle, *state);
                 return TRUE;
             }
             case IDC_MONITOR_SETUP_REMOVE:
@@ -744,6 +682,7 @@ namespace
                     }
                     PopulateMonitorPowerSetupList(dialogHandle, *state);
                     LoadSelectedMonitorPowerSetup(dialogHandle, *state);
+                    CommitMonitorPowerSetups(dialogHandle, *state);
                 }
                 return TRUE;
             case IDC_MONITOR_SETUP_CAPTURE:
@@ -753,24 +692,26 @@ namespace
                 MonitorPowerSetup detectedSetup;
                 if (!MonitorPowerController::CaptureSetup(detectedSetup, &errorMessage))
                 {
-                    MessageBoxW(dialogHandle, errorMessage.c_str(), L"LaunchMate", MB_OK | MB_ICONWARNING);
+                    SetDlgItemTextW(dialogHandle, IDC_MONITOR_SETUP_STATUS, errorMessage.c_str());
                     return TRUE;
                 }
-                if (state->detectedDisplays != nullptr)
+                *state->detectedDisplays = detectedSetup.displayPaths;
+                for (auto& setup : *state->setups)
                 {
-                    *state->detectedDisplays = detectedSetup.displayPaths;
-                    for (auto& setup : *state->setups)
-                    {
-                        MergeDetectedDisplaysIntoSetup(setup, *state->detectedDisplays);
-                    }
+                    MergeDetectedDisplaysIntoSetup(setup, *state->detectedDisplays);
                 }
                 LoadSelectedMonitorPowerSetup(dialogHandle, *state);
+                CommitMonitorPowerSetups(dialogHandle, *state);
                 return TRUE;
             }
             case IDC_MONITOR_SETUP_APPLY:
-                StoreSelectedMonitorPowerSetup(dialogHandle, *state);
-                if (!ValidateMonitorPowerSetups(dialogHandle, *state))
+            {
+                // Apply uses the saved configuration, so save pending edits first.
+                CommitMonitorPowerSetups(dialogHandle, *state);
+                const auto problem = ValidateMonitorPowerSetups(*state);
+                if (!problem.empty())
                 {
+                    SetDlgItemTextW(dialogHandle, IDC_MONITOR_SETUP_STATUS, (L"Cannot apply yet: " + problem).c_str());
                     return TRUE;
                 }
                 if (state->selectedIndex >= 0 && state->applyCallback)
@@ -778,21 +719,7 @@ namespace
                     state->applyCallback(static_cast<size_t>(state->selectedIndex));
                 }
                 return TRUE;
-            case IDC_MONITOR_SETUP_SAVE:
-                StoreSelectedMonitorPowerSetup(dialogHandle, *state);
-                if (!ValidateMonitorPowerSetups(dialogHandle, *state))
-                {
-                    return TRUE;
-                }
-                if (state->saveCallback)
-                {
-                    state->saveCallback();
-                }
-                return TRUE;
-            case IDC_MONITOR_SETUP_CLOSE:
-            case IDCANCEL:
-                EndDialog(dialogHandle, IDC_MONITOR_SETUP_CLOSE);
-                return TRUE;
+            }
             }
             break;
         }
@@ -800,25 +727,23 @@ namespace
         return FALSE;
     }
 
-    void ShowMonitorPowerSetupsDialog(
+    HWND CreateMonitorSetupsPane(
         HINSTANCE instanceHandle,
-        HWND owner,
-        std::vector<MonitorPowerSetup>& setups,
-        std::vector<MonitorPowerSetup::DisplayPath>& detectedDisplays,
-        std::function<void()> saveCallback,
+        HWND parent,
+        const std::vector<MonitorPowerSetup>& setups,
+        const std::vector<MonitorPowerSetup::DisplayPath>& detectedDisplays,
+        std::function<void(const std::vector<MonitorPowerSetup>&, const std::vector<MonitorPowerSetup::DisplayPath>&)> saveCallback,
         std::function<bool(size_t)> applyCallback)
     {
-        MonitorPowerSetupDialogState state;
-        state.setups = &setups;
-        state.detectedDisplays = &detectedDisplays;
-        state.saveCallback = std::move(saveCallback);
-        state.applyCallback = std::move(applyCallback);
-        DialogBoxParamW(
-            instanceHandle,
-            MAKEINTRESOURCEW(IDD_MONITOR_POWER_SETUPS),
-            owner,
-            MonitorPowerSetupsDialogProc,
-            reinterpret_cast<LPARAM>(&state));
+        auto* state = new MonitorPowerSetupDialogState;
+        state->workingSetups = setups;
+        state->workingDetectedDisplays = detectedDisplays;
+        state->saveCallback = std::move(saveCallback);
+        state->applyCallback = std::move(applyCallback);
+        const HWND pane = CreateDialogParamW(instanceHandle, MAKEINTRESOURCEW(IDD_MONITOR_POWER_SETUPS), parent,
+            MonitorPowerSetupsDialogProc, reinterpret_cast<LPARAM>(state));
+        if (!pane) delete state;
+        return pane;
     }
 
     template <typename T>
@@ -1371,8 +1296,9 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         switch (controlId)
         {
         case IdToggleMonitoring: ToggleMonitoring(); return 0;
-        case IdMonitorPowerSetups: ManageMonitorPowerSetups(); return 0;
-        case IdSettings: ShowSettingsDialog(); return 0;
+        case IdMonitorPowerSetups: ShowPage(Page::Displays); return 0;
+        case IdSettings: ShowPage(Page::Settings); return 0;
+        case IdSectionBack: ShowPage(Page::RuleDetail); return 0;
         case IdNavRules: ShowPage(Page::Rules); return 0;
         case IdNavApps: ShowPage(Page::Apps); return 0;
         case IdRuleBack: ShowPage(Page::Rules); return 0;
@@ -1425,6 +1351,9 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             HideToTray();
             return 0;
         }
+        // Closing the page saves what it still holds (e.g. an edited hotkey).
+        pageHost_.Clear();
+        FlushPendingSave();
         // App's destructor stops monitoring once the window is gone, so restoring an
         // active session never leaves a frozen window on screen.
         trayIcon_.Destroy();
@@ -1472,10 +1401,12 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         if (wParam == kSourceRefreshTimer) { PollSourceRefresh(); return 0; }
+        if (wParam == kSaveTimer) { FlushPendingSave(); return 0; }
         break;
     case WM_DESTROY:
         KillTimer(windowHandle_, kProcessStateTimer);
         KillTimer(windowHandle_, kSourceRefreshTimer);
+        KillTimer(windowHandle_, kSaveTimer);
         for (auto& task : sourceTasks_) task.Cancel();
         UnregisterMonitorHotkeys();
         PostQuitMessage(0);
@@ -1605,7 +1536,7 @@ void MainWindow::CreateFonts()
             SendMessageW(control, WM_SETFONT, static_cast<WPARAM>(value), TRUE);
             return TRUE;
         }, reinterpret_cast<LPARAM>(uiFont_));
-    for (HWND control : {rulesHeadingHandle_, ruleTitleHandle_, startHeadingHandle_, exitHeadingHandle_})
+    for (HWND control : {rulesHeadingHandle_, ruleTitleHandle_, startHeadingHandle_, exitHeadingHandle_, pageTitleHandle_})
         if (control) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(headingFont_), TRUE);
     if (statusPanel_.Handle()) statusPanel_.SetFonts(headingFont_, uiFont_);
     if (navBar_.Handle()) navBar_.SetFonts(headingFont_, uiFont_);
@@ -1620,8 +1551,8 @@ void MainWindow::CreateControls()
     navBar_.Create(app_.InstanceHandle(), windowHandle_, L"LaunchMate", L"Version " + UpdateChecker::CurrentVersion(), {
         {L'\uE8FD', L"Rules", IdNavRules, true},
         {L'\uE71D', L"Apps", IdNavApps, true},
-        {L'\uE7F4', L"Displays", IdMonitorPowerSetups, false},
-        {L'\uE713', L"Settings", IdSettings, false}}, headingFont_, uiFont_);
+        {L'\uE7F4', L"Displays", IdMonitorPowerSetups, true},
+        {L'\uE713', L"Settings", IdSettings, true}}, headingFont_, uiFont_);
     statusPanel_.Create(app_.InstanceHandle(), windowHandle_, IdToggleMonitoring, headingFont_, uiFont_);
 
     // Rules page
@@ -1644,6 +1575,13 @@ void MainWindow::CreateControls()
     exitCards_.Create(app_.InstanceHandle(), windowHandle_, IdExitCards, headingFont_, uiFont_);
     startCards_.SetCompact(true);
     exitCards_.SetCompact(true);
+
+    // Embedded pages: rule sections, Displays and Settings
+    CreateButtonControl(windowHandle_, IdSectionBack, L"", 0, 0, 150, 30, uiFont_);
+    pageTitleHandle_ = CreateLabel(windowHandle_, L"", 0, 0, 240, 24, headingFont_);
+    pageHintHandle_ = CreateLabel(windowHandle_, L"", 0, 0, 240, 20, uiFont_);
+    SetWindowLongPtrW(pageHintHandle_, GWL_STYLE, GetWindowLongPtrW(pageHintHandle_, GWL_STYLE) | SS_ENDELLIPSIS);
+    pageHost_.Create(app_.InstanceHandle(), windowHandle_);
 
     // Apps page
     appsRuleLabelHandle_ = CreateLabel(windowHandle_, L"Add selected to rule", 0, 0, 140, 30, uiFont_);
@@ -1732,6 +1670,14 @@ void MainWindow::LayoutControls(int width, int height)
     place(startCards_.Handle(), left, top + 84, columnWidth, bottom - top - 84);
     place(exitCards_.Handle(), left + columnWidth + 20, top + 84, columnWidth, bottom - top - 84);
 
+    // Embedded pages
+    const bool sectionPage = page_ == Page::RuleSection;
+    button(IdSectionBack, left, top, 150, 30);
+    const int titleLeft = sectionPage ? left + 166 : left;
+    place(pageTitleHandle_, titleLeft, top - 1, right - titleLeft, 24);
+    place(pageHintHandle_, titleLeft, top + 21, right - titleLeft, 20);
+    place(pageHost_.Handle(), left, top + 56, content, bottom - top - 56);
+
     // Apps page
     place(appsRuleLabelHandle_, left, top, 140, 30);
     place(appsRuleComboHandle_, left + 144, top + 3, 220, 300);
@@ -1796,7 +1742,11 @@ void MainWindow::PopulateLists()
 
 void MainWindow::ShowPage(Page page)
 {
-    if (page == Page::RuleDetail && SelectedWatchedIndex() < 0) page = Page::Rules;
+    if ((page == Page::RuleDetail || page == Page::RuleSection) && SelectedWatchedIndex() < 0) page = Page::Rules;
+    // The embedded page edits configuration objects directly; close it (which saves
+    // anything it still holds) before the page changes.
+    pageHost_.Clear();
+    FlushPendingSave();
     page_ = page;
     const auto show = [](std::initializer_list<HWND> controls, bool visible)
     {
@@ -1809,7 +1759,18 @@ void MainWindow::ShowPage(Page page)
         startHeadingHandle_, exitHeadingHandle_, startCards_.Handle(), exitCards_.Handle()}, page == Page::RuleDetail);
     show({appsRuleLabelHandle_, appsRuleComboHandle_, item(IdTransferCatalogProgram), appsFeedbackHandle_,
         sourceTabsHandle_}, page == Page::Apps);
-    navBar_.SetSelected(page == Page::Apps ? IdNavApps : IdNavRules);
+    const bool embedded = page == Page::RuleSection || page == Page::Displays || page == Page::Settings;
+    show({pageTitleHandle_, pageHintHandle_, pageHost_.Handle()}, embedded);
+    show({item(IdSectionBack)}, page == Page::RuleSection);
+    navBar_.SetSelected(page == Page::Apps ? IdNavApps : page == Page::Displays ? IdMonitorPowerSetups
+        : page == Page::Settings ? IdSettings : IdNavRules);
+    if (embedded)
+    {
+        RECT client{};
+        GetClientRect(windowHandle_, &client);
+        LayoutControls(client.right, client.bottom); // The title moves next to the back button.
+        pageHost_.SetContent(CreatePagePane(page));
+    }
 
     if (page == Page::Rules) PopulateRuleCards();
     else if (page == Page::RuleDetail) PopulateRuleDetail();
@@ -1929,11 +1890,9 @@ void MainWindow::PopulateRuleDetail()
     SetWindowTextW(startHeadingHandle_, (L"When " + name + L" starts").c_str());
     SetWindowTextW(exitHeadingHandle_, (L"When " + name + L" exits").c_str());
 
-    // Tabs of RuleActionsDialog: 0 start programs, 1 stop processes, 2 Home Assistant,
-    // 3 monitor config, 4 performance, 5 Windows services.
     std::vector<CardList::Item> start;
-    startCardTabs_.clear();
-    const auto add = [](std::vector<CardList::Item>& items, std::vector<int>& tabs, int tab,
+    startCardSections_.clear();
+    const auto add = [](std::vector<CardList::Item>& items, std::vector<RuleSection>& sections, RuleSection section,
         std::wstring title, std::wstring subtitle, size_t count, const wchar_t* unused)
     {
         CardList::Item item;
@@ -1942,24 +1901,24 @@ void MainWindow::PopulateRuleDetail()
         item.subtitle = subtitle.empty() ? unused : std::move(subtitle);
         if (count != 0) item.trailing = std::to_wstring(count);
         items.push_back(std::move(item));
-        tabs.push_back(tab);
+        sections.push_back(section);
     };
 
     // Same order as the monitor runs them.
     std::vector<std::wstring> names;
     for (const auto& action : rule.processesToStop)
         names.push_back(action.displayName.empty() ? action.processName : action.displayName);
-    add(start, startCardTabs_, 1, L"Close apps", JoinNames(names), names.size(), L"Not used \u00B7 add apps that should not run in the background");
+    add(start, startCardSections_, RuleSection::StopProcesses, L"Close apps", JoinNames(names), names.size(), L"Not used \u00B7 add apps that should not run in the background");
 
     names.clear();
     for (const auto& service : rule.servicesToStop) names.push_back(ServiceLabel(service));
-    add(start, startCardTabs_, 5, L"Stop Windows services", JoinNames(names), names.size(), L"Not used");
+    add(start, startCardSections_, RuleSection::WindowsServices, L"Stop Windows services", JoinNames(names), names.size(), L"Not used");
 
     std::wstring performance;
     if (!rule.powerSchemeGuid.empty()) performance = PowerSchemeName(rule.powerSchemeGuid);
     if (const auto count = ConfiguredPerformanceActions(rule); count != 0)
         performance += (performance.empty() ? L"" : L"  \u00B7  ") + Plural(count, L"priority setting", L"priority settings");
-    add(start, startCardTabs_, 4, L"Power plan and priorities", performance, 0, L"Not changed");
+    add(start, startCardSections_, RuleSection::Performance, L"Power plan and priorities", performance, 0, L"Not changed");
 
     std::wstring display;
     if (!rule.monitorPowerSetupName.empty())
@@ -1967,11 +1926,11 @@ void MainWindow::PopulateRuleDetail()
         display = rule.monitorPowerSetupName;
         if (rule.monitorPowerSetupDelayMilliseconds > 0) display += L" after " + Seconds(rule.monitorPowerSetupDelayMilliseconds);
     }
-    add(start, startCardTabs_, 3, L"Display configuration", display, 0, L"Not changed");
+    add(start, startCardSections_, RuleSection::MonitorConfig, L"Display configuration", display, 0, L"Not changed");
 
     names.clear();
     for (const auto& action : rule.homeAssistantActions) names.push_back(action.displayName);
-    add(start, startCardTabs_, 2, L"Home Assistant webhooks", JoinNames(names), names.size(), L"Not used");
+    add(start, startCardSections_, RuleSection::HomeAssistant, L"Home Assistant webhooks", JoinNames(names), names.size(), L"Not used");
 
     names.clear();
     int latestStart = 0;
@@ -1982,15 +1941,15 @@ void MainWindow::PopulateRuleDetail()
     }
     std::wstring started = JoinNames(names);
     if (!started.empty() && latestStart > 0) started += L"  \u00B7  within " + Seconds(latestStart);
-    add(start, startCardTabs_, 0, L"Start apps", started, names.size(), L"Not used \u00B7 add tools such as SimHub or CrewChief");
+    add(start, startCardSections_, RuleSection::StartPrograms, L"Start apps", started, names.size(), L"Not used \u00B7 add tools such as SimHub or CrewChief");
 
     std::vector<CardList::Item> exit;
-    exitCardTabs_.clear();
+    exitCardSections_.clear();
     names.clear();
     for (const auto& program : rule.programsToLaunch)
         if (program.closeWhenGameStops)
             names.push_back(program.displayName.empty() ? FileNameWithoutExtension(program.filePath) : program.displayName);
-    add(exit, exitCardTabs_, 0, L"Close started apps", JoinNames(names), names.size(), L"Nothing to close");
+    add(exit, exitCardSections_, RuleSection::StartPrograms, L"Close started apps", JoinNames(names), names.size(), L"Nothing to close");
 
     std::vector<std::wstring> restored;
     if (!rule.servicesToStop.empty()) restored.push_back(L"services");
@@ -2000,17 +1959,99 @@ void MainWindow::PopulateRuleDetail()
     for (size_t position = 0; position < restored.size(); ++position)
         restoredText += (position == 0 ? L"" : position + 1 == restored.size() ? L" and " : L", ") + restored[position];
     if (!restoredText.empty()) restoredText[0] = static_cast<wchar_t>(towupper(restoredText[0]));
-    add(exit, exitCardTabs_, !rule.servicesToStop.empty() ? 5 : !rule.powerSchemeGuid.empty() ? 4 : 3,
+    add(exit, exitCardSections_, !rule.servicesToStop.empty() ? RuleSection::WindowsServices
+        : !rule.powerSchemeGuid.empty() ? RuleSection::Performance : RuleSection::MonitorConfig,
         L"Restore system settings", restoredText, 0, L"Nothing to restore");
 
     names.clear();
     for (const auto& action : rule.processesToStop)
         if (action.restartAfterWatchProcessEnds)
             names.push_back(action.displayName.empty() ? action.processName : action.displayName);
-    add(exit, exitCardTabs_, 1, L"Reopen closed apps", JoinNames(names), names.size(), L"Nothing to reopen");
+    add(exit, exitCardSections_, RuleSection::StopProcesses, L"Reopen closed apps", JoinNames(names), names.size(), L"Nothing to reopen");
 
     startCards_.SetItems(std::move(start));
     exitCards_.SetItems(std::move(exit));
+}
+
+namespace
+{
+    struct SectionText
+    {
+        const wchar_t* title;
+        const wchar_t* hint;
+    };
+
+    SectionText DescribeSection(RuleSection section)
+    {
+        switch (section)
+        {
+        case RuleSection::StartPrograms: return {L"Start apps", L"Started when %s starts and closed again when it exits, unless set to keep running."};
+        case RuleSection::StopProcesses: return {L"Close apps", L"Closed when %s starts: asked to close first, then ended after the configured time."};
+        case RuleSection::HomeAssistant: return {L"Home Assistant webhooks", L"Called when %s starts."};
+        case RuleSection::MonitorConfig: return {L"Display configuration", L"A saved monitor arrangement used while %s runs."};
+        case RuleSection::Performance: return {L"Power plan and priorities", L"Power plan and process priorities while %s runs."};
+        case RuleSection::WindowsServices: return {L"Stop Windows services", L"Stopped while %s runs; their original state is restored afterwards."};
+        }
+        return {L"", L""};
+    }
+}
+
+void MainWindow::OpenRuleSection(RuleSection section)
+{
+    if (SelectedWatchedIndex() < 0) return;
+    openSection_ = section;
+    ShowPage(Page::RuleSection);
+}
+
+HWND MainWindow::CreatePagePane(Page page)
+{
+    auto& config = app_.Configuration();
+    const HWND host = pageHost_.Handle();
+    if (page == Page::Settings)
+    {
+        SetWindowTextW(pageTitleHandle_, L"Settings");
+        SetWindowTextW(pageHintHandle_, L"Changes are saved immediately.");
+        return CreateDialogParamW(app_.InstanceHandle(), MAKEINTRESOURCEW(IDD_SETTINGS), host, SettingsDialogProc,
+            reinterpret_cast<LPARAM>(this));
+    }
+    if (page == Page::Displays)
+    {
+        SetWindowTextW(pageTitleHandle_, L"Displays");
+        SetWindowTextW(pageHintHandle_, L"Saved monitor arrangements. Switch with a hotkey or the tray menu, or use one in a rule.");
+        return CreateMonitorSetupsPane(app_.InstanceHandle(), host, config.monitorPowerSetups, config.detectedDisplays,
+            [this](const auto& setups, const auto& detectedDisplays)
+            {
+                app_.Configuration().monitorPowerSetups = setups;
+                app_.Configuration().detectedDisplays = detectedDisplays;
+                ScheduleSave();
+            },
+            [this](size_t index) { return ApplyMonitorPowerSetup(index, true); });
+    }
+
+    const int index = SelectedWatchedIndex();
+    if (index < 0) return nullptr;
+    auto& rule = config.watchedProcesses[static_cast<size_t>(index)];
+    const auto name = RuleName(rule);
+    const auto text = DescribeSection(openSection_);
+    std::wstring hint = text.hint;
+    hint.replace(hint.find(L"%s"), 2, name);
+    SetWindowTextW(pageTitleHandle_, text.title);
+    SetWindowTextW(pageHintHandle_, hint.c_str());
+    SetDlgItemTextW(windowHandle_, IdSectionBack, (L"\u2190  " + name).c_str());
+    return CreateRuleSectionPane(app_.InstanceHandle(), host, rule, config.monitorPowerSetups, openSection_,
+        [this] { ScheduleSave(); });
+}
+
+void MainWindow::ScheduleSave()
+{
+    // Typing in a delay field reports every keystroke; save once the edits pause.
+    savePending_ = true;
+    SetTimer(windowHandle_, kSaveTimer, 500, nullptr);
+}
+
+void MainWindow::FlushPendingSave()
+{
+    if (savePending_) SaveConfiguration();
 }
 
 void MainWindow::PopulateRuleCombo()
@@ -2044,9 +2085,9 @@ void MainWindow::HandleCardCommand(int controlId, int code)
     }
     if (code != CardList::kActivated) return;
     const bool startColumn = controlId == IdStartCards;
-    const auto& tabs = startColumn ? startCardTabs_ : exitCardTabs_;
+    const auto& sections = startColumn ? startCardSections_ : exitCardSections_;
     const int index = (startColumn ? startCards_ : exitCards_).FocusedIndex();
-    if (index >= 0 && static_cast<size_t>(index) < tabs.size()) EditRuleActions(tabs[static_cast<size_t>(index)]);
+    if (index >= 0 && static_cast<size_t>(index) < sections.size()) OpenRuleSection(sections[static_cast<size_t>(index)]);
 }
 
 void MainWindow::ShowRuleContextMenu(int index)
@@ -2589,52 +2630,6 @@ void MainWindow::ToggleMonitoring()
     SyncMonitoringState();
 }
 
-void MainWindow::ManageMonitorPowerSetups()
-{
-    auto workingSetups = app_.Configuration().monitorPowerSetups;
-    auto workingDetectedDisplays = app_.Configuration().detectedDisplays;
-    ShowMonitorPowerSetupsDialog(
-        app_.InstanceHandle(),
-        windowHandle_,
-        workingSetups,
-        workingDetectedDisplays,
-        [this, &workingSetups, &workingDetectedDisplays]()
-        {
-            app_.Configuration().monitorPowerSetups = workingSetups;
-            app_.Configuration().detectedDisplays = workingDetectedDisplays;
-            SaveConfiguration();
-        },
-        [this, &workingSetups](size_t index)
-        {
-            if (index >= workingSetups.size())
-            {
-                return false;
-            }
-
-            std::wstring errorMessage;
-            std::function<void(const std::wstring&)> logger;
-            if (app_.LoggingEnabled())
-            {
-                logger = [this](const std::wstring& line)
-                {
-                    app_.Log(L"[MonitorSetup] " + line);
-                };
-            }
-
-            if (!MonitorPowerController::ApplySetup(workingSetups[index], logger, &errorMessage))
-            {
-                const auto label = workingSetups[index].name.empty() ? std::wstring(L"(Unnamed setup)") : workingSetups[index].name;
-                app_.Log(L"Failed to apply monitor config " + label + L": " + errorMessage);
-                MessageBoxW(windowHandle_, errorMessage.c_str(), L"LaunchMate", MB_OK | MB_ICONWARNING);
-                return false;
-            }
-
-            const auto label = workingSetups[index].name.empty() ? std::wstring(L"(Unnamed setup)") : workingSetups[index].name;
-            app_.Log(L"Applied monitor config: " + label);
-            return true;
-        });
-}
-
 void MainWindow::UnregisterMonitorHotkeys()
 {
     for (size_t index = 0; index < app_.Configuration().monitorPowerSetups.size(); ++index)
@@ -2703,6 +2698,8 @@ bool MainWindow::ApplyMonitorPowerSetup(size_t index, bool interactive)
 
 void MainWindow::SaveConfiguration()
 {
+    savePending_ = false;
+    KillTimer(windowHandle_, kSaveTimer);
     auto& config = app_.Configuration();
     // Changing administrator mode only affects the task when the task exists.
     // For a manually launched app it is just a saved application preference.
@@ -2878,22 +2875,6 @@ void MainWindow::AddWatchedProcess()
     OpenRule(static_cast<int>(rules.size()) - 1);
 }
 
-void MainWindow::EditRuleActions(int initialTab, int initialActionIndex)
-{
-    const int watchedIndex = SelectedWatchedIndex();
-    if (watchedIndex < 0) return;
-
-    auto& rule = app_.Configuration().watchedProcesses[static_cast<size_t>(watchedIndex)];
-    if (!ShowRuleActionsDialog(app_.InstanceHandle(), windowHandle_, rule,
-            app_.Configuration().monitorPowerSetups, initialTab, initialActionIndex))
-    {
-        return;
-    }
-
-    SaveConfiguration();
-    PopulateRuleDetail();
-}
-
 void MainWindow::TransferSelectedSource()
 {
     if (sourceTabIndex_ == 2)
@@ -3051,6 +3032,7 @@ void MainWindow::HandleTrayCommand(UINT command)
     case 1002: ToggleMonitoring(); break;
     case 1003:
         exitRequested_ = true;
+        pageHost_.Clear();
         SaveConfiguration();
         DestroyWindow(windowHandle_);
         break;
@@ -3119,12 +3101,6 @@ void MainWindow::BeginUpdateInstall(UpdateReleaseInfo release)
     }).detach();
 }
 
-void MainWindow::ShowSettingsDialog()
-{
-    DialogBoxParamW(app_.InstanceHandle(), MAKEINTRESOURCEW(IDD_SETTINGS), windowHandle_,
-        SettingsDialogProc, reinterpret_cast<LPARAM>(this));
-}
-
 INT_PTR CALLBACK MainWindow::SettingsDialogProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
 {
     auto* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
@@ -3133,11 +3109,8 @@ INT_PTR CALLBACK MainWindow::SettingsDialogProc(HWND dialog, UINT message, WPARA
         CheckDlgButton(dialog, id, value ? BST_CHECKED : BST_UNCHECKED);
     };
     const auto isChecked = [dialog](int id) { return IsDlgButtonChecked(dialog, id) == BST_CHECKED; };
-    if (message == WM_INITDIALOG)
+    const auto load = [&](const AppConfiguration& config)
     {
-        SetWindowLongPtrW(dialog, GWLP_USERDATA, lParam);
-        self = reinterpret_cast<MainWindow*>(lParam);
-        const auto& config = self->app_.Configuration();
         setChecked(IDC_SETTINGS_MINIMIZE_TO_TRAY, config.minimizeToTray);
         setChecked(IDC_SETTINGS_CLOSE_TO_TRAY, config.closeToTray);
         setChecked(IDC_SETTINGS_START_IN_TRAY, config.startInTray);
@@ -3146,46 +3119,42 @@ INT_PTR CALLBACK MainWindow::SettingsDialogProc(HWND dialog, UINT message, WPARA
         setChecked(IDC_SETTINGS_CHECK_UPDATES, config.checkForUpdatesOnStartup);
         setChecked(IDC_SETTINGS_START_AS_ADMIN, config.startAsAdministrator);
         setChecked(IDC_SETTINGS_USE_ETW, config.useEtw);
+    };
+    if (message == WM_INITDIALOG)
+    {
+        SetWindowLongPtrW(dialog, GWLP_USERDATA, lParam);
+        self = reinterpret_cast<MainWindow*>(lParam);
+        load(self->app_.Configuration());
         UiTheme::Apply(dialog);
-        return TRUE;
+        InitializeMpoControls(dialog);
+        return FALSE;
     }
     if (message != WM_COMMAND || !self) return FALSE;
 
-    switch (LOWORD(wParam))
+    const int id = LOWORD(wParam);
+    if (id == IDC_SETTINGS_CHECK_NOW)
     {
-    case IDC_SETTINGS_USE_ETW:
-        // ETW needs administrator rights, so the two options move together.
-        if (isChecked(IDC_SETTINGS_USE_ETW)) setChecked(IDC_SETTINGS_START_AS_ADMIN, true);
-        return TRUE;
-    case IDC_SETTINGS_START_AS_ADMIN:
-        if (!isChecked(IDC_SETTINGS_START_AS_ADMIN)) setChecked(IDC_SETTINGS_USE_ETW, false);
-        return TRUE;
-    case IDC_SETTINGS_CHECK_NOW:
         self->StartUpdateCheck(true);
         return TRUE;
-    case IDC_SETTINGS_MPO:
-        ShowMpoSettingsDialog(self->app_.InstanceHandle(), dialog);
-        return TRUE;
-    case IDOK:
-    {
-        auto& config = self->app_.Configuration();
-        config.minimizeToTray = isChecked(IDC_SETTINGS_MINIMIZE_TO_TRAY);
-        config.closeToTray = isChecked(IDC_SETTINGS_CLOSE_TO_TRAY);
-        config.startInTray = isChecked(IDC_SETTINGS_START_IN_TRAY);
-        config.startWithWindows = isChecked(IDC_SETTINGS_START_WITH_WINDOWS);
-        config.startMonitoringOnLaunch = isChecked(IDC_SETTINGS_START_MONITORING);
-        config.checkForUpdatesOnStartup = isChecked(IDC_SETTINGS_CHECK_UPDATES);
-        config.useEtw = isChecked(IDC_SETTINGS_USE_ETW);
-        config.startAsAdministrator = config.useEtw || isChecked(IDC_SETTINGS_START_AS_ADMIN);
-        self->SaveConfiguration();
-        EndDialog(dialog, IDOK);
-        return TRUE;
     }
-    case IDCANCEL:
-        EndDialog(dialog, IDCANCEL);
-        return TRUE;
-    }
-    return FALSE;
+    if (HandleMpoCommand(dialog, id)) return TRUE;
+    if (id < IDC_SETTINGS_MINIMIZE_TO_TRAY || id > IDC_SETTINGS_USE_ETW || HIWORD(wParam) != BN_CLICKED) return FALSE;
+
+    // ETW needs administrator rights, so the two options move together.
+    if (id == IDC_SETTINGS_USE_ETW && isChecked(IDC_SETTINGS_USE_ETW)) setChecked(IDC_SETTINGS_START_AS_ADMIN, true);
+    if (id == IDC_SETTINGS_START_AS_ADMIN && !isChecked(IDC_SETTINGS_START_AS_ADMIN)) setChecked(IDC_SETTINGS_USE_ETW, false);
+    auto& config = self->app_.Configuration();
+    config.minimizeToTray = isChecked(IDC_SETTINGS_MINIMIZE_TO_TRAY);
+    config.closeToTray = isChecked(IDC_SETTINGS_CLOSE_TO_TRAY);
+    config.startInTray = isChecked(IDC_SETTINGS_START_IN_TRAY);
+    config.startWithWindows = isChecked(IDC_SETTINGS_START_WITH_WINDOWS);
+    config.startMonitoringOnLaunch = isChecked(IDC_SETTINGS_START_MONITORING);
+    config.checkForUpdatesOnStartup = isChecked(IDC_SETTINGS_CHECK_UPDATES);
+    config.useEtw = isChecked(IDC_SETTINGS_USE_ETW);
+    config.startAsAdministrator = config.useEtw || isChecked(IDC_SETTINGS_START_AS_ADMIN);
+    self->SaveConfiguration();
+    load(config); // A declined startup-task change is reverted by SaveConfiguration.
+    return TRUE;
 }
 
 LaunchProgram MainWindow::SelectLaunchProgram()

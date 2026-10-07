@@ -818,33 +818,6 @@ namespace
             (dwm.present || graphics.present));
     }
 
-    INT_PTR CALLBACK MpoDialogProc(HWND dialog, UINT message, WPARAM wParam, LPARAM)
-    {
-        if (message == WM_INITDIALOG)
-        {
-            UiTheme::Apply(dialog);
-            RefreshMpoStatus(dialog);
-            return TRUE;
-        }
-        if (message != WM_COMMAND) return FALSE;
-        switch (LOWORD(wParam))
-        {
-        case IDC_MPO_DISABLE:
-        case IDC_MPO_RESTORE:
-        {
-            std::wstring error;
-            ApplyMpoSettingsWithElevation(LOWORD(wParam) == IDC_MPO_DISABLE, error);
-            RefreshMpoStatus(dialog, error);
-            return TRUE;
-        }
-        case IDOK:
-        case IDCANCEL:
-            EndDialog(dialog, LOWORD(wParam));
-            return TRUE;
-        }
-        return FALSE;
-    }
-
     struct ServicesDialogState
     {
         WatchedProcessRule* rule{};
@@ -1369,7 +1342,16 @@ void SaveIRacingServicesPane(HWND pane)
             state->rule->servicesToStop.push_back(IRacingServiceOptions()[index].name);
 }
 
-void ShowMpoSettingsDialog(HINSTANCE instance, HWND parent)
+void InitializeMpoControls(HWND dialog)
 {
-    DialogBoxParamW(instance, MAKEINTRESOURCEW(IDD_MPO_SETTINGS), parent, MpoDialogProc, 0);
+    RefreshMpoStatus(dialog);
+}
+
+bool HandleMpoCommand(HWND dialog, int controlId)
+{
+    if (controlId != IDC_MPO_DISABLE && controlId != IDC_MPO_RESTORE) return false;
+    std::wstring error;
+    ApplyMpoSettingsWithElevation(controlId == IDC_MPO_DISABLE, error);
+    RefreshMpoStatus(dialog, error);
+    return true;
 }

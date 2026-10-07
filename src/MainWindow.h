@@ -7,6 +7,8 @@
 #include "BackgroundTask.h"
 #include "CardList.h"
 #include "NavBar.h"
+#include "RuleActionsDialog.h"
+#include "ScrollHost.h"
 #include "StatusPanel.h"
 #include <array>
 #include <thread>
@@ -53,14 +55,18 @@ private:
         IdExitCards,
         IdRuleBack,
         IdRuleToggleEnabled,
-        IdAppsRuleCombo
+        IdAppsRuleCombo,
+        IdSectionBack
     };
 
     enum class Page
     {
         Rules,
         RuleDetail,
-        Apps
+        RuleSection,
+        Apps,
+        Displays,
+        Settings
     };
 
     static constexpr UINT kTrayCallbackMessage = WM_APP + 1;
@@ -88,11 +94,14 @@ private:
     void OpenRule(int index);
     void HandleCardCommand(int controlId, int code);
     void ShowRuleContextMenu(int index);
+    void OpenRuleSection(RuleSection section);
+    HWND CreatePagePane(Page page);
+    void ScheduleSave();
+    void FlushPendingSave();
     void ToggleRuleEnabled(int index);
     void ReportTransfer(size_t added, bool started);
     void SyncProcessStateTimer(bool visible);
     void ToggleMonitoring();
-    void ManageMonitorPowerSetups();
     bool ApplyMonitorPowerSetup(size_t index, bool interactive);
     void SaveConfiguration();
     void RegisterMonitorHotkeys();
@@ -108,12 +117,10 @@ private:
     void AddCustomCatalogProgram();
     void RemoveSelectedCatalogProgram();
     void AddWatchedProcess();
-    void EditRuleActions(int initialTab = 0, int initialActionIndex = -1);
     void RemoveWatchedProcess(int index);
     void HandleTrayCommand(UINT command);
     void StartUpdateCheck(bool interactive);
     void BeginUpdateInstall(UpdateReleaseInfo release);
-    void ShowSettingsDialog();
     static INT_PTR CALLBACK SettingsDialogProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam);
     void RefreshStatusPanel();
     LaunchProgram SelectLaunchProgram();
@@ -127,9 +134,16 @@ private:
     CardList ruleCards_;
     CardList startCards_;
     CardList exitCards_;
-    // Dialog tab of RuleActionsDialog that each start/exit card opens.
-    std::vector<int> startCardTabs_;
-    std::vector<int> exitCardTabs_;
+    // Rule section that each start/exit card opens.
+    std::vector<RuleSection> startCardSections_;
+    std::vector<RuleSection> exitCardSections_;
+    // Embedded page for Settings, Displays and rule sections.
+    ScrollHost pageHost_;
+    HWND pageTitleHandle_{nullptr};
+    HWND pageHintHandle_{nullptr};
+    RuleSection openSection_{RuleSection::StartPrograms};
+    bool savePending_{false};
+    static constexpr UINT_PTR kSaveTimer = 83;
     HWND rulesHeadingHandle_{nullptr};
     HWND ruleTitleHandle_{nullptr};
     HWND ruleSubtitleHandle_{nullptr};

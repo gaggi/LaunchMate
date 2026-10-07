@@ -37,6 +37,18 @@ namespace
         CloseHandle(token);
         return elevated;
     }
+
+    // EcoQoS: together with the idle priority class this is Task Manager's efficiency
+    // mode. Windows keeps the process at low clock speeds and prefers efficiency cores,
+    // away from the game. Unlike the priority class it is not inherited by launched apps.
+    bool EnableEfficiencyMode()
+    {
+        PROCESS_POWER_THROTTLING_STATE state{};
+        state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+        state.StateMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+        return SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof(state)) != FALSE;
+    }
 }
 
 App::App(HINSTANCE instanceHandle, AppLaunchOptions launchOptions)
@@ -47,6 +59,8 @@ App::App(HINSTANCE instanceHandle, AppLaunchOptions launchOptions)
 {
     const bool lowCpuPrioritySet = SetPriorityClass(GetCurrentProcess(), IDLE_PRIORITY_CLASS) != FALSE;
     const DWORD priorityError = lowCpuPrioritySet ? ERROR_SUCCESS : GetLastError();
+    const bool efficiencyModeSet = EnableEfficiencyMode();
+    const DWORD efficiencyError = efficiencyModeSet ? ERROR_SUCCESS : GetLastError();
     monitor_.SetPollInterval(launchOptions_.pollIntervalMs);
     monitor_.SetActivePollInterval(launchOptions_.activePollIntervalMs);
     monitor_.UpdateConfiguration(configuration_);
@@ -57,6 +71,8 @@ App::App(HINSTANCE instanceHandle, AppLaunchOptions launchOptions)
         LogMessage(L"Logging enabled.");
         LogMessage(lowCpuPrioritySet ? L"LaunchMate CPU priority: Low."
             : L"Could not set LaunchMate CPU priority to Low (Windows error " + std::to_wstring(priorityError) + L").");
+        LogMessage(efficiencyModeSet ? L"LaunchMate efficiency mode (EcoQoS): on."
+            : L"Could not enable efficiency mode (Windows error " + std::to_wstring(efficiencyError) + L").");
         LogMessage(L"Idle poll interval: " + std::to_wstring(launchOptions_.pollIntervalMs) + L" ms");
         LogMessage(L"Active poll interval: " + std::to_wstring(launchOptions_.activePollIntervalMs) + L" ms");
         LogMessage(IsRunningElevated()

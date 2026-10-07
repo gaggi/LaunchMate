@@ -14,6 +14,7 @@ LaunchMate is a native Windows desktop app for monitoring processes and automati
 - Optional Windows autostart
 - Administrator approval is requested only for individual system actions that need it
 - Optional tray mode
+- Runs in Windows efficiency mode (low CPU priority plus EcoQoS); launched programs start at normal priority without throttling
 - Optional GitHub update checks on startup
 - Global MPO control in Settings with two registry values and a Windows Default action
 - Store configuration as JSON in the roaming profile

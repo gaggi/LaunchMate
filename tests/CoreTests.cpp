@@ -439,9 +439,19 @@ struct ProcessMonitorTestAccess
         struct RestorePriority
         {
             DWORD previous{GetPriorityClass(GetCurrentProcess())};
-            ~RestorePriority() { SetPriorityClass(GetCurrentProcess(), previous); }
+            ~RestorePriority()
+            {
+                SetPriorityClass(GetCurrentProcess(), previous);
+                PROCESS_POWER_THROTTLING_STATE automatic{PROCESS_POWER_THROTTLING_CURRENT_VERSION};
+                SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &automatic, sizeof(automatic));
+            }
         } restorePriority;
+        // Same state as LaunchMate itself: idle priority plus EcoQoS (efficiency mode).
         Require(SetPriorityClass(GetCurrentProcess(), IDLE_PRIORITY_CLASS) != FALSE, "Cannot lower test parent priority");
+        PROCESS_POWER_THROTTLING_STATE eco{PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_EXECUTION_SPEED};
+        Require(SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &eco, sizeof(eco)) != FALSE,
+            "Cannot enable test parent efficiency mode");
         monitor.CheckRules();
         Require(GetPriorityClass(GetCurrentProcess()) == IDLE_PRIORITY_CLASS, "Launch did not restore parent low priority");
         Require(monitor.activeRules_.size() == 1, "Real snapshot failed to activate watched rule");
@@ -451,6 +461,10 @@ struct ProcessMonitorTestAccess
             throw std::runtime_error("Program did not launch: " + ToUtf8(lastStatus));
         const auto owned = records[0].startedProcessHandles.front();
         Require(GetPriorityClass(owned.get()) == NORMAL_PRIORITY_CLASS, "Launched app inherited parent low priority");
+        PROCESS_POWER_THROTTLING_STATE childThrottling{PROCESS_POWER_THROTTLING_CURRENT_VERSION};
+        Require(GetProcessInformation(owned.get(), ProcessPowerThrottling, &childThrottling, sizeof(childThrottling)) != FALSE &&
+            (childThrottling.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) == 0,
+            "Launched app inherited parent efficiency mode");
         if (WaitForSingleObject(owned.get(), 0) != WAIT_TIMEOUT)
         {
             DWORD exitCode = 0;
@@ -467,7 +481,7 @@ struct ProcessMonitorTestAccess
         Require(tokenRead && !childElevation.TokenIsElevated, "Launched child unexpectedly has administrator rights");
         monitor.Stop();
         Require(WaitForSingleObject(owned.get(), 0) == WAIT_OBJECT_0, "Launched child was not cleaned up");
-        std::cout << "Real snapshot detection, launch, and owned-child cleanup passed.\n";
+        std::cout << "Real snapshot detection, launch without inherited low priority or efficiency mode, and owned-child cleanup passed.\n";
     }
 
     static void TestHandoffOwnership()

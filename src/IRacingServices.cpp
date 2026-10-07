@@ -165,16 +165,16 @@ namespace
 const std::vector<IRacingServiceOption>& IRacingServiceOptions()
 {
     static const std::vector<IRacingServiceOption> options{
-        {L"wuauserv", L"Windows Update", true},
-        {L"UsoSvc", L"Update Orchestrator", true},
-        {L"WSearch", L"Windows Search", true},
-        {L"Spooler", L"Print Spooler", false},
-        {L"WlanSvc", L"Wi-Fi", false},
-        {L"BthAvctpSvc", L"Bluetooth AVCTP", false},
-        {L"BTAGService", L"Bluetooth Audio Gateway", false},
-        {L"bthserv", L"Bluetooth Support", false},
-        {L"XblAuthManager", L"Xbox Live Auth", false},
-        {L"bzserv", L"Backblaze", false}};
+        {L"wuauserv", L"Windows Update", true, L"Downloads and installs updates in the background"},
+        {L"UsoSvc", L"Update Orchestrator", true, L"Schedules update scans and restarts"},
+        {L"WSearch", L"Windows Search", true, L"Indexes files for the search box"},
+        {L"Spooler", L"Print Spooler", false, L"Needed only for printing"},
+        {L"WlanSvc", L"Wi-Fi", false, L"Keep it running if you race over Wi-Fi"},
+        {L"BthAvctpSvc", L"Bluetooth AVCTP", false, L"Media controls of Bluetooth devices"},
+        {L"BTAGService", L"Bluetooth Audio Gateway", false, L"Headsets and microphones over Bluetooth"},
+        {L"bthserv", L"Bluetooth Support", false, L"All Bluetooth devices, including controllers"},
+        {L"XblAuthManager", L"Xbox Live Auth", false, L"Xbox sign-in for games and the Xbox app"},
+        {L"bzserv", L"Backblaze", false, L"Online backup uploads"}};
     return options;
 }
 

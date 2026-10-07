@@ -30,6 +30,27 @@ namespace UiTheme
         return brush.Get();
     }
 
+    // Windows 11 ships Segoe Fluent Icons; Windows 10 has the same code points in MDL2.
+    inline const wchar_t* IconFontFace()
+    {
+        static const wchar_t* face = []
+        {
+            const HDC dc = GetDC(nullptr);
+            LOGFONTW query{};
+            query.lfCharSet = DEFAULT_CHARSET;
+            wcscpy_s(query.lfFaceName, L"Segoe Fluent Icons");
+            bool found = false;
+            EnumFontFamiliesExW(dc, &query, [](const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM found) -> int
+            {
+                *reinterpret_cast<bool*>(found) = true;
+                return 0;
+            }, reinterpret_cast<LPARAM>(&found), 0);
+            ReleaseDC(nullptr, dc);
+            return found ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets";
+        }();
+        return face;
+    }
+
     inline HBRUSH SurfaceBrush()
     {
         static const Brush brush(Surface);

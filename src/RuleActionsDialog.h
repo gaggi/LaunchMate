@@ -17,7 +17,12 @@ enum class RuleSection
     WindowsServices = 5
 };
 
-// One section of a rule as an embedded page (a child dialog of `parent`). Edits apply
+// Small dialogs for one item of a rule. Return true when the user confirmed.
+bool EditLaunchProgram(HINSTANCE instanceHandle, HWND owner, LaunchProgram& program);
+bool EditStopAction(HINSTANCE instanceHandle, HWND owner, ProcessStopAction& action);
+
+// The webhook, display or performance section of a rule as an embedded page (a
+// child dialog of `parent`); apps and services have pages of their own. Edits apply
 // to `rule` immediately and `changed` runs after each one, so the caller can save.
 // `rule` and `monitorSetups` must outlive the page; DestroyWindow ends it.
 HWND CreateRuleSectionPane(

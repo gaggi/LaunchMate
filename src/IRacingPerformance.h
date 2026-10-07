@@ -18,8 +18,14 @@ bool RestorePowerScheme(const GUID& scheme);
 HWND CreateIRacingPerformancePane(HINSTANCE instance, HWND parent, WatchedProcessRule& rule);
 void SaveIRacingPerformancePane(HWND pane);
 void RefreshIRacingPerformancePane(HWND pane);
-HWND CreateIRacingServicesPane(HINSTANCE instance, HWND parent, WatchedProcessRule& rule);
-void SaveIRacingServicesPane(HWND pane);
-// MPO controls (IDC_MPO_*) embedded in another dialog, e.g. the Settings page.
-void InitializeMpoControls(HWND dialog);
-bool HandleMpoCommand(HWND dialog, int controlId);
+// Multiplane overlay: Windows default, or disabled through the two community
+// registry values. Changes need administrator rights and a Windows restart.
+struct MpoState
+{
+    bool readable{};
+    bool disabled{};
+    // Any of the two values exists, i.e. not the Windows default.
+    bool customized{};
+};
+MpoState ReadMpoState();
+bool ChangeMpo(bool disable, std::wstring& error);

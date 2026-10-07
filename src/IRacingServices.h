@@ -8,6 +8,7 @@ struct IRacingServiceOption
     const wchar_t* name;
     const wchar_t* label;
     bool disableWhileRacing;
+    const wchar_t* description;
 };
 
 const std::vector<IRacingServiceOption>& IRacingServiceOptions();

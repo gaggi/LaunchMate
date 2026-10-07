@@ -3,7 +3,7 @@
 #include "ListViewHelpers.h"
 #include "IRacingPerformance.h"
 #include "resource.h"
-#include "UiTheme.h"
+#include "ui/UiTheme.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -234,11 +234,9 @@ namespace
         bool initializing{true};
     };
 
-    constexpr int kListSectionCount = 3;
-
     bool IsListSection(const SectionState& state)
     {
-        return static_cast<int>(state.section) < kListSectionCount;
+        return state.section == RuleSection::HomeAssistant;
     }
 
     int SelectedItem(HWND dialog)
@@ -285,35 +283,7 @@ namespace
     {
         HWND list = GetDlgItem(dialog, IDC_ACTION_LIST);
         const auto& rule = *state.rule;
-        if (state.section == RuleSection::StartPrograms)
-        {
-            ConfigureListView(list, {{L"Name", 2}, {L"Program", 4}, {L"Arguments", 3}, {L"Start delay", 2}, {L"Stop delay", 2}});
-            for (const auto& item : rule.programsToLaunch)
-            {
-                AddListViewRow(list, {
-                    item.displayName,
-                    item.filePath,
-                    item.arguments,
-                    std::to_wstring(item.waitTimeMilliseconds) + L" ms",
-                    item.closeWhenGameStops ? std::to_wstring(item.closeDelayMilliseconds) + L" ms" : L"Keeps running"});
-            }
-        }
-        else if (state.section == RuleSection::StopProcesses)
-        {
-            ConfigureListView(list, {{L"Name", 2}, {L"Process", 3}, {L"Close mode", 3}, {L"Restart", 3}});
-            for (const auto& item : rule.processesToStop)
-            {
-                const std::wstring restart = item.restartAfterWatchProcessEnds
-                    ? std::to_wstring(item.restartDelayMilliseconds) + L" ms after exit"
-                    : L"No";
-                AddListViewRow(list, {
-                    item.displayName,
-                    item.processName,
-                    item.gracefulCloseFirst ? L"Graceful, then force" : L"Force",
-                    restart});
-            }
-        }
-        else if (state.section == RuleSection::HomeAssistant)
+        if (state.section == RuleSection::HomeAssistant)
         {
             ConfigureListView(list, {{L"Name", 2}, {L"Webhook URL", 6}, {L"Delay", 2}});
             for (const auto& item : rule.homeAssistantActions)
@@ -333,21 +303,7 @@ namespace
         if (!add && selected < 0) return;
         auto& rule = *state.rule;
         bool changed = false;
-        if (state.section == RuleSection::StartPrograms)
-        {
-            LaunchProgram item;
-            if (!add) item = rule.programsToLaunch[static_cast<size_t>(selected)];
-            changed = ShowItemDialog(state.instance, dialog, IDD_START_ACTION, StartActionProc, item);
-            if (changed) { if (add) rule.programsToLaunch.push_back(std::move(item)); else rule.programsToLaunch[static_cast<size_t>(selected)] = std::move(item); }
-        }
-        else if (state.section == RuleSection::StopProcesses)
-        {
-            ProcessStopAction item;
-            if (!add) item = rule.processesToStop[static_cast<size_t>(selected)];
-            changed = ShowItemDialog(state.instance, dialog, IDD_STOP_ACTION, StopActionProc, item);
-            if (changed) { if (add) rule.processesToStop.push_back(std::move(item)); else rule.processesToStop[static_cast<size_t>(selected)] = std::move(item); }
-        }
-        else if (state.section == RuleSection::HomeAssistant)
+        if (state.section == RuleSection::HomeAssistant)
         {
             HomeAssistantAction item;
             if (!add) item = rule.homeAssistantActions[static_cast<size_t>(selected)];
@@ -364,9 +320,7 @@ namespace
         const int selected = SelectedItem(dialog);
         if (selected < 0) return;
         auto& rule = *state.rule;
-        if (state.section == RuleSection::StartPrograms) rule.programsToLaunch.erase(rule.programsToLaunch.begin() + selected);
-        else if (state.section == RuleSection::StopProcesses) rule.processesToStop.erase(rule.processesToStop.begin() + selected);
-        else if (state.section == RuleSection::HomeAssistant) rule.homeAssistantActions.erase(rule.homeAssistantActions.begin() + selected);
+        if (state.section == RuleSection::HomeAssistant) rule.homeAssistantActions.erase(rule.homeAssistantActions.begin() + selected);
         RefreshActions(dialog, state);
         state.changed();
     }
@@ -471,11 +425,10 @@ namespace
         return FALSE;
     }
 
-    // The performance and services panes keep some choices in their controls until
-    // saved; copy them into the rule after every interaction and report the change.
+    // The performance pane keeps the power plan choice in its combo box until saved;
+    // copy it into the rule after every interaction and report the change.
     struct PaneObserver
     {
-        RuleSection section{};
         std::function<void()> changed;
     };
 
@@ -493,8 +446,7 @@ namespace
             (message == WM_NOTIFY && reinterpret_cast<NMHDR*>(lParam)->code == NM_DBLCLK);
         if (interaction)
         {
-            if (observer->section == RuleSection::Performance) SaveIRacingPerformancePane(pane);
-            else SaveIRacingServicesPane(pane);
+            SaveIRacingPerformancePane(pane);
             observer->changed();
         }
         return result;
@@ -509,12 +461,10 @@ HWND CreateRuleSectionPane(
     RuleSection section,
     std::function<void()> changed)
 {
-    if (section == RuleSection::Performance || section == RuleSection::WindowsServices)
+    if (section == RuleSection::Performance)
     {
-        const HWND pane = section == RuleSection::Performance
-            ? CreateIRacingPerformancePane(instanceHandle, parent, rule)
-            : CreateIRacingServicesPane(instanceHandle, parent, rule);
-        if (pane) SetWindowSubclass(pane, PaneChangeProc, 1, reinterpret_cast<DWORD_PTR>(new PaneObserver{section, std::move(changed)}));
+        const HWND pane = CreateIRacingPerformancePane(instanceHandle, parent, rule);
+        if (pane) SetWindowSubclass(pane, PaneChangeProc, 1, reinterpret_cast<DWORD_PTR>(new PaneObserver{std::move(changed)}));
         return pane;
     }
     auto* state = new SectionState{instanceHandle, &rule, &monitorSetups, section, std::move(changed)};
@@ -522,4 +472,14 @@ HWND CreateRuleSectionPane(
         reinterpret_cast<LPARAM>(state));
     if (!pane) delete state;
     return pane;
+}
+
+bool EditLaunchProgram(HINSTANCE instanceHandle, HWND owner, LaunchProgram& program)
+{
+    return ShowItemDialog(instanceHandle, owner, IDD_START_ACTION, StartActionProc, program);
+}
+
+bool EditStopAction(HINSTANCE instanceHandle, HWND owner, ProcessStopAction& action)
+{
+    return ShowItemDialog(instanceHandle, owner, IDD_STOP_ACTION, StopActionProc, action);
 }

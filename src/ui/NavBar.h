@@ -61,7 +61,7 @@ public:
         textFont_ = textFont;
         if (iconFont_) DeleteObject(iconFont_);
         iconFont_ = CreateFontW(-Scale(16), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, IconFontFace());
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, UiTheme::IconFontFace());
         InvalidateRect(window_, nullptr, FALSE);
     }
 
@@ -75,27 +75,6 @@ public:
 private:
     static constexpr wchar_t kClassName[] = L"LaunchMateNavBar";
     static constexpr COLORREF kBackground = RGB(236, 238, 241);
-
-    // Windows 11 ships Segoe Fluent Icons; Windows 10 has the same code points in MDL2.
-    static const wchar_t* IconFontFace()
-    {
-        static const wchar_t* face = []
-        {
-            const HDC dc = GetDC(nullptr);
-            LOGFONTW query{};
-            query.lfCharSet = DEFAULT_CHARSET;
-            wcscpy_s(query.lfFaceName, L"Segoe Fluent Icons");
-            bool found = false;
-            EnumFontFamiliesExW(dc, &query, [](const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM found) -> int
-            {
-                *reinterpret_cast<bool*>(found) = true;
-                return 0;
-            }, reinterpret_cast<LPARAM>(&found), 0);
-            ReleaseDC(nullptr, dc);
-            return found ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets";
-        }();
-        return face;
-    }
 
     int Scale(int value) const { return MulDiv(value, GetDpiForWindow(window_), 96); }
 

@@ -31,6 +31,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_executable(LaunchMate WIN32
     src/main.cpp
     src/App.cpp
+    src/AppSources.cpp
+    src/DisplaysPage.cpp
+    src/RuleAppsPage.cpp
+    src/ServicesPage.cpp
+    src/SettingsPage.cpp
     src/MainWindow.cpp
     src/RuleActionsDialog.cpp
     src/IRacingPerformance.cpp

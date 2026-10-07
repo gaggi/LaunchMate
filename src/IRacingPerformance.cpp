@@ -2,7 +2,7 @@
 #include "BackgroundTask.h"
 #include "IRacingServices.h"
 #include "ListViewHelpers.h"
-#include "UiTheme.h"
+#include "ui/UiTheme.h"
 
 #include "resource.h"
 
@@ -797,132 +797,6 @@ namespace
         return ApplyMpoSettings(disable, error);
     }
 
-    std::wstring DescribeMpoRegistryValue(const MpoRegistryValue& state)
-    {
-        if (!state.readable) return L"Unreadable or not a DWORD";
-        if (!state.present) return L"Not present (Windows default)";
-        return L"DWORD " + std::to_wstring(state.value);
-    }
-
-    void RefreshMpoStatus(HWND dialog, const std::wstring& error = {})
-    {
-        const auto dwm = ReadMpoRegistryValue(kDwmRegistryPath, L"OverlayTestMode");
-        const auto graphics = ReadMpoRegistryValue(kGraphicsRegistryPath, L"DisableOverlays");
-        SetDlgItemTextW(dialog, IDC_MPO_DWM_STATUS, DescribeMpoRegistryValue(dwm).c_str());
-        SetDlgItemTextW(dialog, IDC_MPO_GRAPHICS_STATUS, DescribeMpoRegistryValue(graphics).c_str());
-        SetDlgItemTextW(dialog, IDC_MPO_MESSAGE, error.c_str());
-        const bool editable = dwm.readable && graphics.readable;
-        EnableWindow(GetDlgItem(dialog, IDC_MPO_DISABLE), editable &&
-            !(dwm.present && dwm.value == 5 && graphics.present && graphics.value == 1));
-        EnableWindow(GetDlgItem(dialog, IDC_MPO_RESTORE), editable &&
-            (dwm.present || graphics.present));
-    }
-
-    struct ServicesDialogState
-    {
-        WatchedProcessRule* rule{};
-        BackgroundTask<std::vector<std::wstring>> refresh;
-    };
-
-    bool AllServicesSelected(HWND dialog)
-    {
-        for (size_t index = 0; index < IRacingServiceOptions().size(); ++index)
-            if (IsDlgButtonChecked(dialog, IDC_IRACING_SERVICE_FIRST + static_cast<int>(index)) != BST_CHECKED) return false;
-        return !IRacingServiceOptions().empty();
-    }
-
-    void UpdateServiceSelectionButton(HWND dialog)
-    {
-        SetDlgItemTextW(dialog, IDC_IRACING_SERVICE_ALL, AllServicesSelected(dialog) ? L"Deselect all" : L"Select all");
-    }
-
-    INT_PTR CALLBACK ServicesDialogProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
-    {
-        auto* state = reinterpret_cast<ServicesDialogState*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
-        if (message == WM_INITDIALOG)
-        {
-            UiTheme::Apply(dialog);
-            state = reinterpret_cast<ServicesDialogState*>(lParam);
-            SetWindowLongPtrW(dialog, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-            const auto& options = IRacingServiceOptions();
-            for (size_t index = 0; index < options.size(); ++index)
-            {
-                const auto& option = options[index];
-                const int id = IDC_IRACING_SERVICE_FIRST + static_cast<int>(index);
-                const std::wstring label = std::wstring(option.label) + L" (" + option.name + L": loading...)";
-                SetDlgItemTextW(dialog, id, label.c_str());
-                const bool selected = std::any_of(state->rule->servicesToStop.begin(), state->rule->servicesToStop.end(), [&option](const std::wstring& name)
-                {
-                    return _wcsicmp(name.c_str(), option.name) == 0;
-                });
-                CheckDlgButton(dialog, id, selected ? BST_CHECKED : BST_UNCHECKED);
-            }
-            UpdateServiceSelectionButton(dialog);
-            const bool started = SetTimer(dialog, 83, 100, nullptr) &&
-                state->refresh.Start([](const std::atomic_bool& cancelled)
-                {
-                    std::vector<std::wstring> labels;
-                    for (const auto& option : IRacingServiceOptions())
-                    {
-                        if (cancelled) break;
-                        labels.push_back(std::wstring(option.label) + L" (" + option.name + L": " + DescribeIRacingService(option.name) + L")");
-                    }
-                    return labels;
-                });
-            if (!started)
-            {
-                KillTimer(dialog, 83);
-                for (size_t i = 0; i < options.size(); ++i)
-                {
-                    const auto text = std::wstring(options[i].label) + L" (status unavailable)";
-                    SetDlgItemTextW(dialog, IDC_IRACING_SERVICE_FIRST + static_cast<int>(i), text.c_str());
-                }
-            }
-            return TRUE;
-        }
-        if (message == WM_TIMER && wParam == 83 && state)
-        {
-            std::optional<std::vector<std::wstring>> labels;
-            if (state->refresh.Poll(labels))
-            {
-                KillTimer(dialog, 83);
-                for (size_t i = 0; i < IRacingServiceOptions().size(); ++i)
-                {
-                    const auto text = labels && i < labels->size() ? (*labels)[i] :
-                        std::wstring(IRacingServiceOptions()[i].label) + L" (status unavailable)";
-                    SetDlgItemTextW(dialog, IDC_IRACING_SERVICE_FIRST + static_cast<int>(i), text.c_str());
-                }
-            }
-            return TRUE;
-        }
-        if (message == WM_NCDESTROY)
-        {
-            KillTimer(dialog, 83);
-            delete state;
-            SetWindowLongPtrW(dialog, GWLP_USERDATA, 0);
-            return FALSE;
-        }
-        if (message != WM_COMMAND) return FALSE;
-        switch (LOWORD(wParam))
-        {
-        case IDC_IRACING_SERVICE_ALL:
-        {
-            const UINT checked = AllServicesSelected(dialog) ? BST_UNCHECKED : BST_CHECKED;
-            for (size_t index = 0; index < IRacingServiceOptions().size(); ++index)
-                CheckDlgButton(dialog, IDC_IRACING_SERVICE_FIRST + static_cast<int>(index), checked);
-            UpdateServiceSelectionButton(dialog);
-            return TRUE;
-        }
-        }
-        if (LOWORD(wParam) >= IDC_IRACING_SERVICE_FIRST &&
-            LOWORD(wParam) < IDC_IRACING_SERVICE_FIRST + IRacingServiceOptions().size() && HIWORD(wParam) == BN_CLICKED)
-        {
-            UpdateServiceSelectionButton(dialog);
-            return TRUE;
-        }
-        return FALSE;
-    }
-
     std::wstring BuildStatus(const WatchedProcessRule& rule, const DiagnosticResult& state, bool defenderVerifiedThisSession)
     {
         GUID active{};
@@ -1323,35 +1197,18 @@ void RefreshIRacingPerformancePane(HWND pane)
     if (state) RefreshStatus(pane, *state);
 }
 
-HWND CreateIRacingServicesPane(HINSTANCE instance, HWND parent, WatchedProcessRule& rule)
+MpoState ReadMpoState()
 {
-    auto* state = new ServicesDialogState{&rule};
-    HWND pane = CreateDialogParamW(instance, MAKEINTRESOURCEW(IDD_IRACING_SERVICES_PANE), parent, ServicesDialogProc, reinterpret_cast<LPARAM>(state));
-    if (!pane) delete state;
-    return pane;
+    const auto dwm = ReadMpoRegistryValue(kDwmRegistryPath, L"OverlayTestMode");
+    const auto graphics = ReadMpoRegistryValue(kGraphicsRegistryPath, L"DisableOverlays");
+    MpoState state;
+    state.readable = dwm.readable && graphics.readable;
+    state.disabled = dwm.present && dwm.value == 5 && graphics.present && graphics.value == 1;
+    state.customized = dwm.present || graphics.present;
+    return state;
 }
 
-void SaveIRacingServicesPane(HWND pane)
+bool ChangeMpo(bool disable, std::wstring& error)
 {
-    if (!pane) return;
-    auto* state = reinterpret_cast<ServicesDialogState*>(GetWindowLongPtrW(pane, GWLP_USERDATA));
-    if (!state) return;
-    state->rule->servicesToStop.clear();
-    for (size_t index = 0; index < IRacingServiceOptions().size(); ++index)
-        if (IsDlgButtonChecked(pane, IDC_IRACING_SERVICE_FIRST + static_cast<int>(index)) == BST_CHECKED)
-            state->rule->servicesToStop.push_back(IRacingServiceOptions()[index].name);
-}
-
-void InitializeMpoControls(HWND dialog)
-{
-    RefreshMpoStatus(dialog);
-}
-
-bool HandleMpoCommand(HWND dialog, int controlId)
-{
-    if (controlId != IDC_MPO_DISABLE && controlId != IDC_MPO_RESTORE) return false;
-    std::wstring error;
-    ApplyMpoSettingsWithElevation(controlId == IDC_MPO_DISABLE, error);
-    RefreshMpoStatus(dialog, error);
-    return true;
+    return ApplyMpoSettingsWithElevation(disable, error);
 }

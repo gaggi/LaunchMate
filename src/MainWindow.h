@@ -5,11 +5,11 @@
 #include "TrayIcon.h"
 #include "UpdateChecker.h"
 #include "BackgroundTask.h"
-#include "CardList.h"
-#include "NavBar.h"
+#include "ui/CardList.h"
+#include "ui/NavBar.h"
 #include "RuleActionsDialog.h"
-#include "ScrollHost.h"
-#include "StatusPanel.h"
+#include "ui/ScrollHost.h"
+#include "ui/StatusPanel.h"
 #include <array>
 #include <thread>
 #include <unordered_map>
@@ -38,24 +38,15 @@ private:
     {
         IdToggleMonitoring = 2001,
         IdMonitorPowerSetups,
-        IdDetectInstalledApps,
-        IdTransferCatalogProgram,
-        IdAddCatalogProgram,
-        IdRemoveCatalogProgram,
         IdAddWatchedProcess,
         IdRemoveWatchedProcess,
-        IdCatalogSearch,
-        IdCatalogList,
-        IdSourceTabs,
         IdSettings,
         IdNavRules,
-        IdNavApps,
         IdRuleCards,
         IdStartCards,
         IdExitCards,
         IdRuleBack,
         IdRuleToggleEnabled,
-        IdAppsRuleCombo,
         IdSectionBack
     };
 
@@ -64,7 +55,6 @@ private:
         Rules,
         RuleDetail,
         RuleSection,
-        Apps,
         Displays,
         Settings
     };
@@ -81,16 +71,9 @@ private:
     void PopulateLists();
     void RefreshProcessStates();
     static constexpr UINT_PTR kProcessStateTimer = 82;
-    void PopulateCatalogPrograms();
-    void PopulateRunningProcesses();
-    void PopulateDetectedProcesses();
-    void SwitchSourceTab();
-    void SyncCatalogProgramsFromConfiguration();
-    void DetectInstalledApps();
     void ShowPage(Page page);
     void PopulateRuleCards();
     void PopulateRuleDetail();
-    void PopulateRuleCombo();
     void OpenRule(int index);
     void HandleCardCommand(int controlId, int code);
     void ShowRuleContextMenu(int index);
@@ -99,7 +82,6 @@ private:
     void ScheduleSave();
     void FlushPendingSave();
     void ToggleRuleEnabled(int index);
-    void ReportTransfer(size_t added, bool started);
     void SyncProcessStateTimer(bool visible);
     void ToggleMonitoring();
     bool ApplyMonitorPowerSetup(size_t index, bool interactive);
@@ -110,20 +92,12 @@ private:
     void RestoreWindowPlacement(int showCommand);
     void HideToTray();
     void ShowFromTray();
-    void AddSelectedCatalogProgram();
-    void TransferSelectedSource();
-    void AddSelectedRunningProcess();
-    void AddSelectedDetectedProcess();
-    void AddCustomCatalogProgram();
-    void RemoveSelectedCatalogProgram();
     void AddWatchedProcess();
     void RemoveWatchedProcess(int index);
     void HandleTrayCommand(UINT command);
     void StartUpdateCheck(bool interactive);
     void BeginUpdateInstall(UpdateReleaseInfo release);
-    static INT_PTR CALLBACK SettingsDialogProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam);
     void RefreshStatusPanel();
-    LaunchProgram SelectLaunchProgram();
     WatchedProcessRule SelectWatchedProcess();
     int SelectedWatchedIndex() const;
 
@@ -149,64 +123,12 @@ private:
     HWND ruleSubtitleHandle_{nullptr};
     HWND startHeadingHandle_{nullptr};
     HWND exitHeadingHandle_{nullptr};
-    HWND appsRuleLabelHandle_{nullptr};
-    HWND appsRuleComboHandle_{nullptr};
-    HWND appsFeedbackHandle_{nullptr};
     Page page_{Page::Rules};
     int selectedRuleIndex_{-1};
-    HWND catalogSearchHandle_{nullptr};
-    HWND catalogListHandle_{nullptr};
-    HWND sourceTabsHandle_{nullptr};
-    HWND detectSourceButtonHandle_{nullptr};
-    HWND addCatalogButtonHandle_{nullptr};
-    HWND removeCatalogButtonHandle_{nullptr};
     HFONT headingFont_{nullptr};
     HFONT uiFont_{nullptr};
     UINT dpi_{96};
-    HIMAGELIST programIconList_{nullptr};
-    std::unordered_map<std::wstring, int> programIconIndexes_;
-    int defaultProgramIconIndex_{-1};
     TrayIcon trayIcon_;
-    std::vector<CatalogProgram> detectedPrograms_;
-    struct RunningProcessEntry
-    {
-        std::wstring displayName;
-        std::wstring processName;
-        std::wstring executablePath;
-        DWORD processId{};
-        double cpuUsagePercent{};
-        unsigned long long memoryUsageBytes{};
-        bool hasCpuUsage{};
-        bool hasMemoryUsage{};
-    };
-    std::vector<RunningProcessEntry> runningProcesses_;
-    struct DetectedProcessEntry
-    {
-        std::wstring displayName;
-        std::wstring processName;
-        std::wstring executablePath;
-        std::wstring effect;
-        bool running{};
-        bool verifiedRunningPath{};
-        bool allowStop{};
-    };
-    std::vector<DetectedProcessEntry> detectedProcesses_;
-    struct SourceResult
-    {
-        std::vector<CatalogProgram> programs;
-        std::vector<RunningProcessEntry> running;
-        std::vector<DetectedProcessEntry> detected;
-    };
-    static void CaptureRunningProcesses(SourceResult& result, const std::wstring& watchedProcessName, const std::atomic_bool& cancelled);
-    static void CaptureDetectedProcesses(SourceResult& result, const std::wstring& watchedProcessName, const std::atomic_bool& cancelled);
-    void StartSourceRefresh();
-    void PollSourceRefresh();
-    void SyncSourceRefreshUi();
-    void InitializeProgramIcons();
-    int ProgramIconIndex(const std::wstring& executablePath);
-    std::array<BackgroundTask<SourceResult>, 3> sourceTasks_;
-    static constexpr UINT_PTR kSourceRefreshTimer = 81;
-    int sourceTabIndex_{0};
     bool exitRequested_{false};
     // Stopping restores sessions (closing programs, services, displays), which can
     // take seconds or wait for UAC, so it runs off the UI thread.

@@ -103,8 +103,8 @@ struct AppConfiguration
     bool startInTray{false};
     bool startMonitoringOnLaunch{false};
     bool checkForUpdatesOnStartup{true};
-    int windowWidth{1215};
-    int windowHeight{736};
+    int windowWidth{1360};
+    int windowHeight{900};
     int windowLeft{CW_USEDEFAULT};
     int windowTop{CW_USEDEFAULT};
     bool hasWindowPlacement{false};

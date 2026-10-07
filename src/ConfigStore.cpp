@@ -380,8 +380,8 @@ AppConfiguration ConfigStore::Load() const
         config.startInTray = ReadBool(object, "StartInTray", false);
         config.startMonitoringOnLaunch = ReadBool(object, "StartMonitoringOnLaunch", false);
         config.checkForUpdatesOnStartup = ReadBool(object, "CheckForUpdatesOnStartup", true);
-        config.windowWidth = ReadInt(object, "WindowWidth", 1215);
-        config.windowHeight = ReadInt(object, "WindowHeight", 736);
+        config.windowWidth = ReadInt(object, "WindowWidth", 1360);
+        config.windowHeight = ReadInt(object, "WindowHeight", 900);
         config.startMaximized = ReadBool(object, "StartMaximized", false);
 
         const auto leftIt = object.find("WindowLeft");

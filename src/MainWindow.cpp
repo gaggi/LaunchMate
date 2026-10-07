@@ -5,6 +5,7 @@
 #include "ListViewHelpers.h"
 #include "RuleActionsDialog.h"
 #include "IRacingPerformance.h"
+#include "IRacingServices.h"
 #include "StartupRegistration.h"
 #include "TabHost.h"
 #include "resource.h"
@@ -227,14 +228,6 @@ namespace
     HWND CreateButtonControl(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h, HFONT font, DWORD extraStyle = 0)
     {
         auto handle = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | extraStyle,
-            x, y, w, h, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr, nullptr);
-        SendMessageW(handle, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-        return handle;
-    }
-
-    HWND CreateCheckbox(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h, HFONT font)
-    {
-        auto handle = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
             x, y, w, h, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr, nullptr);
         SendMessageW(handle, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         return handle;
@@ -1216,7 +1209,7 @@ bool MainWindow::Create(int showCommand)
         0,
         windowClass.lpszClassName,
         (L"LaunchMate " + UpdateChecker::CurrentVersion()).c_str(),
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         config.windowWidth,
@@ -1357,11 +1350,33 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             return 0;
         }
 
+        if (controlId == IdRuleCards || controlId == IdStartCards || controlId == IdExitCards)
+        {
+            HandleCardCommand(controlId, code);
+            return 0;
+        }
+        if (controlId == IdAppsRuleCombo)
+        {
+            if (code == CBN_SELCHANGE)
+            {
+                const auto selection = SendMessageW(appsRuleComboHandle_, CB_GETCURSEL, 0, 0);
+                selectedRuleIndex_ = selection == CB_ERR ? -1 : static_cast<int>(selection);
+                SetWindowTextW(appsFeedbackHandle_, L"");
+                // The running-process list hides the selected rule's own process.
+                if (sourceTabIndex_ == 1) PopulateRunningProcesses();
+            }
+            return 0;
+        }
+
         switch (controlId)
         {
         case IdToggleMonitoring: ToggleMonitoring(); return 0;
         case IdMonitorPowerSetups: ManageMonitorPowerSetups(); return 0;
         case IdSettings: ShowSettingsDialog(); return 0;
+        case IdNavRules: ShowPage(Page::Rules); return 0;
+        case IdNavApps: ShowPage(Page::Apps); return 0;
+        case IdRuleBack: ShowPage(Page::Rules); return 0;
+        case IdRuleToggleEnabled: ToggleRuleEnabled(selectedRuleIndex_); return 0;
         case IdDetectInstalledApps:
             StartSourceRefresh();
             return 0;
@@ -1369,45 +1384,19 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         case IdAddCatalogProgram: AddCustomCatalogProgram(); return 0;
         case IdRemoveCatalogProgram: RemoveSelectedCatalogProgram(); return 0;
         case IdAddWatchedProcess: AddWatchedProcess(); return 0;
-        case IdRemoveWatchedProcess: RemoveWatchedProcess(); return 0;
-        case IdRemoveRuleAction: RemoveSelectedRuleAction(); return 0;
-        case IdEditRuleActions: EditRuleActions(); return 0;
+        case IdRemoveWatchedProcess: RemoveWatchedProcess(selectedRuleIndex_); return 0;
         }
         break;
     }
     case WM_NOTIFY:
     {
         const auto* header = reinterpret_cast<NMHDR*>(lParam);
-        if (header && header->idFrom == IdWatchedList && header->code == NM_CUSTOMDRAW)
-        {
-            // Color the status column: green while running, muted otherwise.
-            auto* draw = reinterpret_cast<NMLVCUSTOMDRAW*>(lParam);
-            switch (draw->nmcd.dwDrawStage)
-            {
-            case CDDS_PREPAINT: return CDRF_NOTIFYITEMDRAW;
-            case CDDS_ITEMPREPAINT: return CDRF_NOTIFYSUBITEMDRAW;
-            case CDDS_ITEMPREPAINT | CDDS_SUBITEM:
-            {
-                draw->clrText = UiTheme::Text;
-                if (draw->iSubItem == 1)
-                {
-                    wchar_t text[64]{};
-                    ListView_GetItemText(header->hwndFrom, static_cast<int>(draw->nmcd.dwItemSpec), 1, text,
-                        static_cast<int>(std::size(text)));
-                    draw->clrText = wcsncmp(text, L"Running", 7) == 0 ? RGB(59, 109, 17) : RGB(136, 135, 128);
-                }
-                return CDRF_NEWFONT;
-            }
-            default: return CDRF_DODEFAULT;
-            }
-        }
         if (header && header->idFrom == IdSourceTabs && header->code == TCN_SELCHANGE)
         {
             SwitchSourceTab();
             return 0;
         }
-        if (header && header->code == LVN_COLUMNCLICK &&
-            (header->idFrom == IdCatalogList || header->idFrom == IdWatchedList || header->idFrom == IdRuleProgramsList))
+        if (header && header->code == LVN_COLUMNCLICK && header->idFrom == IdCatalogList)
         {
             const auto* column = reinterpret_cast<NMLISTVIEW*>(lParam);
             SortListViewByColumn(header->hwndFrom, column->iSubItem);
@@ -1418,36 +1407,14 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             TransferSelectedSource();
             return 0;
         }
-        if (header && header->idFrom == IdWatchedList && header->code == NM_DBLCLK)
-        {
-            EditRuleActions();
-            return 0;
-        }
-        if (header && header->idFrom == IdRuleProgramsList && header->code == NM_DBLCLK)
-        {
-            EditRuleProgram();
-            return 0;
-        }
         if (header && header->code == LVN_KEYDOWN)
         {
             const auto* key = reinterpret_cast<NMLVKEYDOWN*>(lParam);
             if (key->wVKey == VK_DELETE)
             {
                 if (header->idFrom == IdCatalogList && sourceTabIndex_ == 0) RemoveSelectedCatalogProgram();
-                else if (header->idFrom == IdRuleProgramsList) RemoveSelectedRuleAction();
                 return 0;
             }
-        }
-        if (header && header->idFrom == IdWatchedList && header->code == LVN_ITEMCHANGED)
-        {
-            const auto* change = reinterpret_cast<NMLISTVIEW*>(lParam);
-            if ((change->uChanged & LVIF_STATE) != 0 &&
-                ((change->uNewState ^ change->uOldState) & LVIS_SELECTED) != 0)
-            {
-                PopulateRulePrograms();
-                if (sourceTabIndex_ == 1) PopulateRunningProcesses();
-            }
-            return 0;
         }
         break;
     }
@@ -1475,6 +1442,12 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         }
         if (wParam != SIZE_MINIMIZED) LayoutControls(LOWORD(lParam), HIWORD(lParam));
         break;
+    case WM_GETMINMAXINFO:
+    {
+        auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
+        limits->ptMinTrackSize = {MulDiv(900, dpi_, 96), MulDiv(600, dpi_, 96)};
+        return 0;
+    }
     case WM_DPICHANGED:
     {
         dpi_ = HIWORD(wParam);
@@ -1632,18 +1605,54 @@ void MainWindow::CreateFonts()
             SendMessageW(control, WM_SETFONT, static_cast<WPARAM>(value), TRUE);
             return TRUE;
         }, reinterpret_cast<LPARAM>(uiFont_));
-    for (HWND control : {watchedHeadingHandle_, actionsHeadingHandle_})
+    for (HWND control : {rulesHeadingHandle_, ruleTitleHandle_, startHeadingHandle_, exitHeadingHandle_})
         if (control) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(headingFont_), TRUE);
     if (statusPanel_.Handle()) statusPanel_.SetFonts(headingFont_, uiFont_);
+    if (navBar_.Handle()) navBar_.SetFonts(headingFont_, uiFont_);
+    for (CardList* cards : {&ruleCards_, &startCards_, &exitCards_})
+        if (cards->Handle()) cards->SetFonts(headingFont_, uiFont_);
     DeleteObject(oldUi);
     DeleteObject(oldHeading);
 }
 
 void MainWindow::CreateControls()
 {
+    navBar_.Create(app_.InstanceHandle(), windowHandle_, L"LaunchMate", L"Version " + UpdateChecker::CurrentVersion(), {
+        {L'\uE8FD', L"Rules", IdNavRules, true},
+        {L'\uE71D', L"Apps", IdNavApps, true},
+        {L'\uE7F4', L"Displays", IdMonitorPowerSetups, false},
+        {L'\uE713', L"Settings", IdSettings, false}}, headingFont_, uiFont_);
     statusPanel_.Create(app_.InstanceHandle(), windowHandle_, IdToggleMonitoring, headingFont_, uiFont_);
-    CreateButtonControl(windowHandle_, IdMonitorPowerSetups, L"Monitor configs", 0, 0, 140, 32, uiFont_);
-    CreateButtonControl(windowHandle_, IdSettings, L"Settings", 0, 0, 100, 32, uiFont_);
+
+    // Rules page
+    rulesHeadingHandle_ = CreateLabel(windowHandle_, L"Rules", 0, 0, 240, 24, headingFont_);
+    CreateButtonControl(windowHandle_, IdAddWatchedProcess, L"Add rule", 0, 0, 110, 30, uiFont_);
+    ruleCards_.Create(app_.InstanceHandle(), windowHandle_, IdRuleCards, headingFont_, uiFont_);
+    ruleCards_.SetEmptyText(L"Add a rule for a program LaunchMate should watch, for example iRacing. "
+        L"Its actions run when the program starts and are undone when it exits.");
+
+    // Rule page
+    CreateButtonControl(windowHandle_, IdRuleBack, L"\u2190  Rules", 0, 0, 96, 30, uiFont_);
+    ruleTitleHandle_ = CreateLabel(windowHandle_, L"", 0, 0, 240, 24, headingFont_);
+    ruleSubtitleHandle_ = CreateLabel(windowHandle_, L"", 0, 0, 240, 20, uiFont_);
+    SetWindowLongPtrW(ruleSubtitleHandle_, GWL_STYLE, GetWindowLongPtrW(ruleSubtitleHandle_, GWL_STYLE) | SS_PATHELLIPSIS);
+    CreateButtonControl(windowHandle_, IdRuleToggleEnabled, L"Disable", 0, 0, 100, 30, uiFont_);
+    CreateButtonControl(windowHandle_, IdRemoveWatchedProcess, L"Remove rule", 0, 0, 110, 30, uiFont_);
+    startHeadingHandle_ = CreateLabel(windowHandle_, L"", 0, 0, 240, 24, headingFont_);
+    exitHeadingHandle_ = CreateLabel(windowHandle_, L"", 0, 0, 240, 24, headingFont_);
+    startCards_.Create(app_.InstanceHandle(), windowHandle_, IdStartCards, headingFont_, uiFont_);
+    exitCards_.Create(app_.InstanceHandle(), windowHandle_, IdExitCards, headingFont_, uiFont_);
+    startCards_.SetCompact(true);
+    exitCards_.SetCompact(true);
+
+    // Apps page
+    appsRuleLabelHandle_ = CreateLabel(windowHandle_, L"Add selected to rule", 0, 0, 140, 30, uiFont_);
+    appsRuleComboHandle_ = CreateWindowExW(0, WC_COMBOBOXW, nullptr,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
+        0, 0, 220, 300, windowHandle_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdAppsRuleCombo)), nullptr, nullptr);
+    SendMessageW(appsRuleComboHandle_, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
+    CreateButtonControl(windowHandle_, IdTransferCatalogProgram, L"Start with rule", 0, 0, 130, 30, uiFont_);
+    appsFeedbackHandle_ = CreateLabel(windowHandle_, L"", 0, 0, 240, 30, uiFont_);
 
     sourceTabsHandle_ = CreateWindowExW(WS_EX_CONTROLPARENT, WC_TABCONTROLW, nullptr,
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPCHILDREN | TCS_FIXEDWIDTH,
@@ -1677,18 +1686,6 @@ void MainWindow::CreateControls()
         detectSourceButtonHandle_, addCatalogButtonHandle_, removeCatalogButtonHandle_,
         catalogSearchHandle_, catalogListHandle_});
 
-    watchedHeadingHandle_ = CreateLabel(windowHandle_, L"Watched processes", 0, 0, 240, 24, headingFont_);
-    CreateButtonControl(windowHandle_, IdAddWatchedProcess, L"+", 0, 0, 36, 28, uiFont_);
-    CreateButtonControl(windowHandle_, IdRemoveWatchedProcess, L"-", 0, 0, 36, 28, uiFont_);
-    watchedListHandle_ = list(IdWatchedList, true);
-    ConfigureListView(watchedListHandle_, {{L"", 0}, {L"Status", 2}, {L"Name", 3}, {L"Path", 4}});
-
-    actionsHeadingHandle_ = CreateLabel(windowHandle_, L"Actions", 0, 0, 240, 24, headingFont_);
-    CreateButtonControl(windowHandle_, IdTransferCatalogProgram, L">", 0, 0, 32, 32, uiFont_);
-    CreateButtonControl(windowHandle_, IdRemoveRuleAction, L"<", 0, 0, 32, 32, uiFont_);
-    CreateButtonControl(windowHandle_, IdEditRuleActions, L"Edit actions...", 0, 0, 132, 28, uiFont_);
-    ruleProgramsListHandle_ = list(IdRuleProgramsList, true);
-    ConfigureListView(ruleProgramsListHandle_, {{L"", 0}, {L"Type", 2}, {L"Name", 3}, {L"Details", 6}});
     InitializeProgramIcons();
 
 }
@@ -1699,12 +1696,12 @@ void MainWindow::LayoutControls(int width, int height)
     const auto px = [this](int value) { return MulDiv(value, dpi_, 96); };
     const int w = MulDiv(width, 96, dpi_);
     const int h = MulDiv(height, 96, dpi_);
-    const int content = w - 40;
+    constexpr int navWidth = 184;
+    const int left = navWidth + 24;
+    const int content = w - left - 24;
+    const int right = left + content;
     const int top = 92; // Below the status banner.
-    const int listBottom = h - 20;
-    const int sourceWidth = (content - 72) * 46 / 100;
-    const int rightX = 20 + sourceWidth + 72;
-    const int rightWidth = w - 20 - rightX;
+    const int bottom = h - 20;
     const auto place = [&](HWND control, int x, int y, int cw, int ch)
     {
         if (!control) return;
@@ -1715,38 +1712,43 @@ void MainWindow::LayoutControls(int width, int height)
     const auto button = [&](int id, int x, int y, int cw, int ch)
     { place(GetDlgItem(windowHandle_, id), x, y, cw, ch); };
 
-    place(statusPanel_.Handle(), 20, 20, w - 40 - 140 - 100 - 24, 56);
-    button(IdMonitorPowerSetups, w - 20 - 100 - 12 - 140, 32, 140, 32);
-    button(IdSettings, w - 20 - 100, 32, 100, 32);
+    place(navBar_.Handle(), 0, 0, navWidth, h);
+    place(statusPanel_.Handle(), left, 20, content, 56);
 
-    place(sourceTabsHandle_, 20, top, sourceWidth, listBottom - top);
-    TabCtrl_SetItemSize(sourceTabsHandle_, px((sourceWidth - 8) / 3), px(UiTheme::TabHeight));
-    place(detectSourceButtonHandle_, 32, top + 42, 164, 28);
-    place(addCatalogButtonHandle_, 20 + sourceWidth - 90, top + 42, 36, 28);
-    place(removeCatalogButtonHandle_, 20 + sourceWidth - 48, top + 42, 36, 28);
-    place(catalogSearchHandle_, 32, top + 78, sourceWidth - 24, 22);
-    place(catalogListHandle_, 32, top + 110, sourceWidth - 24, listBottom - top - 122);
+    // Rules page
+    place(rulesHeadingHandle_, left, top + 3, content - 130, 24);
+    button(IdAddWatchedProcess, right - 110, top, 110, 30);
+    place(ruleCards_.Handle(), left, top + 44, content, bottom - top - 44);
 
-    place(watchedHeadingHandle_, rightX, top + 4, rightWidth - 96, 24);
-    button(IdAddWatchedProcess, w - 98, top, 36, 28);
-    button(IdRemoveWatchedProcess, w - 56, top, 36, 28);
-    const int watchedTop = top + 36;
-    const int watchedHeight = (listBottom - watchedTop - 62) * 46 / 100;
-    place(watchedListHandle_, rightX, watchedTop, rightWidth, watchedHeight);
-    const int actionsY = watchedTop + watchedHeight + 18;
-    const int actionsListY = actionsY + 38;
-    place(actionsHeadingHandle_, rightX, actionsY, rightWidth - 144, 24);
-    button(IdEditRuleActions, w - 152, actionsY - 2, 132, 28);
-    place(ruleProgramsListHandle_, rightX, actionsListY, rightWidth, listBottom - actionsListY);
-    const int transferY = actionsListY + (listBottom - actionsListY - 72) / 2;
-    button(IdTransferCatalogProgram, 20 + sourceWidth + 20, transferY, 32, 32);
-    button(IdRemoveRuleAction, 20 + sourceWidth + 20, transferY + 40, 32, 32);
+    // Rule page
+    button(IdRuleBack, left, top, 96, 30);
+    place(ruleTitleHandle_, left + 112, top - 4, content - 112 - 230, 24);
+    place(ruleSubtitleHandle_, left + 112, top + 18, content - 112 - 230, 20);
+    button(IdRuleToggleEnabled, right - 220, top, 100, 30);
+    button(IdRemoveWatchedProcess, right - 110, top, 110, 30);
+    const int columnWidth = (content - 20) / 2;
+    place(startHeadingHandle_, left, top + 52, columnWidth, 24);
+    place(exitHeadingHandle_, left + columnWidth + 20, top + 52, columnWidth, 24);
+    place(startCards_.Handle(), left, top + 84, columnWidth, bottom - top - 84);
+    place(exitCards_.Handle(), left + columnWidth + 20, top + 84, columnWidth, bottom - top - 84);
+
+    // Apps page
+    place(appsRuleLabelHandle_, left, top, 140, 30);
+    place(appsRuleComboHandle_, left + 144, top + 3, 220, 300);
+    button(IdTransferCatalogProgram, left + 376, top, 130, 30);
+    place(appsFeedbackHandle_, left + 520, top, content - 520, 30);
+    const int tabsTop = top + 44;
+    place(sourceTabsHandle_, left, tabsTop, content, bottom - tabsTop);
+    TabCtrl_SetItemSize(sourceTabsHandle_, px(std::min(180, (content - 8) / 3)), px(UiTheme::TabHeight));
+    place(detectSourceButtonHandle_, left + 12, tabsTop + 42, 164, 28);
+    place(addCatalogButtonHandle_, right - 90, tabsTop + 42, 36, 28);
+    place(removeCatalogButtonHandle_, right - 48, tabsTop + 42, 36, 28);
+    place(catalogSearchHandle_, left + 12, tabsTop + 78, content - 24, 22);
+    place(catalogListHandle_, left + 12, tabsTop + 110, content - 24, bottom - tabsTop - 122);
 
     if (sourceTabIndex_ == 0) ResizeListViewColumns(catalogListHandle_, {0, 2, 5}, px(24));
     else if (sourceTabIndex_ == 1) ResizeListViewColumns(catalogListHandle_, {0, 2, 5, 1, 2}, px(24));
     else ResizeListViewColumns(catalogListHandle_, {0, 2, 4, 2, 3}, px(24));
-    ResizeListViewColumns(watchedListHandle_, {0, 2, 3, 4}, px(24));
-    ResizeListViewColumns(ruleProgramsListHandle_, {0, 2, 3, 6}, px(24));
 }
 
 void MainWindow::InitializeProgramIcons()
@@ -1758,8 +1760,7 @@ void MainWindow::InitializeProgramIcons()
         if (!programIconList_) return;
         defaultProgramIconIndex_ = ProgramIconIndex(L"");
     }
-    for (const HWND list : {catalogListHandle_, watchedListHandle_, ruleProgramsListHandle_})
-        if (list) ListView_SetImageList(list, programIconList_, LVSIL_SMALL);
+    if (catalogListHandle_) ListView_SetImageList(catalogListHandle_, programIconList_, LVSIL_SMALL);
 }
 
 int MainWindow::ProgramIconIndex(const std::wstring& executablePath)
@@ -1787,27 +1788,314 @@ int MainWindow::ProgramIconIndex(const std::wstring& executablePath)
 void MainWindow::PopulateLists()
 {
     PopulateCatalogPrograms();
+    PopulateRuleCombo();
+    if (page_ == Page::RuleDetail) PopulateRuleDetail();
+    RefreshProcessStates();
+    ShowPage(page_);
+}
 
-    ListView_DeleteAllItems(watchedListHandle_);
-    for (size_t index = 0; index < app_.Configuration().watchedProcesses.size(); ++index)
+void MainWindow::ShowPage(Page page)
+{
+    if (page == Page::RuleDetail && SelectedWatchedIndex() < 0) page = Page::Rules;
+    page_ = page;
+    const auto show = [](std::initializer_list<HWND> controls, bool visible)
     {
-        const auto& rule = app_.Configuration().watchedProcesses[index];
-        AddListViewRow(watchedListHandle_, {
-            L"",
-            L"Unknown",
-            rule.displayName,
-            rule.executablePath.empty() ? L"Path unavailable" : rule.executablePath},
-            static_cast<LPARAM>(index), ProgramIconIndex(rule.executablePath));
+        for (HWND control : controls)
+            if (control) ShowWindow(control, visible ? SW_SHOW : SW_HIDE);
+    };
+    const auto item = [this](int id) { return GetDlgItem(windowHandle_, id); };
+    show({rulesHeadingHandle_, item(IdAddWatchedProcess), ruleCards_.Handle()}, page == Page::Rules);
+    show({item(IdRuleBack), ruleTitleHandle_, ruleSubtitleHandle_, item(IdRuleToggleEnabled), item(IdRemoveWatchedProcess),
+        startHeadingHandle_, exitHeadingHandle_, startCards_.Handle(), exitCards_.Handle()}, page == Page::RuleDetail);
+    show({appsRuleLabelHandle_, appsRuleComboHandle_, item(IdTransferCatalogProgram), appsFeedbackHandle_,
+        sourceTabsHandle_}, page == Page::Apps);
+    navBar_.SetSelected(page == Page::Apps ? IdNavApps : IdNavRules);
+
+    if (page == Page::Rules) PopulateRuleCards();
+    else if (page == Page::RuleDetail) PopulateRuleDetail();
+    else
+    {
+        PopulateRuleCombo();
+        SetWindowTextW(appsFeedbackHandle_, L"");
+    }
+}
+
+namespace
+{
+    std::wstring RuleName(const WatchedProcessRule& rule)
+    {
+        return rule.displayName.empty() ? FileNameWithoutExtension(rule.processName) : rule.displayName;
     }
 
-    RefreshProcessStates();
-    PopulateRulePrograms();
+    std::wstring Plural(size_t count, const wchar_t* singular, const wchar_t* plural)
+    {
+        return std::to_wstring(count) + L" " + (count == 1 ? singular : plural);
+    }
+
+    // "SimHub, CrewChief, Garage61, +2"
+    std::wstring JoinNames(const std::vector<std::wstring>& names)
+    {
+        std::wstring text;
+        for (size_t index = 0; index < names.size() && index < 3; ++index)
+        {
+            if (index != 0) text += L", ";
+            text += names[index];
+        }
+        if (names.size() > 3) text += L", +" + std::to_wstring(names.size() - 3);
+        return text;
+    }
+
+    std::wstring PowerSchemeName(const std::wstring& guidText)
+    {
+        for (const auto& scheme : EnumeratePowerSchemes())
+        {
+            wchar_t guid[40]{};
+            StringFromGUID2(scheme.id, guid, static_cast<int>(std::size(guid)));
+            if (_wcsicmp(guid, guidText.c_str()) == 0) return scheme.name;
+        }
+        return L"Unavailable power plan";
+    }
+
+    std::wstring ServiceLabel(const std::wstring& name)
+    {
+        for (const auto& option : IRacingServiceOptions())
+            if (_wcsicmp(option.name, name.c_str()) == 0) return option.label;
+        return name;
+    }
+
+    std::wstring Seconds(int milliseconds)
+    {
+        const int tenths = (std::max(0, milliseconds) + 50) / 100;
+        return tenths % 10 == 0 ? std::to_wstring(tenths / 10) + L" s"
+            : std::to_wstring(tenths / 10) + L"." + std::to_wstring(tenths % 10) + L" s";
+    }
+
+    size_t ConfiguredPerformanceActions(const WatchedProcessRule& rule)
+    {
+        return static_cast<size_t>(std::count_if(rule.processPerformanceActions.begin(), rule.processPerformanceActions.end(),
+            [](const ProcessPerformanceAction& action)
+            {
+                return action.cpuPriorityClass != 0 || action.ioPriority >= 0 || action.memoryPriority >= 0 ||
+                    action.affinityMask != 0;
+            }));
+    }
+}
+
+void MainWindow::PopulateRuleCards()
+{
+    const auto& rules = app_.Configuration().watchedProcesses;
+    const auto states = app_.Monitor().GetProcessStates(rules);
+    std::vector<CardList::Item> items;
+    items.reserve(rules.size());
+    for (size_t index = 0; index < rules.size(); ++index)
+    {
+        const auto& rule = rules[index];
+        CardList::Item item;
+        item.title = RuleName(rule);
+        item.subtitle = rule.executablePath.empty() ? rule.processName : rule.executablePath;
+        const auto& state = index < states.size() ? states[index] : std::wstring(L"Unknown");
+        if (!rule.enabled) { item.pill = L"Disabled"; item.pillTone = CardList::Tone::Warning; }
+        else if (state == L"Running") { item.pill = L"Running"; item.pillTone = CardList::Tone::Active; }
+        else { item.pill = state; item.pillTone = CardList::Tone::Neutral; }
+        item.muted = !rule.enabled;
+        if (!rule.programsToLaunch.empty())
+            item.chips.push_back(L"Starts " + Plural(rule.programsToLaunch.size(), L"app", L"apps"));
+        if (!rule.processesToStop.empty())
+            item.chips.push_back(L"Closes " + Plural(rule.processesToStop.size(), L"app", L"apps"));
+        if (!rule.servicesToStop.empty())
+            item.chips.push_back(Plural(rule.servicesToStop.size(), L"service", L"services"));
+        if (!rule.powerSchemeGuid.empty()) item.chips.push_back(L"Power plan");
+        if (const auto performance = ConfiguredPerformanceActions(rule); performance != 0)
+            item.chips.push_back(Plural(performance, L"priority setting", L"priority settings"));
+        if (!rule.monitorPowerSetupName.empty()) item.chips.push_back(L"Displays");
+        if (!rule.homeAssistantActions.empty())
+            item.chips.push_back(Plural(rule.homeAssistantActions.size(), L"webhook", L"webhooks"));
+        items.push_back(std::move(item));
+    }
+    ruleCards_.SetItems(std::move(items));
+}
+
+void MainWindow::PopulateRuleDetail()
+{
+    const int index = SelectedWatchedIndex();
+    if (index < 0) return;
+    const auto& rule = app_.Configuration().watchedProcesses[static_cast<size_t>(index)];
+    const auto name = RuleName(rule);
+    SetWindowTextW(ruleTitleHandle_, name.c_str());
+    const std::wstring subtitle = (rule.enabled ? L"" : L"Disabled  \u00B7  ") +
+        (rule.executablePath.empty() ? rule.processName : rule.executablePath);
+    SetWindowTextW(ruleSubtitleHandle_, subtitle.c_str());
+    SetDlgItemTextW(windowHandle_, IdRuleToggleEnabled, rule.enabled ? L"Disable" : L"Enable");
+    SetWindowTextW(startHeadingHandle_, (L"When " + name + L" starts").c_str());
+    SetWindowTextW(exitHeadingHandle_, (L"When " + name + L" exits").c_str());
+
+    // Tabs of RuleActionsDialog: 0 start programs, 1 stop processes, 2 Home Assistant,
+    // 3 monitor config, 4 performance, 5 Windows services.
+    std::vector<CardList::Item> start;
+    startCardTabs_.clear();
+    const auto add = [](std::vector<CardList::Item>& items, std::vector<int>& tabs, int tab,
+        std::wstring title, std::wstring subtitle, size_t count, const wchar_t* unused)
+    {
+        CardList::Item item;
+        item.title = std::move(title);
+        item.muted = subtitle.empty();
+        item.subtitle = subtitle.empty() ? unused : std::move(subtitle);
+        if (count != 0) item.trailing = std::to_wstring(count);
+        items.push_back(std::move(item));
+        tabs.push_back(tab);
+    };
+
+    // Same order as the monitor runs them.
+    std::vector<std::wstring> names;
+    for (const auto& action : rule.processesToStop)
+        names.push_back(action.displayName.empty() ? action.processName : action.displayName);
+    add(start, startCardTabs_, 1, L"Close apps", JoinNames(names), names.size(), L"Not used \u00B7 add apps that should not run in the background");
+
+    names.clear();
+    for (const auto& service : rule.servicesToStop) names.push_back(ServiceLabel(service));
+    add(start, startCardTabs_, 5, L"Stop Windows services", JoinNames(names), names.size(), L"Not used");
+
+    std::wstring performance;
+    if (!rule.powerSchemeGuid.empty()) performance = PowerSchemeName(rule.powerSchemeGuid);
+    if (const auto count = ConfiguredPerformanceActions(rule); count != 0)
+        performance += (performance.empty() ? L"" : L"  \u00B7  ") + Plural(count, L"priority setting", L"priority settings");
+    add(start, startCardTabs_, 4, L"Power plan and priorities", performance, 0, L"Not changed");
+
+    std::wstring display;
+    if (!rule.monitorPowerSetupName.empty())
+    {
+        display = rule.monitorPowerSetupName;
+        if (rule.monitorPowerSetupDelayMilliseconds > 0) display += L" after " + Seconds(rule.monitorPowerSetupDelayMilliseconds);
+    }
+    add(start, startCardTabs_, 3, L"Display configuration", display, 0, L"Not changed");
+
+    names.clear();
+    for (const auto& action : rule.homeAssistantActions) names.push_back(action.displayName);
+    add(start, startCardTabs_, 2, L"Home Assistant webhooks", JoinNames(names), names.size(), L"Not used");
+
+    names.clear();
+    int latestStart = 0;
+    for (const auto& program : rule.programsToLaunch)
+    {
+        names.push_back(program.displayName.empty() ? FileNameWithoutExtension(program.filePath) : program.displayName);
+        latestStart = std::max(latestStart, program.waitTimeMilliseconds);
+    }
+    std::wstring started = JoinNames(names);
+    if (!started.empty() && latestStart > 0) started += L"  \u00B7  within " + Seconds(latestStart);
+    add(start, startCardTabs_, 0, L"Start apps", started, names.size(), L"Not used \u00B7 add tools such as SimHub or CrewChief");
+
+    std::vector<CardList::Item> exit;
+    exitCardTabs_.clear();
+    names.clear();
+    for (const auto& program : rule.programsToLaunch)
+        if (program.closeWhenGameStops)
+            names.push_back(program.displayName.empty() ? FileNameWithoutExtension(program.filePath) : program.displayName);
+    add(exit, exitCardTabs_, 0, L"Close started apps", JoinNames(names), names.size(), L"Nothing to close");
+
+    std::vector<std::wstring> restored;
+    if (!rule.servicesToStop.empty()) restored.push_back(L"services");
+    if (!rule.powerSchemeGuid.empty()) restored.push_back(L"power plan");
+    if (!rule.monitorPowerSetupName.empty() && rule.restoreMonitorPowerSetupOnExit) restored.push_back(L"displays");
+    std::wstring restoredText;
+    for (size_t position = 0; position < restored.size(); ++position)
+        restoredText += (position == 0 ? L"" : position + 1 == restored.size() ? L" and " : L", ") + restored[position];
+    if (!restoredText.empty()) restoredText[0] = static_cast<wchar_t>(towupper(restoredText[0]));
+    add(exit, exitCardTabs_, !rule.servicesToStop.empty() ? 5 : !rule.powerSchemeGuid.empty() ? 4 : 3,
+        L"Restore system settings", restoredText, 0, L"Nothing to restore");
+
+    names.clear();
+    for (const auto& action : rule.processesToStop)
+        if (action.restartAfterWatchProcessEnds)
+            names.push_back(action.displayName.empty() ? action.processName : action.displayName);
+    add(exit, exitCardTabs_, 1, L"Reopen closed apps", JoinNames(names), names.size(), L"Nothing to reopen");
+
+    startCards_.SetItems(std::move(start));
+    exitCards_.SetItems(std::move(exit));
+}
+
+void MainWindow::PopulateRuleCombo()
+{
+    const auto& rules = app_.Configuration().watchedProcesses;
+    SendMessageW(appsRuleComboHandle_, CB_RESETCONTENT, 0, 0);
+    for (const auto& rule : rules)
+        SendMessageW(appsRuleComboHandle_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(RuleName(rule).c_str()));
+    if (SelectedWatchedIndex() < 0 && !rules.empty()) selectedRuleIndex_ = 0;
+    SendMessageW(appsRuleComboHandle_, CB_SETCURSEL, SelectedWatchedIndex(), 0);
+    EnableWindow(appsRuleComboHandle_, !rules.empty());
+    EnableWindow(GetDlgItem(windowHandle_, IdTransferCatalogProgram), !rules.empty());
+}
+
+void MainWindow::OpenRule(int index)
+{
+    if (index < 0 || index >= static_cast<int>(app_.Configuration().watchedProcesses.size())) return;
+    selectedRuleIndex_ = index;
+    ShowPage(Page::RuleDetail);
+}
+
+void MainWindow::HandleCardCommand(int controlId, int code)
+{
+    if (controlId == IdRuleCards)
+    {
+        const int index = ruleCards_.FocusedIndex();
+        if (code == CardList::kActivated) OpenRule(index);
+        else if (code == CardList::kContextMenu) ShowRuleContextMenu(index);
+        else if (code == CardList::kDeleteRequested) RemoveWatchedProcess(index);
+        return;
+    }
+    if (code != CardList::kActivated) return;
+    const bool startColumn = controlId == IdStartCards;
+    const auto& tabs = startColumn ? startCardTabs_ : exitCardTabs_;
+    const int index = (startColumn ? startCards_ : exitCards_).FocusedIndex();
+    if (index >= 0 && static_cast<size_t>(index) < tabs.size()) EditRuleActions(tabs[static_cast<size_t>(index)]);
+}
+
+void MainWindow::ShowRuleContextMenu(int index)
+{
+    const auto& rules = app_.Configuration().watchedProcesses;
+    if (index < 0 || index >= static_cast<int>(rules.size())) return;
+    enum : UINT { kOpen = 1, kToggle, kRemove };
+    const HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, kOpen, L"Open");
+    AppendMenuW(menu, MF_STRING, kToggle, rules[static_cast<size_t>(index)].enabled ? L"Disable" : L"Enable");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kRemove, L"Remove...");
+    SetMenuDefaultItem(menu, kOpen, FALSE);
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    const UINT choice = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, windowHandle_, nullptr);
+    DestroyMenu(menu);
+    if (choice == kOpen) OpenRule(index);
+    else if (choice == kToggle) ToggleRuleEnabled(index);
+    else if (choice == kRemove) RemoveWatchedProcess(index);
+}
+
+void MainWindow::ToggleRuleEnabled(int index)
+{
+    auto& rules = app_.Configuration().watchedProcesses;
+    if (index < 0 || index >= static_cast<int>(rules.size())) return;
+    auto& rule = rules[static_cast<size_t>(index)];
+    rule.enabled = !rule.enabled;
+    SaveConfiguration();
+    PopulateRuleCards();
+    if (page_ == Page::RuleDetail) PopulateRuleDetail();
+    RefreshStatusPanel();
+}
+
+void MainWindow::ReportTransfer(size_t added, bool started)
+{
+    const int index = SelectedWatchedIndex();
+    if (index < 0) return;
+    const auto name = RuleName(app_.Configuration().watchedProcesses[static_cast<size_t>(index)]);
+    const std::wstring text = added == 0 ? L"Already part of " + name + L"."
+        : Plural(added, L"app", L"apps") + (started ? L" will start with " : L" will close when ") + name +
+            (started ? L"." : L" starts.");
+    SetWindowTextW(appsFeedbackHandle_, text.c_str());
 }
 
 void MainWindow::SyncProcessStateTimer(bool visible)
 {
     KillTimer(windowHandle_, kProcessStateTimer);
-    if (visible && !IsIconic(windowHandle_) && watchedListHandle_)
+    if (visible && !IsIconic(windowHandle_) && ruleCards_.Handle())
     {
         RefreshProcessStates();
         SetTimer(windowHandle_, kProcessStateTimer, 1000, nullptr);
@@ -1817,23 +2105,7 @@ void MainWindow::SyncProcessStateTimer(bool visible)
 void MainWindow::RefreshProcessStates()
 {
     RefreshStatusPanel();
-    const auto& rules = app_.Configuration().watchedProcesses;
-    if (rules.empty()) return;
-    const auto states = app_.Monitor().GetProcessStates(rules);
-    for (int row = 0; row < ListView_GetItemCount(watchedListHandle_); ++row)
-    {
-        LVITEMW item{};
-        item.mask = LVIF_PARAM;
-        item.iItem = row;
-        if (!ListView_GetItem(watchedListHandle_, &item) || item.lParam < 0 ||
-            static_cast<size_t>(item.lParam) >= states.size()) continue;
-        const auto index = static_cast<size_t>(item.lParam);
-        auto text = states[index];
-        if (!rules[index].enabled) text += L" (disabled)";
-        wchar_t currentText[64]{};
-        ListView_GetItemText(watchedListHandle_, row, 1, currentText, static_cast<int>(std::size(currentText)));
-        if (text != currentText) ListView_SetItemText(watchedListHandle_, row, 1, text.data());
-    }
+    if (page_ == Page::Rules) PopulateRuleCards();
 }
 
 void MainWindow::SyncCatalogProgramsFromConfiguration()
@@ -1974,82 +2246,6 @@ void MainWindow::PopulateCatalogPrograms()
 
         AddListViewRow(catalogListHandle_, {L"", program.displayName, program.filePath},
             static_cast<LPARAM>(index), ProgramIconIndex(program.filePath));
-    }
-}
-
-void MainWindow::PopulateRulePrograms()
-{
-    ListView_DeleteAllItems(ruleProgramsListHandle_);
-    const int index = SelectedWatchedIndex();
-    const bool selected = index >= 0 && index < static_cast<int>(app_.Configuration().watchedProcesses.size());
-    for (int id : {IdEditRuleActions, IdTransferCatalogProgram, IdRemoveRuleAction, IdRemoveWatchedProcess})
-        EnableWindow(GetDlgItem(windowHandle_, id), selected);
-    if (!selected)
-    {
-        return;
-    }
-
-    const auto& rule = app_.Configuration().watchedProcesses[static_cast<size_t>(index)];
-    for (const auto& program : rule.programsToLaunch)
-    {
-        std::wstring details;
-        if (!program.arguments.empty())
-        {
-            details = L"Arguments: " + program.arguments + L"; ";
-        }
-        details += L"Start delay: " + std::to_wstring(program.waitTimeMilliseconds) +
-            L" ms; Stop delay: " + std::to_wstring(program.closeDelayMilliseconds) + L" ms";
-        AddListViewRow(ruleProgramsListHandle_, {
-            L"",
-            L"Start",
-            program.displayName.empty() ? FileNameWithoutExtension(program.filePath) : program.displayName,
-            details}, -1, ProgramIconIndex(program.filePath));
-    }
-    for (const auto& action : rule.processesToStop)
-    {
-        std::wstring details = action.processName;
-        if (action.restartAfterWatchProcessEnds)
-        {
-            details += L"; Restart after exit: " + std::to_wstring(action.restartDelayMilliseconds) + L" ms";
-        }
-        AddListViewRow(ruleProgramsListHandle_, {
-            L"",
-            L"Stop",
-            action.displayName.empty() ? action.processName : action.displayName,
-            details}, -1, ProgramIconIndex(action.executablePath));
-    }
-    for (const auto& action : rule.homeAssistantActions)
-    {
-        AddListViewRow(ruleProgramsListHandle_, {
-            L"",
-            L"Home Assistant",
-            action.displayName,
-            L"Delay: " + std::to_wstring(action.waitTimeMilliseconds) + L" ms"}, -1, ProgramIconIndex(L""));
-    }
-    if (!rule.monitorPowerSetupName.empty())
-    {
-        std::wstring details = L"Apply delay: " + std::to_wstring(rule.monitorPowerSetupDelayMilliseconds) + L" ms";
-        if (rule.restoreMonitorPowerSetupOnExit)
-        {
-            details += L"; Restore after exit: " +
-                std::to_wstring(rule.restoreMonitorPowerSetupDelayMilliseconds) + L" ms";
-        }
-        AddListViewRow(ruleProgramsListHandle_, {L"", L"Monitor config", rule.monitorPowerSetupName, details}, -1, ProgramIconIndex(L""));
-    }
-    if (!rule.powerSchemeGuid.empty())
-    {
-        std::wstring name = L"Unavailable power plan";
-        for (const auto& scheme : EnumeratePowerSchemes())
-        {
-            wchar_t guid[40]{};
-            StringFromGUID2(scheme.id, guid, static_cast<int>(std::size(guid)));
-            if (_wcsicmp(guid, rule.powerSchemeGuid.c_str()) == 0) { name = scheme.name; break; }
-        }
-        AddListViewRow(ruleProgramsListHandle_, {L"", L"Power Plan", name, L"Restore previous plan after exit"}, -1, ProgramIconIndex(L""));
-    }
-    if (!rule.servicesToStop.empty())
-    {
-        AddListViewRow(ruleProgramsListHandle_, {L"", L"Services", std::to_wstring(rule.servicesToStop.size()) + L" selected", L"Restore original state after exit"}, -1, ProgramIconIndex(L""));
     }
 }
 
@@ -2342,7 +2538,9 @@ void MainWindow::SwitchSourceTab()
     sourceTabIndex_ = TabCtrl_GetCurSel(sourceTabsHandle_);
     const bool runningProcesses = sourceTabIndex_ == 1;
     SetWindowTextW(detectSourceButtonHandle_, sourceTabIndex_ == 0 ? L"Refresh installed apps" : L"Refresh processes");
-    SetWindowTextW(GetDlgItem(windowHandle_, IdTransferCatalogProgram), L">");
+    SetWindowTextW(GetDlgItem(windowHandle_, IdTransferCatalogProgram),
+        sourceTabIndex_ == 0 ? L"Start with rule" : L"Close with rule");
+    SetWindowTextW(appsFeedbackHandle_, L"");
     EnableWindow(addCatalogButtonHandle_, sourceTabIndex_ == 0);
     EnableWindow(removeCatalogButtonHandle_, sourceTabIndex_ == 0);
     SendMessageW(catalogSearchHandle_, EM_SETCUEBANNER, FALSE,
@@ -2543,7 +2741,7 @@ void MainWindow::CaptureWindowPlacement()
     config.windowWidth = rect.right - rect.left;
     config.windowHeight = rect.bottom - rect.top;
     config.hasWindowPlacement = true;
-    config.startMaximized = false;
+    config.startMaximized = IsZoomed(windowHandle_) != FALSE;
 }
 
 void MainWindow::RestoreWindowPlacement(int showCommand)
@@ -2566,7 +2764,9 @@ void MainWindow::RestoreWindowPlacement(int showCommand)
             SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
-    ShowWindow(windowHandle_, showCommand == SW_SHOWMAXIMIZED ? SW_SHOWNORMAL : showCommand);
+    const bool restoreMaximized = config.startMaximized && showCommand != SW_HIDE && showCommand != SW_SHOWMINIMIZED &&
+        showCommand != SW_MINIMIZE && showCommand != SW_SHOWMINNOACTIVE;
+    ShowWindow(windowHandle_, restoreMaximized ? SW_SHOWMAXIMIZED : showCommand);
     UpdateWindow(windowHandle_);
 }
 
@@ -2577,6 +2777,13 @@ void MainWindow::HideToTray()
 
 void MainWindow::ShowFromTray()
 {
+    if (IsZoomed(windowHandle_))
+    {
+        // Moving a maximized window would break its maximized layout.
+        ShowWindow(windowHandle_, SW_SHOW);
+        SetForegroundWindow(windowHandle_);
+        return;
+    }
     const RECT visibleRect = EnsureVisibleRect(GetNormalWindowRect(windowHandle_));
     SetWindowPos(
         windowHandle_,
@@ -2598,7 +2805,7 @@ void MainWindow::AddSelectedCatalogProgram()
     const int watchedIndex = SelectedWatchedIndex();
     if (watchedIndex < 0)
     {
-        MessageBoxW(windowHandle_, L"Select a watched process first.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(windowHandle_, L"Add a rule first.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
         return;
     }
 
@@ -2610,7 +2817,7 @@ void MainWindow::AddSelectedCatalogProgram()
     }
 
     auto& programs = app_.Configuration().watchedProcesses[static_cast<size_t>(watchedIndex)].programsToLaunch;
-    bool changed = false;
+    size_t added = 0;
     size_t unavailable = 0;
     for (const auto index : selectedIndices)
     {
@@ -2623,11 +2830,10 @@ void MainWindow::AddSelectedCatalogProgram()
         });
         if (duplicate != programs.end()) continue;
         programs.push_back({detectedProgram.displayName, detectedProgram.filePath});
-        changed = true;
+        ++added;
     }
-    if (!changed && unavailable == 0) return;
-    PopulateRulePrograms();
-    if (changed) SaveConfiguration();
+    ReportTransfer(added, true);
+    if (added != 0) SaveConfiguration();
     if (unavailable != 0)
         MessageBoxW(windowHandle_, L"Windows did not provide an executable path for one or more selected apps. Add those manually with the + button if you know their EXE files.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
 }
@@ -2665,91 +2871,17 @@ void MainWindow::AddWatchedProcess()
 {
     const auto rule = SelectWatchedProcess();
     if (rule.processName.empty()) return;
-    app_.Configuration().watchedProcesses.push_back(rule);
-    PopulateLists();
+    auto& rules = app_.Configuration().watchedProcesses;
+    rules.push_back(rule);
     SaveConfiguration();
-}
-
-void MainWindow::EditRuleProgram()
-{
-    const int watchedIndex = SelectedWatchedIndex();
-    const int actionIndex = SelectedListViewRow(ruleProgramsListHandle_);
-    if (watchedIndex < 0 || actionIndex < 0)
-    {
-        return;
-    }
-
-    auto& rule = app_.Configuration().watchedProcesses[static_cast<size_t>(watchedIndex)];
-    if (actionIndex < static_cast<int>(rule.programsToLaunch.size()))
-    {
-        auto& program = rule.programsToLaunch[static_cast<size_t>(actionIndex)];
-        if (!ShowProgramOptionsDialog(app_.InstanceHandle(), windowHandle_, program))
-        {
-            return;
-        }
-        PopulateRulePrograms();
-        ListView_SetItemState(ruleProgramsListHandle_, actionIndex,
-            LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-        SaveConfiguration();
-        return;
-    }
-
-    int relativeIndex = actionIndex - static_cast<int>(rule.programsToLaunch.size());
-    if (relativeIndex < static_cast<int>(rule.processesToStop.size()))
-    {
-        auto action = rule.processesToStop[static_cast<size_t>(relativeIndex)];
-        if (ShowStopProcessActionDialog(app_.InstanceHandle(), windowHandle_, action))
-        {
-            rule.processesToStop[static_cast<size_t>(relativeIndex)] = std::move(action);
-            PopulateRulePrograms();
-            ListView_SetItemState(ruleProgramsListHandle_, actionIndex,
-                LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-            SaveConfiguration();
-        }
-        return;
-    }
-    relativeIndex -= static_cast<int>(rule.processesToStop.size());
-    if (relativeIndex < static_cast<int>(rule.homeAssistantActions.size()))
-    {
-        auto action = rule.homeAssistantActions[static_cast<size_t>(relativeIndex)];
-        if (ShowHomeAssistantActionDialog(app_.InstanceHandle(), windowHandle_, action))
-        {
-            rule.homeAssistantActions[static_cast<size_t>(relativeIndex)] = std::move(action);
-            PopulateRulePrograms();
-            ListView_SetItemState(ruleProgramsListHandle_, actionIndex,
-                LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-            SaveConfiguration();
-        }
-        return;
-    }
-    relativeIndex -= static_cast<int>(rule.homeAssistantActions.size());
-    if (!rule.monitorPowerSetupName.empty())
-    {
-        if (relativeIndex == 0) { EditRuleActions(3); return; }
-        --relativeIndex;
-    }
-    if (!rule.powerSchemeGuid.empty())
-    {
-        if (relativeIndex == 0) { EditRuleActions(4); return; }
-        --relativeIndex;
-    }
-    if (!rule.servicesToStop.empty() && relativeIndex == 0)
-    {
-        EditRuleActions(5);
-        return;
-    }
-
-    EditRuleActions();
+    PopulateRuleCombo();
+    OpenRule(static_cast<int>(rules.size()) - 1);
 }
 
 void MainWindow::EditRuleActions(int initialTab, int initialActionIndex)
 {
     const int watchedIndex = SelectedWatchedIndex();
-    if (watchedIndex < 0)
-    {
-        MessageBoxW(windowHandle_, L"Select a watched process first.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
-        return;
-    }
+    if (watchedIndex < 0) return;
 
     auto& rule = app_.Configuration().watchedProcesses[static_cast<size_t>(watchedIndex)];
     if (!ShowRuleActionsDialog(app_.InstanceHandle(), windowHandle_, rule,
@@ -2758,8 +2890,8 @@ void MainWindow::EditRuleActions(int initialTab, int initialActionIndex)
         return;
     }
 
-    PopulateRulePrograms();
     SaveConfiguration();
+    PopulateRuleDetail();
 }
 
 void MainWindow::TransferSelectedSource()
@@ -2783,7 +2915,7 @@ void MainWindow::AddSelectedRunningProcess()
     const int watchedIndex = SelectedWatchedIndex();
     if (watchedIndex < 0)
     {
-        MessageBoxW(windowHandle_, L"Select a watched process first.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(windowHandle_, L"Add a rule first.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
         return;
     }
 
@@ -2795,7 +2927,7 @@ void MainWindow::AddSelectedRunningProcess()
     }
 
     auto& rule = app_.Configuration().watchedProcesses[static_cast<size_t>(watchedIndex)];
-    bool changed = false;
+    size_t added = 0;
     for (const auto index : selectedIndices)
     {
         if (index >= runningProcesses_.size()) continue;
@@ -2821,11 +2953,10 @@ void MainWindow::AddSelectedRunningProcess()
         action.processName = selected.processName;
         action.executablePath = selected.executablePath;
         rule.processesToStop.push_back(std::move(action));
-        changed = true;
+        ++added;
     }
-    if (!changed) return;
-    PopulateRulePrograms();
-    SaveConfiguration();
+    ReportTransfer(added, false);
+    if (added != 0) SaveConfiguration();
 }
 
 void MainWindow::AddSelectedDetectedProcess()
@@ -2833,7 +2964,7 @@ void MainWindow::AddSelectedDetectedProcess()
     const int watchedIndex = SelectedWatchedIndex();
     if (watchedIndex < 0) return;
     auto& rule = app_.Configuration().watchedProcesses[static_cast<size_t>(watchedIndex)];
-    bool changed = false;
+    size_t added = 0;
     for (const auto index : SelectedSourceIndices(catalogListHandle_))
     {
         if (index >= detectedProcesses_.size()) continue;
@@ -2854,11 +2985,10 @@ void MainWindow::AddSelectedDetectedProcess()
         action.forceAfterMilliseconds = 3000;
         action.restartAfterWatchProcessEnds = false;
         rule.processesToStop.push_back(std::move(action));
-        changed = true;
+        ++added;
     }
-    if (!changed) return;
-    PopulateRulePrograms();
-    SaveConfiguration();
+    ReportTransfer(added, false);
+    if (added != 0) SaveConfiguration();
 }
 
 void MainWindow::AddCustomCatalogProgram()
@@ -2890,51 +3020,20 @@ void MainWindow::AddCustomCatalogProgram()
     SaveConfiguration();
 }
 
-void MainWindow::RemoveWatchedProcess()
+void MainWindow::RemoveWatchedProcess(int index)
 {
-    const int index = SelectedWatchedIndex();
-    if (index < 0) return;
-
     auto& watched = app_.Configuration().watchedProcesses;
-    watched.erase(watched.begin() + index);
-    PopulateLists();
-    SaveConfiguration();
-}
-
-void MainWindow::RemoveSelectedRuleAction()
-{
-    const int watchedIndex = SelectedWatchedIndex();
-    int actionIndex = SelectedListViewRow(ruleProgramsListHandle_);
-    if (watchedIndex < 0 || actionIndex < 0) return;
-
-    auto& rule = app_.Configuration().watchedProcesses[static_cast<size_t>(watchedIndex)];
-    if (actionIndex < static_cast<int>(rule.programsToLaunch.size()))
-    {
-        rule.programsToLaunch.erase(rule.programsToLaunch.begin() + actionIndex);
-    }
-    else if ((actionIndex -= static_cast<int>(rule.programsToLaunch.size())) <
-        static_cast<int>(rule.processesToStop.size()))
-    {
-        rule.processesToStop.erase(rule.processesToStop.begin() + actionIndex);
-    }
-    else if ((actionIndex -= static_cast<int>(rule.processesToStop.size())) <
-        static_cast<int>(rule.homeAssistantActions.size()))
-    {
-        rule.homeAssistantActions.erase(rule.homeAssistantActions.begin() + actionIndex);
-    }
-    else if (!rule.monitorPowerSetupName.empty())
-    {
-        rule.monitorPowerSetupName.clear();
-        rule.monitorPowerSetupDelayMilliseconds = 0;
-        rule.restoreMonitorPowerSetupOnExit = false;
-        rule.restoreMonitorPowerSetupDelayMilliseconds = 0;
-    }
-    else
-    {
+    if (index < 0 || index >= static_cast<int>(watched.size())) return;
+    const std::wstring question = L"Remove the rule for " + RuleName(watched[static_cast<size_t>(index)]) +
+        L"? Its actions are removed too.";
+    if (MessageBoxW(windowHandle_, question.c_str(), L"LaunchMate", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES)
         return;
-    }
-    PopulateRulePrograms();
+
+    watched.erase(watched.begin() + index);
+    selectedRuleIndex_ = -1;
     SaveConfiguration();
+    PopulateRuleCombo();
+    ShowPage(Page::Rules);
 }
 
 void MainWindow::HandleTrayCommand(UINT command)
@@ -3114,5 +3213,6 @@ WatchedProcessRule MainWindow::SelectWatchedProcess()
 
 int MainWindow::SelectedWatchedIndex() const
 {
-    return SelectedListViewRow(watchedListHandle_);
+    const auto count = static_cast<int>(app_.Configuration().watchedProcesses.size());
+    return selectedRuleIndex_ >= 0 && selectedRuleIndex_ < count ? selectedRuleIndex_ : -1;
 }

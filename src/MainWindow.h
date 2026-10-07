@@ -5,6 +5,8 @@
 #include "TrayIcon.h"
 #include "UpdateChecker.h"
 #include "BackgroundTask.h"
+#include "CardList.h"
+#include "NavBar.h"
 #include "StatusPanel.h"
 #include <array>
 #include <thread>
@@ -40,14 +42,25 @@ private:
         IdRemoveCatalogProgram,
         IdAddWatchedProcess,
         IdRemoveWatchedProcess,
-        IdRemoveRuleAction,
-        IdEditRuleActions,
         IdCatalogSearch,
         IdCatalogList,
-        IdWatchedList,
-        IdRuleProgramsList,
         IdSourceTabs,
-        IdSettings
+        IdSettings,
+        IdNavRules,
+        IdNavApps,
+        IdRuleCards,
+        IdStartCards,
+        IdExitCards,
+        IdRuleBack,
+        IdRuleToggleEnabled,
+        IdAppsRuleCombo
+    };
+
+    enum class Page
+    {
+        Rules,
+        RuleDetail,
+        Apps
     };
 
     static constexpr UINT kTrayCallbackMessage = WM_APP + 1;
@@ -68,7 +81,15 @@ private:
     void SwitchSourceTab();
     void SyncCatalogProgramsFromConfiguration();
     void DetectInstalledApps();
-    void PopulateRulePrograms();
+    void ShowPage(Page page);
+    void PopulateRuleCards();
+    void PopulateRuleDetail();
+    void PopulateRuleCombo();
+    void OpenRule(int index);
+    void HandleCardCommand(int controlId, int code);
+    void ShowRuleContextMenu(int index);
+    void ToggleRuleEnabled(int index);
+    void ReportTransfer(size_t added, bool started);
     void SyncProcessStateTimer(bool visible);
     void ToggleMonitoring();
     void ManageMonitorPowerSetups();
@@ -87,10 +108,8 @@ private:
     void AddCustomCatalogProgram();
     void RemoveSelectedCatalogProgram();
     void AddWatchedProcess();
-    void EditRuleProgram();
     void EditRuleActions(int initialTab = 0, int initialActionIndex = -1);
-    void RemoveWatchedProcess();
-    void RemoveSelectedRuleAction();
+    void RemoveWatchedProcess(int index);
     void HandleTrayCommand(UINT command);
     void StartUpdateCheck(bool interactive);
     void BeginUpdateInstall(UpdateReleaseInfo release);
@@ -104,16 +123,29 @@ private:
     App& app_;
     HWND windowHandle_{nullptr};
     StatusPanel statusPanel_;
-    HWND watchedHeadingHandle_{nullptr};
-    HWND actionsHeadingHandle_{nullptr};
+    NavBar navBar_;
+    CardList ruleCards_;
+    CardList startCards_;
+    CardList exitCards_;
+    // Dialog tab of RuleActionsDialog that each start/exit card opens.
+    std::vector<int> startCardTabs_;
+    std::vector<int> exitCardTabs_;
+    HWND rulesHeadingHandle_{nullptr};
+    HWND ruleTitleHandle_{nullptr};
+    HWND ruleSubtitleHandle_{nullptr};
+    HWND startHeadingHandle_{nullptr};
+    HWND exitHeadingHandle_{nullptr};
+    HWND appsRuleLabelHandle_{nullptr};
+    HWND appsRuleComboHandle_{nullptr};
+    HWND appsFeedbackHandle_{nullptr};
+    Page page_{Page::Rules};
+    int selectedRuleIndex_{-1};
     HWND catalogSearchHandle_{nullptr};
     HWND catalogListHandle_{nullptr};
     HWND sourceTabsHandle_{nullptr};
     HWND detectSourceButtonHandle_{nullptr};
     HWND addCatalogButtonHandle_{nullptr};
     HWND removeCatalogButtonHandle_{nullptr};
-    HWND watchedListHandle_{nullptr};
-    HWND ruleProgramsListHandle_{nullptr};
     HFONT headingFont_{nullptr};
     HFONT uiFont_{nullptr};
     UINT dpi_{96};

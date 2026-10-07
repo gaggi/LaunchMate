@@ -37,7 +37,10 @@ add_executable(LaunchMate WIN32
     src/ServicesPage.cpp
     src/SettingsPage.cpp
     src/MainWindow.cpp
-    src/RuleActionsDialog.cpp
+    src/IRacingPage.cpp
+    src/PerformancePage.cpp
+    src/RuleDisplayPage.cpp
+    src/WebhooksPage.cpp
     src/IRacingPerformance.cpp
     src/IRacingServices.cpp
     src/MonitorPowerController.cpp

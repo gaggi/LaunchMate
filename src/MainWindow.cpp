@@ -1,7 +1,5 @@
 #include "MainWindow.h"
 
-#include "ListViewHelpers.h"
-#include "RuleActionsDialog.h"
 #include "IRacingPerformance.h"
 #include "IRacingServices.h"
 #include "Pages.h"
@@ -436,6 +434,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         case IdNavRules: ShowPage(Page::Rules); return 0;
         case IdRuleBack: ShowPage(Page::Rules); return 0;
         case IdRuleToggleEnabled: ToggleRuleEnabled(selectedRuleIndex_); return 0;
+        case IdRuleAppSettings: OpenRuleSection(RuleSection::AppSpecific); return 0;
         case IdAddWatchedProcess: AddWatchedProcess(); return 0;
         case IdRemoveWatchedProcess: RemoveWatchedProcess(selectedRuleIndex_); return 0;
         }
@@ -660,6 +659,7 @@ void MainWindow::CreateControls()
     ruleTitleHandle_ = CreateLabel(windowHandle_, L"", 0, 0, 240, 24, headingFont_);
     ruleSubtitleHandle_ = CreateLabel(windowHandle_, L"", 0, 0, 240, 20, uiFont_);
     SetWindowLongPtrW(ruleSubtitleHandle_, GWL_STYLE, GetWindowLongPtrW(ruleSubtitleHandle_, GWL_STYLE) | SS_PATHELLIPSIS);
+    CreateButtonControl(windowHandle_, IdRuleAppSettings, L"iRacing settings", 0, 0, 130, 30, uiFont_);
     CreateButtonControl(windowHandle_, IdRuleToggleEnabled, L"Disable", 0, 0, 100, 30, uiFont_);
     CreateButtonControl(windowHandle_, IdRemoveWatchedProcess, L"Remove rule", 0, 0, 110, 30, uiFont_);
     startHeadingHandle_ = CreateLabel(windowHandle_, L"", 0, 0, 240, 24, headingFont_);
@@ -711,8 +711,10 @@ void MainWindow::LayoutControls(int width, int height)
 
     // Rule page
     button(IdRuleBack, left, top, 96, 30);
-    place(ruleTitleHandle_, left + 112, top - 4, content - 112 - 230, 24);
-    place(ruleSubtitleHandle_, left + 112, top + 18, content - 112 - 230, 20);
+    // The app settings button only shows for iRacing rules; keep its space either way.
+    place(ruleTitleHandle_, left + 112, top - 4, content - 112 - 370, 24);
+    place(ruleSubtitleHandle_, left + 112, top + 18, content - 112 - 370, 20);
+    button(IdRuleAppSettings, right - 360, top, 130, 30);
     button(IdRuleToggleEnabled, right - 220, top, 100, 30);
     button(IdRemoveWatchedProcess, right - 110, top, 110, 30);
     const int columnWidth = (content - 20) / 2;
@@ -758,6 +760,9 @@ void MainWindow::ShowPage(Page page)
     const bool embedded = page == Page::RuleSection || page == Page::Displays || page == Page::Settings;
     show({pageTitleHandle_, pageHintHandle_, pageHost_.Handle()}, embedded);
     show({item(IdSectionBack)}, page == Page::RuleSection);
+    const int ruleIndex = SelectedWatchedIndex();
+    show({item(IdRuleAppSettings)}, page == Page::RuleDetail && ruleIndex >= 0 &&
+        IsIRacingRule(app_.Configuration().watchedProcesses[static_cast<size_t>(ruleIndex)]));
     navBar_.SetSelected(page == Page::Displays ? IdMonitorPowerSetups
         : page == Page::Settings ? IdSettings : IdNavRules);
     if (embedded)
@@ -982,6 +987,7 @@ namespace
         case RuleSection::MonitorConfig: return {L"Display configuration", L"A saved monitor arrangement used while %s runs."};
         case RuleSection::Performance: return {L"Power plan and priorities", L"Power plan and process priorities while %s runs."};
         case RuleSection::WindowsServices: return {L"Stop Windows services", L"Stopped while %s runs; their original state is restored afterwards."};
+        case RuleSection::AppSpecific: return {L"iRacing settings", L"Texture loading, Defender exclusions and a system check for %s."};
         }
         return {L"", L""};
     }
@@ -1035,10 +1041,16 @@ HWND MainWindow::CreatePagePane(Page page)
         return CreateRuleAppsPage(context, host, rule, openSection_);
     case RuleSection::WindowsServices:
         return CreateServicesPage(context, host, rule);
-    default:
-        return CreateRuleSectionPane(app_.InstanceHandle(), host, rule, config.monitorPowerSetups, openSection_,
-            [this] { ScheduleSave(); });
+    case RuleSection::Performance:
+        return CreatePerformancePage(context, host, rule);
+    case RuleSection::HomeAssistant:
+        return CreateWebhooksPage(context, host, rule);
+    case RuleSection::MonitorConfig:
+        return CreateRuleDisplayPage(context, host, rule);
+    case RuleSection::AppSpecific:
+        return CreateIRacingPage(context, host, rule);
     }
+    return nullptr;
 }
 
 void MainWindow::ScheduleSave()

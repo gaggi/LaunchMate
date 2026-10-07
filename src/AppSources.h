@@ -41,3 +41,5 @@ std::vector<RunningProcessEntry> CaptureRunningProcesses(const std::wstring& wat
 // Known background apps (cloud sync, launchers, overlays ...) with an estimated effect.
 std::vector<DetectedProcessEntry> CaptureBackgroundApps(const std::wstring& watchedProcessName, const std::atomic_bool& cancelled);
 bool ContainsInsensitive(const std::wstring& haystack, const std::wstring& needle);
+// Executable names of running processes, sorted and without duplicates. Fast.
+std::vector<std::wstring> RunningProcessNames();

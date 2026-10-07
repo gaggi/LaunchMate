@@ -3,6 +3,8 @@
 #include "UiTheme.h"
 
 #include <memory>
+#include <string>
+#include <vector>
 #include <windows.h>
 #include <commctrl.h>
 
@@ -70,6 +72,26 @@ protected:
             id == 0 ? nullptr : reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         return control;
+    }
+
+    // Shows a menu at the cursor and returns the chosen index, or -1. Items that are
+    // empty become separators; `checked` gets a check mark; `disabled` greys one out.
+    int ChooseFromMenu(const std::vector<std::wstring>& items, int checked = -1, int disabled = -1) const
+    {
+        const HMENU menu = CreatePopupMenu();
+        for (size_t index = 0; index < items.size(); ++index)
+        {
+            if (items[index].empty()) { AppendMenuW(menu, MF_SEPARATOR, 0, nullptr); continue; }
+            UINT flags = MF_STRING;
+            if (static_cast<int>(index) == checked) flags |= MF_CHECKED;
+            if (static_cast<int>(index) == disabled) flags |= MF_GRAYED;
+            AppendMenuW(menu, flags, index + 1, items[index].c_str());
+        }
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        const UINT choice = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, window_, nullptr);
+        DestroyMenu(menu);
+        return static_cast<int>(choice) - 1;
     }
 
     // Positions in DIPs, relative to the page.

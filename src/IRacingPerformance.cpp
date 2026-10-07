@@ -1,10 +1,5 @@
 #include "IRacingPerformance.h"
-#include "ui/BackgroundTask.h"
 #include "IRacingServices.h"
-#include "ListViewHelpers.h"
-#include "ui/UiTheme.h"
-
-#include "resource.h"
 
 #include <algorithm>
 #include <array>
@@ -216,20 +211,6 @@ namespace
         return true;
     }
 
-    std::wstring IniSummary(const std::filesystem::path& path)
-    {
-        std::array<std::string, 3> values{};
-        if (!ReadIniValues(path, values)) return L"app.ini: missing, unreadable, or unsupported encoding";
-        std::wstring summary = L"app.ini [Graphics]:";
-        for (size_t index = 0; index < kIniSettings.size(); ++index)
-        {
-            summary += L"\r\n  " + std::wstring(kIniSettings[index].first.begin(), kIniSettings[index].first.end()) + L" = ";
-            summary += values[index].empty() ? L"missing" : std::wstring(values[index].begin(), values[index].end());
-            if (values[index] != kIniSettings[index].second) summary += L" (suggested: " + std::wstring(kIniSettings[index].second.begin(), kIniSettings[index].second.end()) + L")";
-        }
-        return summary;
-    }
-
     bool ApplyIniSettings(const std::filesystem::path& path, const std::array<std::string, 3>& values, std::wstring& error)
     {
         std::string contents;
@@ -358,31 +339,6 @@ namespace
         return result;
     }
 
-    std::wstring DisplaySummary()
-    {
-        std::wstring result;
-        for (DWORD index = 0;; ++index)
-        {
-            DISPLAY_DEVICEW device{sizeof(device)};
-            if (!EnumDisplayDevicesW(nullptr, index, &device, 0)) break;
-            if (!(device.StateFlags & DISPLAY_DEVICE_ACTIVE) || !(device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) continue;
-            DEVMODEW current{sizeof(current)};
-            if (!EnumDisplaySettingsW(device.DeviceName, ENUM_CURRENT_SETTINGS, &current)) continue;
-            DWORD maximum = current.dmDisplayFrequency;
-            for (DWORD modeIndex = 0;; ++modeIndex)
-            {
-                DEVMODEW mode{sizeof(mode)};
-                if (!EnumDisplaySettingsW(device.DeviceName, modeIndex, &mode)) break;
-                if (mode.dmPelsWidth == current.dmPelsWidth && mode.dmPelsHeight == current.dmPelsHeight &&
-                    mode.dmBitsPerPel == current.dmBitsPerPel)
-                    maximum = std::max(maximum, mode.dmDisplayFrequency);
-            }
-            result += L"\r\n  " + std::wstring(device.DeviceName) + L": " + std::to_wstring(current.dmDisplayFrequency) + L" Hz";
-            if (maximum > current.dmDisplayFrequency) result += L" (" + std::to_wstring(maximum) + L" Hz available at this resolution)";
-        }
-        return result.empty() ? L"\r\n  unavailable" : result;
-    }
-
     struct DefenderState { bool available{}; bool installExcluded{}; bool documentsExcluded{}; };
 
     DefenderState ReadDefender(const std::wstring& install, const std::wstring& documents)
@@ -419,252 +375,6 @@ namespace
             L"$paths=@((Get-MpPreference).ExclusionPath); "
             L"foreach ($target in $targets) { if (" + failed + L") { exit 2 } }; "
             L"exit 0 } catch { exit 4 }";
-    }
-
-    struct DiagnosticResult
-    {
-        DefenderState defender;
-        std::array<std::string, 3> iniValues{};
-        bool iniReadable{};
-        std::wstring summary;
-        std::vector<PowerSchemeInfo> schemes;
-        std::filesystem::path documents;
-        std::filesystem::path install;
-    };
-
-    struct DialogState
-    {
-        WatchedProcessRule* rule{};
-        std::vector<PowerSchemeInfo> schemes;
-        std::filesystem::path documents;
-        std::filesystem::path install;
-        bool defenderVerifiedThisSession{};
-        bool removeDefenderExclusions{};
-        bool loaded{};
-        bool refreshAgain{};
-        bool iniDirty{};
-        bool syncingIni{};
-        BackgroundTask<DiagnosticResult> refresh;
-    };
-
-    std::vector<std::wstring> RunningProcessNames(const WatchedProcessRule* rule = nullptr)
-    {
-        std::vector<std::wstring> names;
-        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (snapshot == INVALID_HANDLE_VALUE) return names;
-        PROCESSENTRY32W entry{sizeof(entry)};
-        if (Process32FirstW(snapshot, &entry))
-        {
-            do { names.emplace_back(entry.szExeFile); } while (Process32NextW(snapshot, &entry));
-        }
-        CloseHandle(snapshot);
-        // These processes are meaningful performance targets even before a
-        // session starts: the watched executable itself and every configured
-        // Start-program action.  They supplement (rather than replace) the
-        // live process list.
-        if (rule)
-        {
-            const auto watched = rule->processName.empty()
-                ? std::filesystem::path(rule->executablePath).filename().wstring()
-                : std::filesystem::path(rule->processName).filename().wstring();
-            if (!watched.empty()) names.push_back(watched);
-            for (const auto& program : rule->programsToLaunch)
-            {
-                const auto name = std::filesystem::path(program.filePath).filename().wstring();
-                if (!name.empty()) names.push_back(name);
-            }
-        }
-        std::sort(names.begin(), names.end(), [](const auto& left, const auto& right) { return _wcsicmp(left.c_str(), right.c_str()) < 0; });
-        names.erase(std::unique(names.begin(), names.end(), [](const auto& left, const auto& right) { return _wcsicmp(left.c_str(), right.c_str()) == 0; }), names.end());
-        return names;
-    }
-
-    std::wstring PriorityText(int value)
-    {
-        switch (value)
-        {
-        case IDLE_PRIORITY_CLASS: return L"Low";
-        case BELOW_NORMAL_PRIORITY_CLASS: return L"Below normal";
-        case NORMAL_PRIORITY_CLASS: return L"Normal";
-        case ABOVE_NORMAL_PRIORITY_CLASS: return L"Above normal";
-        case HIGH_PRIORITY_CLASS: return L"High";
-        case REALTIME_PRIORITY_CLASS: return L"Real time";
-        default: return L"Do not change";
-        }
-    }
-
-    std::wstring IoPriorityText(int value)
-    {
-        switch (value)
-        {
-        case 0: return L"Very low";
-        case 1: return L"Low";
-        case 2: return L"Normal";
-        case 3: return L"High";
-        default: return L"Do not change";
-        }
-    }
-
-    std::wstring MemoryPriorityText(int value)
-    {
-        switch (value)
-        {
-        case 1: return L"Very low";
-        case 2: return L"Low";
-        case 3: return L"Medium";
-        case 4: return L"Below normal";
-        case 5: return L"Normal";
-        default: return L"Do not change";
-        }
-    }
-
-    void EnsureDefaultPerformanceActions(WatchedProcessRule& rule)
-    {
-        const auto addIfMissing = [&](const std::wstring& candidate)
-        {
-            const auto name = std::filesystem::path(candidate).filename().wstring();
-            if (name.empty()) return;
-            const bool exists = std::any_of(rule.processPerformanceActions.begin(), rule.processPerformanceActions.end(),
-                [&](const ProcessPerformanceAction& action) { return _wcsicmp(action.processName.c_str(), name.c_str()) == 0; });
-            if (!exists) rule.processPerformanceActions.push_back({name});
-        };
-
-        addIfMissing(rule.processName.empty() ? rule.executablePath : rule.processName);
-        for (const auto& program : rule.programsToLaunch) addIfMissing(program.filePath);
-    }
-
-    struct PerformanceActionDialogState
-    {
-        ProcessPerformanceAction* action{};
-        const WatchedProcessRule* rule{};
-        std::vector<std::wstring> processes;
-        bool accepted{};
-    };
-
-    void AddChoice(HWND combo, const wchar_t* label, int value, int selectedValue)
-    {
-        const int index = static_cast<int>(SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label)));
-        SendMessageW(combo, CB_SETITEMDATA, index, value);
-        if (value == selectedValue) SendMessageW(combo, CB_SETCURSEL, index, 0);
-    }
-
-    int ChoiceValue(HWND combo, int fallback)
-    {
-        const int selected = static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0));
-        return selected >= 0 ? static_cast<int>(SendMessageW(combo, CB_GETITEMDATA, selected, 0)) : fallback;
-    }
-
-    INT_PTR CALLBACK PerformanceActionProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
-    {
-        auto* state = reinterpret_cast<PerformanceActionDialogState*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
-        if (message == WM_INITDIALOG)
-        {
-            UiTheme::Apply(dialog);
-            state = reinterpret_cast<PerformanceActionDialogState*>(lParam);
-            SetWindowLongPtrW(dialog, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-            state->processes = RunningProcessNames(state->rule);
-            if (std::none_of(state->processes.begin(), state->processes.end(), [&](const auto& name) { return _wcsicmp(name.c_str(), state->action->processName.c_str()) == 0; }) && !state->action->processName.empty())
-                state->processes.push_back(state->action->processName);
-            std::sort(state->processes.begin(), state->processes.end(), [](const auto& left, const auto& right) { return _wcsicmp(left.c_str(), right.c_str()) < 0; });
-            HWND processCombo = GetDlgItem(dialog, IDC_PERF_PROCESS);
-            for (size_t index = 0; index < state->processes.size(); ++index)
-            {
-                SendMessageW(processCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(state->processes[index].c_str()));
-                if (_wcsicmp(state->processes[index].c_str(), state->action->processName.c_str()) == 0)
-                    SendMessageW(processCombo, CB_SETCURSEL, static_cast<WPARAM>(index), 0);
-            }
-            HWND priority = GetDlgItem(dialog, IDC_PERF_CPU_PRIORITY);
-            AddChoice(priority, L"Do not change", 0, state->action->cpuPriorityClass);
-            AddChoice(priority, L"Low", IDLE_PRIORITY_CLASS, state->action->cpuPriorityClass);
-            AddChoice(priority, L"Below normal", BELOW_NORMAL_PRIORITY_CLASS, state->action->cpuPriorityClass);
-            AddChoice(priority, L"Normal", NORMAL_PRIORITY_CLASS, state->action->cpuPriorityClass);
-            AddChoice(priority, L"Above normal", ABOVE_NORMAL_PRIORITY_CLASS, state->action->cpuPriorityClass);
-            AddChoice(priority, L"High", HIGH_PRIORITY_CLASS, state->action->cpuPriorityClass);
-            AddChoice(priority, L"Real time", REALTIME_PRIORITY_CLASS, state->action->cpuPriorityClass);
-            HWND io = GetDlgItem(dialog, IDC_PERF_IO_PRIORITY);
-            AddChoice(io, L"Do not change", -1, state->action->ioPriority);
-            AddChoice(io, L"Very low", 0, state->action->ioPriority);
-            AddChoice(io, L"Low", 1, state->action->ioPriority);
-            AddChoice(io, L"Normal", 2, state->action->ioPriority);
-            AddChoice(io, L"High", 3, state->action->ioPriority);
-            HWND memory = GetDlgItem(dialog, IDC_PERF_MEMORY_PRIORITY);
-            AddChoice(memory, L"Do not change", -1, state->action->memoryPriority);
-            AddChoice(memory, L"Very low", 1, state->action->memoryPriority);
-            AddChoice(memory, L"Low", 2, state->action->memoryPriority);
-            AddChoice(memory, L"Medium", 3, state->action->memoryPriority);
-            AddChoice(memory, L"Below normal", 4, state->action->memoryPriority);
-            AddChoice(memory, L"Normal", 5, state->action->memoryPriority);
-            const DWORD count = std::min<DWORD>(GetActiveProcessorCount(0), 64);
-            for (DWORD cpu = 0; cpu < count; ++cpu)
-            {
-                // Keep sibling logical CPUs visually together: evens on the
-                // first row, odds directly beneath them.  With 16 CPUs this
-                // is exactly the requested two-row layout.
-                const int column = static_cast<int>((cpu % 16) / 2);
-                const int row = static_cast<int>((cpu % 2) + (cpu / 16) * 2);
-                const std::wstring label = L"CPU " + std::to_wstring(cpu);
-                RECT position{12 + column * 60, 152 + row * 20, 12 + column * 60 + 56, 152 + row * 20 + 16};
-                MapDialogRect(dialog, &position);
-                HWND checkbox = CreateWindowExW(0, L"Button", label.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                    position.left, position.top, position.right - position.left, position.bottom - position.top, dialog,
-                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PERF_AFFINITY_FIRST + cpu)), GetModuleHandleW(nullptr), nullptr);
-                SendMessageW(checkbox, WM_SETFONT, SendMessageW(dialog, WM_GETFONT, 0, 0), TRUE);
-                if (state->action->affinityMask == 0 || (state->action->affinityMask & (std::uint64_t{1} << cpu)) != 0)
-                    SendMessageW(checkbox, BM_SETCHECK, BST_CHECKED, 0);
-            }
-            return TRUE;
-        }
-        if (message != WM_COMMAND) return FALSE;
-        if (LOWORD(wParam) == IDOK)
-        {
-            const int selected = static_cast<int>(SendDlgItemMessageW(dialog, IDC_PERF_PROCESS, CB_GETCURSEL, 0, 0));
-            if (selected < 0 || static_cast<size_t>(selected) >= state->processes.size())
-            {
-                MessageBoxW(dialog, L"Select a currently running process.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
-                return TRUE;
-            }
-            state->action->processName = state->processes[static_cast<size_t>(selected)];
-            state->action->cpuPriorityClass = ChoiceValue(GetDlgItem(dialog, IDC_PERF_CPU_PRIORITY), 0);
-            state->action->ioPriority = ChoiceValue(GetDlgItem(dialog, IDC_PERF_IO_PRIORITY), -1);
-            state->action->memoryPriority = ChoiceValue(GetDlgItem(dialog, IDC_PERF_MEMORY_PRIORITY), -1);
-            const DWORD count = std::min<DWORD>(GetActiveProcessorCount(0), 64);
-            std::uint64_t mask = 0;
-            for (DWORD cpu = 0; cpu < count; ++cpu)
-                if (IsDlgButtonChecked(dialog, IDC_PERF_AFFINITY_FIRST + cpu) == BST_CHECKED) mask |= (std::uint64_t{1} << cpu);
-            const std::uint64_t all = count == 64 ? ~std::uint64_t{0} : ((std::uint64_t{1} << count) - 1);
-            state->action->affinityMask = mask == all ? 0 : mask;
-            state->accepted = true;
-            EndDialog(dialog, IDOK);
-            return TRUE;
-        }
-        if (LOWORD(wParam) == IDCANCEL) { EndDialog(dialog, IDCANCEL); return TRUE; }
-        return FALSE;
-    }
-
-    bool EditPerformanceAction(HWND owner, const WatchedProcessRule& rule, ProcessPerformanceAction& action)
-    {
-        PerformanceActionDialogState state{&action, &rule};
-        DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_PROCESS_PERFORMANCE_ACTION), owner, PerformanceActionProc, reinterpret_cast<LPARAM>(&state));
-        return state.accepted;
-    }
-
-    void RefreshPerformanceActions(HWND dialog, DialogState& state)
-    {
-        HWND list = GetDlgItem(dialog, IDC_PERF_ACTION_LIST);
-        ConfigureListView(list, {{L"Process", 3}, {L"CPU priority", 2}, {L"I/O priority", 2}, {L"Memory priority", 2}, {L"CPU affinity", 3}});
-        for (const auto& action : state.rule->processPerformanceActions)
-        {
-            std::wstring affinity = L"All CPUs";
-            if (action.affinityMask != 0)
-            {
-                affinity.clear();
-                for (DWORD cpu = 0; cpu < std::min<DWORD>(GetActiveProcessorCount(0), 64); ++cpu)
-                    if ((action.affinityMask & (std::uint64_t{1} << cpu)) != 0)
-                        affinity += (affinity.empty() ? L"" : L", ") + std::to_wstring(cpu);
-            }
-            AddListViewRow(list, {action.processName, PriorityText(action.cpuPriorityClass), IoPriorityText(action.ioPriority), MemoryPriorityText(action.memoryPriority), affinity});
-        }
-        UpdateListActionButtons(list, GetDlgItem(dialog, IDC_PERF_ACTION_EDIT), GetDlgItem(dialog, IDC_PERF_ACTION_REMOVE));
     }
 
     constexpr wchar_t kDwmRegistryPath[] = L"SOFTWARE\\Microsoft\\Windows\\Dwm";
@@ -797,334 +507,109 @@ namespace
         return ApplyMpoSettings(disable, error);
     }
 
-    std::wstring BuildStatus(const WatchedProcessRule& rule, const DiagnosticResult& state, bool defenderVerifiedThisSession)
+}
+
+std::wstring PowerSchemeGuidText(const GUID& guid)
+{
+    return GuidText(guid);
+}
+
+bool IsIRacingRunning()
+{
+    return ProcessRunning(L"iRacingSim64DX11.exe");
+}
+
+IRacingCheck CheckIRacingSetup(const WatchedProcessRule& rule)
+{
+    IRacingCheck check;
+    check.documents = IRacingDocuments();
+    if (!check.documents.empty())
     {
-        GUID active{};
-        GUID* activePointer = nullptr;
-        std::wstring summary = L"Power plan: unavailable";
-        std::wstring activeName;
-        if (PowerGetActiveScheme(nullptr, &activePointer) == ERROR_SUCCESS && activePointer)
-        {
-            active = *activePointer;
-            LocalFree(activePointer);
-            for (const auto& scheme : state.schemes)
-                if (IsEqualGUID(scheme.id, active)) { activeName = scheme.name; summary = L"Power plan: " + scheme.name; }
-        }
-        if (HasX3DProcessor() && !activeName.empty() && activeName.find(L"Balanced") == std::wstring::npos &&
-            activeName.find(L"Ausbalanciert") == std::wstring::npos)
-            summary += L" (X3D: consider a Balanced plan; compare frame times)";
-        summary += L"\r\nWindows services selected: " + std::to_wstring(rule.servicesToStop.size());
-        if (!rule.servicesToStop.empty() && !CanManageIRacingServices())
-            summary += L" (administrator approval is requested when the rule runs)";
-        if (HasPendingIRacingServiceRestore()) summary += L"\r\nService restoration is pending.";
-        if (!IsIRacingRule(rule))
-        {
-            return summary;
-        }
-        summary += L"\r\nRTSS: ";
-        summary += ProcessRunning(L"RTSS.exe") ? L"running" : InstalledApplication(L"RivaTuner Statistics Server") ? L"installed, not running" : L"not detected";
-        summary += L" | MSI Afterburner: ";
-        summary += ProcessRunning(L"MSIAfterburner.exe") ? L"running" : InstalledApplication(L"MSI Afterburner") ? L"installed, not running" : L"not detected";
-        summary += L"\r\n  Use the rule's Stop processes tab to close an overlay for a session.";
-        summary += L"\r\nDisplay refresh rates:" + DisplaySummary();
-        summary += L"\r\nDocuments: " + (state.documents.empty() ? std::wstring(L"unavailable") : state.documents.wstring()) + L"\r\n";
-        summary += state.documents.empty() ? L"app.ini: Documents folder unavailable" : IniSummary(state.documents / L"app.ini");
-        summary += L"\r\n\r\nDefender exclusions:";
-        if (state.install.empty()) summary += L"\r\n  iRacing executable path is unavailable";
-        else
-        {
-            const auto& defender = state.defender;
-            if (!defender.available)
-                summary += defenderVerifiedThisSession
-                    ? L"\r\n  added and verified with administrator rights this session; current list requires administrator rights to view"
-                    : L"\r\n  exclusions cannot be read here; use administrator rights to check";
-            else
-            {
-                summary += L"\r\n  Install folder: "; summary += defender.installExcluded ? L"present" : L"missing";
-                summary += L"\r\n  Documents folder: "; summary += defender.documentsExcluded ? L"present" : L"missing";
-            }
-        }
-        return summary;
+        std::array<std::string, 3> values{};
+        check.iniReadable = ReadIniValues(check.documents / L"app.ini", values);
+        check.carPreload = values[0] == "1";
+        check.trackPreload = values[1] == "1";
+        check.streamingTextureSize = values[2].empty() ? 256 : std::atoi(values[2].c_str());
+    }
+    if (!rule.executablePath.empty())
+    {
+        const std::filesystem::path executable(rule.executablePath);
+        if (_wcsicmp(executable.filename().c_str(), L"iRacingSim64DX11.exe") == 0) check.install = executable.parent_path();
+    }
+    if (!check.install.empty() && !check.documents.empty())
+    {
+        const auto defender = ReadDefender(check.install.wstring(), check.documents.wstring());
+        check.defenderReadable = defender.available;
+        check.installExcluded = defender.installExcluded;
+        check.documentsExcluded = defender.documentsExcluded;
     }
 
-    void RefreshStatus(HWND dialog, DialogState& state)
+    GUID* active = nullptr;
+    if (PowerGetActiveScheme(nullptr, &active) == ERROR_SUCCESS && active)
     {
-        if (state.refresh.Running()) { state.refreshAgain = true; return; }
-        SetDlgItemTextW(dialog, IDC_IRACING_STATUS, L"Loading system settings...");
-        EnableWindow(GetDlgItem(dialog, IDC_IRACING_REFRESH), FALSE);
-        EnableWindow(GetDlgItem(dialog, IDC_IRACING_INI), FALSE);
-        for (int id : {IDC_IRACING_CAR_PRELOAD, IDC_IRACING_TRACK_PRELOAD, IDC_IRACING_STREAMING_SIZE})
-            EnableWindow(GetDlgItem(dialog, id), FALSE);
-        EnableWindow(GetDlgItem(dialog, IDC_IRACING_DEFENDER), FALSE);
-        const bool started = SetTimer(dialog, 82, 100, nullptr) && state.refresh.Start(
-            [rule = *state.rule, verified = state.defenderVerifiedThisSession](const std::atomic_bool& cancelled)
-        {
-            DiagnosticResult result;
-            result.documents = IRacingDocuments();
-            if (IsIRacingRule(rule) && !result.documents.empty())
-                result.iniReadable = ReadIniValues(result.documents / L"app.ini", result.iniValues);
-            if (!rule.executablePath.empty())
-            {
-                const std::filesystem::path executable(rule.executablePath);
-                if (_wcsicmp(executable.filename().c_str(), L"iRacingSim64DX11.exe") == 0)
-                    result.install = executable.parent_path();
-            }
-            if (cancelled) return result;
-            if (IsIRacingRule(rule) && !result.install.empty() && !result.documents.empty())
-                result.defender = ReadDefender(result.install.wstring(), result.documents.wstring());
-            if (cancelled) return result;
-            result.schemes = EnumeratePowerSchemes();
-            if (!cancelled) result.summary = BuildStatus(rule, result, verified);
-            return result;
-        });
-        if (!started)
-        {
-            KillTimer(dialog, 82);
-            SetDlgItemTextW(dialog, IDC_IRACING_STATUS, L"Could not start diagnostics. Please refresh.");
-            EnableWindow(GetDlgItem(dialog, IDC_IRACING_REFRESH), TRUE);
-        }
+        for (const auto& scheme : EnumeratePowerSchemes())
+            if (IsEqualGUID(scheme.id, *active)) check.activePowerPlan = scheme.name;
+        LocalFree(active);
     }
+    check.x3dProcessor = HasX3DProcessor();
+    const auto describe = [](const wchar_t* process, const wchar_t* application)
+    {
+        return std::wstring(ProcessRunning(process) ? L"Running" : InstalledApplication(application) ? L"Installed, not running" : L"Not installed");
+    };
+    check.rtss = describe(L"RTSS.exe", L"RivaTuner Statistics Server");
+    check.afterburner = describe(L"MSIAfterburner.exe", L"MSI Afterburner");
 
-    INT_PTR CALLBACK DialogProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
+    for (DWORD index = 0;; ++index)
     {
-        auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
-        if (message == WM_INITDIALOG)
+        DISPLAY_DEVICEW device{sizeof(device)};
+        if (!EnumDisplayDevicesW(nullptr, index, &device, 0)) break;
+        if (!(device.StateFlags & DISPLAY_DEVICE_ACTIVE) || !(device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) continue;
+        DEVMODEW current{sizeof(current)};
+        if (!EnumDisplaySettingsW(device.DeviceName, ENUM_CURRENT_SETTINGS, &current)) continue;
+        IRacingCheck::Display display;
+        display.current = current.dmDisplayFrequency;
+        display.maximum = current.dmDisplayFrequency;
+        for (DWORD modeIndex = 0;; ++modeIndex)
         {
-            UiTheme::Apply(dialog);
-            state = reinterpret_cast<DialogState*>(lParam);
-            SetWindowLongPtrW(dialog, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-            const auto name = state->rule->displayName.empty() ? state->rule->processName : state->rule->displayName;
-            const auto caption = (name.empty() ? std::wstring(L"iRacing") : name) + L" - Specific settings";
-            SetDlgItemTextW(dialog, IDC_IRACING_INI_GROUP, caption.c_str());
-            SendDlgItemMessageW(dialog, IDC_IRACING_PLAN, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Loading power plans..."));
-            SendDlgItemMessageW(dialog, IDC_IRACING_PLAN, CB_SETCURSEL, 0, 0);
-            EnableWindow(GetDlgItem(dialog, IDC_IRACING_PLAN), FALSE);
-            InitializeReportListView(GetDlgItem(dialog, IDC_PERF_ACTION_LIST));
-            RefreshPerformanceActions(dialog, *state);
-            if (!IsIRacingRule(*state->rule))
-            {
-                ShowWindow(GetDlgItem(dialog, IDC_IRACING_INI), SW_HIDE);
-                ShowWindow(GetDlgItem(dialog, IDC_IRACING_DEFENDER), SW_HIDE);
-                for (int id : {IDC_IRACING_INI_GROUP, IDC_IRACING_CAR_PRELOAD, IDC_IRACING_TRACK_PRELOAD,
-                    IDC_IRACING_STREAMING_SIZE, IDC_IRACING_STREAMING_LABEL, IDC_IRACING_INI_HINT})
-                    ShowWindow(GetDlgItem(dialog, id), SW_HIDE);
-            }
-            RefreshStatus(dialog, *state);
-            return TRUE;
+            DEVMODEW mode{sizeof(mode)};
+            if (!EnumDisplaySettingsW(device.DeviceName, modeIndex, &mode)) break;
+            if (mode.dmPelsWidth == current.dmPelsWidth && mode.dmPelsHeight == current.dmPelsHeight &&
+                mode.dmBitsPerPel == current.dmBitsPerPel)
+                display.maximum = std::max(display.maximum, mode.dmDisplayFrequency);
         }
-        if (message == WM_TIMER && wParam == 82 && state)
-        {
-            std::optional<DiagnosticResult> result;
-            if (!state->refresh.Poll(result)) return TRUE;
-            KillTimer(dialog, 82);
-            if (state->refreshAgain)
-            {
-                state->refreshAgain = false;
-                RefreshStatus(dialog, *state);
-                return TRUE;
-            }
-            EnableWindow(GetDlgItem(dialog, IDC_IRACING_REFRESH), TRUE);
-            if (!result)
-            {
-                SetDlgItemTextW(dialog, IDC_IRACING_STATUS, L"Could not read system settings. Please refresh.");
-                return TRUE;
-            }
-            std::wstring selectedGuid = state->rule->powerSchemeGuid;
-            if (state->loaded)
-            {
-                const int selected = static_cast<int>(SendDlgItemMessageW(dialog, IDC_IRACING_PLAN, CB_GETCURSEL, 0, 0));
-                selectedGuid = selected > 0 && static_cast<size_t>(selected - 1) < state->schemes.size()
-                    ? GuidText(state->schemes[selected - 1].id) : L"";
-            }
-            state->documents = std::move(result->documents);
-            state->install = std::move(result->install);
-            state->schemes = std::move(result->schemes);
-            SendDlgItemMessageW(dialog, IDC_IRACING_PLAN, CB_RESETCONTENT, 0, 0);
-            SendDlgItemMessageW(dialog, IDC_IRACING_PLAN, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Do not change power plan"));
-            int selected = 0;
-            for (size_t i = 0; i < state->schemes.size(); ++i)
-            {
-                SendDlgItemMessageW(dialog, IDC_IRACING_PLAN, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(state->schemes[i].name.c_str()));
-                if (_wcsicmp(GuidText(state->schemes[i].id).c_str(), selectedGuid.c_str()) == 0) selected = static_cast<int>(i) + 1;
-            }
-            // Do not silently erase a configured plan that is currently unavailable.
-            if (!selectedGuid.empty() && selected == 0)
-            {
-                GUID id{};
-                if (ParseGuid(selectedGuid, id))
-                {
-                    state->schemes.push_back({id, L"Unavailable power plan"});
-                    SendDlgItemMessageW(dialog, IDC_IRACING_PLAN, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Unavailable power plan"));
-                    selected = static_cast<int>(state->schemes.size());
-                }
-            }
-            SendDlgItemMessageW(dialog, IDC_IRACING_PLAN, CB_SETCURSEL, selected, 0);
-            state->loaded = true;
-            EnableWindow(GetDlgItem(dialog, IDC_IRACING_PLAN), TRUE);
-            EnableWindow(GetDlgItem(dialog, IDC_IRACING_INI), result->iniReadable);
-            for (int id : {IDC_IRACING_CAR_PRELOAD, IDC_IRACING_TRACK_PRELOAD, IDC_IRACING_STREAMING_SIZE})
-                EnableWindow(GetDlgItem(dialog, id), result->iniReadable);
-            if (!state->iniDirty)
-            {
-                state->syncingIni = true;
-                CheckDlgButton(dialog, IDC_IRACING_CAR_PRELOAD, result->iniValues[0] == "1" ? BST_CHECKED : BST_UNCHECKED);
-                CheckDlgButton(dialog, IDC_IRACING_TRACK_PRELOAD, result->iniValues[1] == "1" ? BST_CHECKED : BST_UNCHECKED);
-                const auto& size = result->iniValues[2];
-                SetDlgItemTextW(dialog, IDC_IRACING_STREAMING_SIZE,
-                    size.empty() ? L"256" : std::wstring(size.begin(), size.end()).c_str());
-                state->syncingIni = false;
-            }
-            state->removeDefenderExclusions = result->defender.available
-                ? result->defender.installExcluded && result->defender.documentsExcluded
-                : state->defenderVerifiedThisSession;
-            SetDlgItemTextW(dialog, IDC_IRACING_DEFENDER, state->removeDefenderExclusions
-                ? L"Remove Defender exclusions..." : L"Add Defender exclusions...");
-            EnableWindow(GetDlgItem(dialog, IDC_IRACING_DEFENDER), !state->install.empty() && !state->documents.empty());
-            SetDlgItemTextW(dialog, IDC_IRACING_STATUS, result->summary.c_str());
-            return TRUE;
-        }
-        if (message == WM_NCDESTROY)
-        {
-            KillTimer(dialog, 82);
-            delete state;
-            SetWindowLongPtrW(dialog, GWLP_USERDATA, 0);
-            return FALSE;
-        }
-        if (message == WM_NOTIFY)
-        {
-            const auto* header = reinterpret_cast<NMHDR*>(lParam);
-            if (header->idFrom == IDC_PERF_ACTION_LIST && header->code == NM_DBLCLK)
-            {
-                const int selected = SelectedListViewRow(GetDlgItem(dialog, IDC_PERF_ACTION_LIST));
-                if (selected >= 0 && static_cast<size_t>(selected) < state->rule->processPerformanceActions.size() &&
-                    EditPerformanceAction(dialog, *state->rule, state->rule->processPerformanceActions[static_cast<size_t>(selected)]))
-                    RefreshPerformanceActions(dialog, *state);
-                return TRUE;
-            }
-            if (header->idFrom == IDC_PERF_ACTION_LIST && header->code == LVN_ITEMCHANGED)
-            {
-                UpdateListActionButtons(header->hwndFrom, GetDlgItem(dialog, IDC_PERF_ACTION_EDIT), GetDlgItem(dialog, IDC_PERF_ACTION_REMOVE));
-                return TRUE;
-            }
-        }
-        if (message != WM_COMMAND) return FALSE;
-        if ((LOWORD(wParam) == IDC_IRACING_CAR_PRELOAD || LOWORD(wParam) == IDC_IRACING_TRACK_PRELOAD) &&
-            HIWORD(wParam) == BN_CLICKED)
-        {
-            state->iniDirty = true;
-            return TRUE;
-        }
-        if (LOWORD(wParam) == IDC_IRACING_STREAMING_SIZE && HIWORD(wParam) == EN_CHANGE)
-        {
-            if (!state->syncingIni) state->iniDirty = true;
-            return TRUE;
-        }
-        if (LOWORD(wParam) == IDC_PERF_ACTION_ADD)
-        {
-            ProcessPerformanceAction action;
-            if (EditPerformanceAction(dialog, *state->rule, action))
-            {
-                state->rule->processPerformanceActions.push_back(std::move(action));
-                RefreshPerformanceActions(dialog, *state);
-            }
-            return TRUE;
-        }
-        if (LOWORD(wParam) == IDC_PERF_ACTION_EDIT)
-        {
-            const int selected = SelectedListViewRow(GetDlgItem(dialog, IDC_PERF_ACTION_LIST));
-            if (selected >= 0 && static_cast<size_t>(selected) < state->rule->processPerformanceActions.size() &&
-                EditPerformanceAction(dialog, *state->rule, state->rule->processPerformanceActions[static_cast<size_t>(selected)]))
-                RefreshPerformanceActions(dialog, *state);
-            return TRUE;
-        }
-        if (LOWORD(wParam) == IDC_PERF_ACTION_REMOVE)
-        {
-            const int selected = SelectedListViewRow(GetDlgItem(dialog, IDC_PERF_ACTION_LIST));
-            if (selected >= 0 && static_cast<size_t>(selected) < state->rule->processPerformanceActions.size())
-            {
-                state->rule->processPerformanceActions.erase(state->rule->processPerformanceActions.begin() + selected);
-                RefreshPerformanceActions(dialog, *state);
-            }
-            return TRUE;
-        }
-        switch (LOWORD(wParam))
-        {
-        case IDC_IRACING_REFRESH: RefreshStatus(dialog, *state); return TRUE;
-        case IDC_IRACING_INI:
-        {
-            if (state->documents.empty())
-            {
-                MessageBoxW(dialog, L"The Windows Documents folder could not be found.", L"LaunchMate", MB_OK | MB_ICONERROR);
-                return TRUE;
-            }
-            if (ProcessRunning(L"iRacingSim64DX11.exe"))
-            {
-                MessageBoxW(dialog, L"Close iRacing before editing app.ini so the game does not overwrite the changes.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
-                return TRUE;
-            }
-            const auto path = state->documents / L"app.ini";
-            BOOL valid = FALSE;
-            const UINT size = GetDlgItemInt(dialog, IDC_IRACING_STREAMING_SIZE, &valid, FALSE);
-            if (!valid || size > INT_MAX)
-            {
-                MessageBoxW(dialog, L"Enter a valid non-negative streamingTextureSize.", L"LaunchMate", MB_OK | MB_ICONERROR);
-                return TRUE;
-            }
-            const std::array<std::string, 3> values{
-                IsDlgButtonChecked(dialog, IDC_IRACING_CAR_PRELOAD) == BST_CHECKED ? "1" : "0",
-                IsDlgButtonChecked(dialog, IDC_IRACING_TRACK_PRELOAD) == BST_CHECKED ? "1" : "0",
-                std::to_string(size)};
-            std::wstring error;
-            if (!ApplyIniSettings(path, values, error)) MessageBoxW(dialog, error.c_str(), L"LaunchMate", MB_OK | MB_ICONERROR);
-            else
-            {
-                state->iniDirty = false;
-                RefreshStatus(dialog, *state);
-                MessageBoxW(dialog, L"The selected values have been saved to app.ini.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
-            }
-            return TRUE;
-        }
-        case IDC_IRACING_DEFENDER:
-        {
-            const bool remove = state->removeDefenderExclusions;
-            if (state->install.empty() || state->documents.empty() ||
-                (!remove && (!std::filesystem::exists(state->install) || !std::filesystem::exists(state->documents))))
-            {
-                MessageBoxW(dialog, L"Both iRacing folders must exist before exclusions can be added.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
-                return TRUE;
-            }
-            // The elevated script checks and verifies existing exclusions itself;
-            // do not run another synchronous Defender query on the UI thread.
-            const std::wstring prompt = (remove ? std::wstring(L"Remove Microsoft Defender folder exclusions for:\n") :
-                std::wstring(L"Add permanent Microsoft Defender folder exclusions for:\n")) + state->install.wstring() +
-                L"\n" + state->documents.wstring() + (remove
-                    ? L"\n\nFiles in these folders will be scanned again. Administrator approval is required."
-                    : L"\n\nFiles in these folders will receive less antivirus scanning. Administrator approval is required.");
-            if (MessageBoxW(dialog, prompt.c_str(), L"Defender exclusions", MB_YESNO | (remove ? MB_ICONQUESTION : MB_ICONWARNING)) != IDYES) return TRUE;
-            const auto script = DefenderExclusionScript(state->install.wstring(), state->documents.wstring(), remove);
-            const DWORD result = RunElevatedPowerShell(script);
-            if (result == 0)
-            {
-                state->defenderVerifiedThisSession = !remove;
-                state->removeDefenderExclusions = !remove;
-                MessageBoxW(dialog, remove ? L"Both Defender exclusions were removed and verified in the administrator session." :
-                    L"Both Defender exclusions were verified in the administrator session.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
-            }
-            else
-            {
-                const wchar_t* message = result == 2
-                    ? L"Defender did not apply the requested change to one or both exclusions. Check Windows Security or organization policies."
-                    : result == 3
-                        ? L"Defender still did not allow the exclusions to be viewed with administrator rights."
-                        : L"The Defender exclusions could not be changed. Check the administrator prompt and Defender settings.";
-                MessageBoxW(dialog, message, L"LaunchMate", MB_OK | MB_ICONERROR);
-            }
-            RefreshStatus(dialog, *state);
-            return TRUE;
-        }
-        }
-        return FALSE;
+        DISPLAY_DEVICEW monitor{sizeof(monitor)};
+        display.name = EnumDisplayDevicesW(device.DeviceName, 0, &monitor, 0) && monitor.DeviceString[0]
+            ? monitor.DeviceString : device.DeviceName;
+        display.name += L" (" + std::to_wstring(current.dmPelsWidth) + L" x " + std::to_wstring(current.dmPelsHeight) + L")";
+        check.displays.push_back(std::move(display));
     }
+    return check;
+}
+
+bool SaveIRacingIni(const std::filesystem::path& documents, bool carPreload, bool trackPreload, int streamingTextureSize, std::wstring& error)
+{
+    if (documents.empty()) { error = L"The Windows Documents folder could not be found."; return false; }
+    if (IsIRacingRunning()) { error = L"Close iRacing first, otherwise it overwrites app.ini."; return false; }
+    const std::array<std::string, 3> values{carPreload ? "1" : "0", trackPreload ? "1" : "0",
+        std::to_string(std::max(0, streamingTextureSize))};
+    return ApplyIniSettings(documents / L"app.ini", values, error);
+}
+
+bool ChangeIRacingDefenderExclusions(const std::filesystem::path& install, const std::filesystem::path& documents, bool remove, std::wstring& error)
+{
+    std::error_code ignored;
+    if (install.empty() || documents.empty() ||
+        (!remove && (!std::filesystem::exists(install, ignored) || !std::filesystem::exists(documents, ignored))))
+    {
+        error = L"Both iRacing folders must exist.";
+        return false;
+    }
+    const DWORD result = RunElevatedPowerShell(DefenderExclusionScript(install.wstring(), documents.wstring(), remove));
+    if (result == 0) return true;
+    error = result == 2 ? L"Defender did not apply the change. Check Windows Security or your organization's policies."
+        : result == 3 ? L"Defender does not allow the exclusions to be read, even with administrator rights."
+        : L"The exclusions could not be changed. The administrator prompt may have been declined.";
+    return false;
 }
 
 bool IsIRacingRule(const WatchedProcessRule& rule)
@@ -1169,32 +654,6 @@ bool ActivatePowerScheme(const std::wstring& schemeGuid, GUID& previousScheme)
 bool RestorePowerScheme(const GUID& scheme)
 {
     return PowerSetActiveScheme(nullptr, &scheme) == ERROR_SUCCESS;
-}
-
-HWND CreateIRacingPerformancePane(HINSTANCE instance, HWND parent, WatchedProcessRule& rule)
-{
-    EnsureDefaultPerformanceActions(rule);
-    auto* state = new DialogState{&rule};
-    HWND pane = CreateDialogParamW(instance, MAKEINTRESOURCEW(IDD_IRACING_PERFORMANCE_PANE), parent, DialogProc, reinterpret_cast<LPARAM>(state));
-    if (!pane) delete state;
-    return pane;
-}
-
-void SaveIRacingPerformancePane(HWND pane)
-{
-    if (!pane) return;
-    auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(pane, GWLP_USERDATA));
-    if (!state || !state->loaded) return;
-    const int selected = static_cast<int>(SendDlgItemMessageW(pane, IDC_IRACING_PLAN, CB_GETCURSEL, 0, 0));
-    state->rule->powerSchemeGuid = selected > 0 && static_cast<size_t>(selected - 1) < state->schemes.size()
-        ? GuidText(state->schemes[static_cast<size_t>(selected - 1)].id) : L"";
-}
-
-void RefreshIRacingPerformancePane(HWND pane)
-{
-    if (!pane) return;
-    auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(pane, GWLP_USERDATA));
-    if (state) RefreshStatus(pane, *state);
 }
 
 MpoState ReadMpoState()

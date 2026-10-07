@@ -624,3 +624,26 @@ std::vector<DetectedProcessEntry> CaptureBackgroundApps(const std::wstring& watc
     }
     return detectedProcesses_;
 }
+
+std::vector<std::wstring> RunningProcessNames()
+{
+    std::vector<std::wstring> names;
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return names;
+    PROCESSENTRY32W entry{sizeof(entry)};
+    if (Process32FirstW(snapshot, &entry))
+    {
+        do
+        {
+            if (entry.th32ProcessID != 0 && !IsProtectedProcessName(entry.szExeFile)) names.emplace_back(entry.szExeFile);
+        }
+        while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    std::sort(names.begin(), names.end(), [](const auto& left, const auto& right) { return _wcsicmp(left.c_str(), right.c_str()) < 0; });
+    names.erase(std::unique(names.begin(), names.end(), [](const auto& left, const auto& right)
+    {
+        return _wcsicmp(left.c_str(), right.c_str()) == 0;
+    }), names.end());
+    return names;
+}

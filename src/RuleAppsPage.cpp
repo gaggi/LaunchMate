@@ -4,6 +4,7 @@
 #include "ui/BackgroundTask.h"
 #include "Utils.h"
 #include "ui/PageWindow.h"
+#include "ui/RowEditors.h"
 #include "ui/RowList.h"
 #include "ui/SegmentedControl.h"
 
@@ -66,27 +67,6 @@ namespace
             : std::to_wstring(tenths / 10) + L"." + std::to_wstring(tenths % 10) + L" s";
     }
 
-    // Delays are shown in seconds; "0.5" and "0,5" are both accepted.
-    std::wstring SecondsField(int milliseconds)
-    {
-        wchar_t text[32]{};
-        swprintf_s(text, L"%g", std::max(0, milliseconds) / 1000.0);
-        return text;
-    }
-
-    bool ParseSeconds(std::wstring text, int& milliseconds)
-    {
-        std::replace(text.begin(), text.end(), L',', L'.');
-        const auto first = text.find_first_not_of(L" \t");
-        if (first == std::wstring::npos) { milliseconds = 0; return true; }
-        text = text.substr(first, text.find_last_not_of(L" \t") - first + 1);
-        wchar_t* end = nullptr;
-        const double value = std::wcstod(text.c_str(), &end);
-        if (end != text.c_str() + text.size() || value < 0 || value > 3600) return false;
-        milliseconds = static_cast<int>(value * 1000 + 0.5);
-        return true;
-    }
-
     std::wstring PickExecutable(HWND owner)
     {
         wchar_t path[MAX_PATH]{};
@@ -114,6 +94,7 @@ namespace
         void OnCreate() override
         {
             ruleList_.Create(Instance(), Handle(), kRuleListId, HeadingFont(), TextFont());
+            editors_.Attach(ruleList_, Instance(), TextFont());
             ruleList_.SetEmptyText(starting_
                 ? L"Nothing starts yet. Pick apps on the right, for example SimHub or CrewChief."
                 : L"Nothing is closed yet. Pick apps on the right that should not run while you race.");
@@ -277,88 +258,46 @@ namespace
         }
 
         // ---- expanded row ---------------------------------------------------------------
-        struct Editor
-        {
-            HWND control{};
-            int x{};
-            int y{};
-            // Width in DIPs; with stretch, the space to keep free on the right instead.
-            int width{};
-            bool stretch{};
-            // Anchored to the right edge (x is then the distance from it).
-            bool right{};
-        };
-
-        HWND AddEditor(const wchar_t* className, const wchar_t* text, DWORD style, int id, int x, int y, int width,
-            bool stretch = false, bool right = false)
-        {
-            const HWND control = CreateWindowExW(0, className, text, WS_CHILD | style, 0, 0, 10, 10, ruleList_.Handle(),
-                id == 0 ? nullptr : reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), Instance(), nullptr);
-            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(TextFont()), TRUE);
-            if (_wcsicmp(className, L"EDIT") == 0) UiTheme::StyleTextInput(control);
-            editors_.push_back({control, x, y, width, stretch, right});
-            return control;
-        }
-
-        HWND AddFieldLabel(const wchar_t* text, int x, int y, int width)
-        {
-            return AddEditor(L"STATIC", text, SS_CENTERIMAGE | SS_ENDELLIPSIS, 0, x, y, width);
-        }
-
-        HWND AddSecondsField(int id, int milliseconds, int x, int y)
-        {
-            const HWND edit = AddEditor(L"EDIT", SecondsField(milliseconds).c_str(), WS_TABSTOP | ES_AUTOHSCROLL, id, x, y, 64);
-            AddFieldLabel(L"s", x + 70, y, 20);
-            return edit;
-        }
-
-        void DestroyEditors()
-        {
-            for (const auto& editor : editors_) DestroyWindow(editor.control);
-            editors_.clear();
-        }
-
         void BuildEditors()
         {
-            DestroyEditors();
+            editors_.Clear();
             if (expanded_ < 0) return;
             syncing_ = true;
+            editors_.Begin(expanded_ + kFirstItemRow);
             const auto index = static_cast<size_t>(expanded_);
             std::wstring name;
             std::wstring path;
             if (starting_)
             {
                 const auto& program = rule_.programsToLaunch[index];
-                AddFieldLabel(L"Start after", 0, 12, 100);
-                AddSecondsField(kStartDelayId, program.waitTimeMilliseconds, 104, 12);
-                AddFieldLabel(L"Close after exit", 210, 12, 120);
-                AddSecondsField(kCloseDelayId, program.closeDelayMilliseconds, 334, 12);
-                AddFieldLabel(L"Arguments", 0, 48, 100);
-                AddEditor(L"EDIT", program.arguments.c_str(), WS_TABSTOP | ES_AUTOHSCROLL, kArgumentsId, 104, 48, 0, true);
+                editors_.Label(L"Start after", 0, 12, 100);
+                editors_.Seconds(kStartDelayId, program.waitTimeMilliseconds, 104, 12);
+                editors_.Label(L"Close after exit", 210, 12, 120);
+                editors_.Seconds(kCloseDelayId, program.closeDelayMilliseconds, 334, 12);
+                editors_.Label(L"Arguments", 0, 48, 100);
+                editors_.Edit(kArgumentsId, program.arguments, 104, 48, 0);
                 name = program.displayName;
                 path = program.filePath;
             }
             else
             {
                 const auto& action = rule_.processesToStop[index];
-                const HWND graceful = AddEditor(L"BUTTON", L"Ask to close first", WS_TABSTOP | BS_AUTOCHECKBOX, kGracefulId, 0, 12, 190);
-                SendMessageW(graceful, BM_SETCHECK, action.gracefulCloseFirst ? BST_CHECKED : BST_UNCHECKED, 0);
-                AddFieldLabel(L"End it after", 210, 12, 120);
-                AddSecondsField(kForceAfterId, action.forceAfterMilliseconds, 334, 12);
-                AddFieldLabel(L"Reopen after", 0, 48, 100);
-                AddSecondsField(kRestartDelayId, action.restartDelayMilliseconds, 104, 48);
+                editors_.Check(kGracefulId, L"Ask to close first", action.gracefulCloseFirst, 0, 12, 190);
+                editors_.Label(L"End it after", 210, 12, 120);
+                editors_.Seconds(kForceAfterId, action.forceAfterMilliseconds, 334, 12);
+                editors_.Label(L"Reopen after", 0, 48, 100);
+                editors_.Seconds(kRestartDelayId, action.restartDelayMilliseconds, 104, 48);
                 name = action.displayName;
                 path = action.executablePath.empty() ? action.processName : action.executablePath;
             }
-            AddFieldLabel(L"Name", 0, 84, 100);
-            AddEditor(L"EDIT", name.c_str(), WS_TABSTOP | ES_AUTOHSCROLL, kNameId, 104, 84, 240);
-            AddFieldLabel(L"Program", 0, 120, 100);
-            AddEditor(L"STATIC", path.c_str(), SS_CENTERIMAGE | SS_PATHELLIPSIS, 0, 104, 120, 112, true);
-            AddEditor(L"BUTTON", L"Change...", WS_TABSTOP | BS_PUSHBUTTON, kChangePathId, 100, 118, 100, false, true);
+            editors_.Label(L"Name", 0, 84, 100);
+            editors_.Edit(kNameId, name, 104, 84, 240);
+            editors_.Label(L"Program", 0, 120, 100);
+            editors_.Button(kChangePathId, L"Change...", 104, 118, 100);
+            editors_.Add(L"STATIC", path.c_str(), SS_CENTERIMAGE | SS_PATHELLIPSIS, 0, 214, 120, 0);
             syncing_ = false;
             UpdateEditorStates();
-            PositionEditors();
-            for (const auto& editor : editors_) ShowWindow(editor.control, SW_SHOW);
+            editors_.Position();
         }
 
         // Delays only matter when their switch is on.
@@ -367,25 +306,11 @@ namespace
             if (expanded_ < 0) return;
             const auto index = static_cast<size_t>(expanded_);
             if (starting_)
-                EnableWindow(GetDlgItem(ruleList_.Handle(), kCloseDelayId), rule_.programsToLaunch[index].closeWhenGameStops);
+                EnableWindow(editors_.Get(kCloseDelayId), rule_.programsToLaunch[index].closeWhenGameStops);
             else
             {
-                EnableWindow(GetDlgItem(ruleList_.Handle(), kForceAfterId), rule_.processesToStop[index].gracefulCloseFirst);
-                EnableWindow(GetDlgItem(ruleList_.Handle(), kRestartDelayId), rule_.processesToStop[index].restartAfterWatchProcessEnds);
-            }
-        }
-
-        void PositionEditors()
-        {
-            if (editors_.empty()) return;
-            const RECT area = ruleList_.ExpansionRect(expanded_ + kFirstItemRow);
-            const int width = MulDiv(area.right - area.left, 96, GetDpiForWindow(Handle()));
-            for (const auto& editor : editors_)
-            {
-                int x = editor.right ? width - editor.x : editor.x;
-                int controlWidth = editor.stretch ? std::max(40, width - editor.x - editor.width) : editor.width;
-                if (editor.right) controlWidth = editor.width;
-                MoveWindow(editor.control, area.left + Scale(x), area.top + Scale(editor.y), Scale(controlWidth), Scale(24), TRUE);
+                EnableWindow(editors_.Get(kForceAfterId), rule_.processesToStop[index].gracefulCloseFirst);
+                EnableWindow(editors_.Get(kRestartDelayId), rule_.processesToStop[index].restartAfterWatchProcessEnds);
             }
         }
 
@@ -397,46 +322,35 @@ namespace
             if (expanded_ >= 0) ruleList_.ScrollIntoView(expanded_ + kFirstItemRow);
         }
 
-        std::wstring EditorText(int id) const
-        {
-            wchar_t text[1024]{};
-            GetDlgItemTextW(ruleList_.Handle(), id, text, static_cast<int>(std::size(text)));
-            return text;
-        }
-
         // Applies an edit in the expanded row; returns false if the id is not an editor.
         bool OnEditorCommand(int id, int code)
         {
-            if (expanded_ < 0 || syncing_) return id >= kStartDelayId && id <= kRestartDelayId;
+            const bool editor = id >= kStartDelayId && id <= kRestartDelayId;
+            if (!editor) return false;
+            if (expanded_ < 0 || syncing_) return true;
             const auto index = static_cast<size_t>(expanded_);
             int milliseconds = 0;
-            bool changed = false;
             if (code == EN_CHANGE && (id == kStartDelayId || id == kCloseDelayId || id == kForceAfterId || id == kRestartDelayId))
             {
-                if (!ParseSeconds(EditorText(id), milliseconds)) return true; // Keep the last valid value while typing.
+                if (!RowEditors::ParseSeconds(editors_.Text(id), milliseconds)) return true; // Keep the last valid value while typing.
                 if (id == kStartDelayId) rule_.programsToLaunch[index].waitTimeMilliseconds = milliseconds;
                 else if (id == kCloseDelayId) rule_.programsToLaunch[index].closeDelayMilliseconds = milliseconds;
                 else if (id == kForceAfterId) rule_.processesToStop[index].forceAfterMilliseconds = milliseconds;
                 else rule_.processesToStop[index].restartDelayMilliseconds = milliseconds;
-                changed = true;
             }
             else if (code == EN_CHANGE && id == kArgumentsId && starting_)
             {
-                rule_.programsToLaunch[index].arguments = EditorText(id);
-                changed = true;
+                rule_.programsToLaunch[index].arguments = editors_.Text(id);
             }
             else if (code == EN_CHANGE && id == kNameId)
             {
-                if (starting_) rule_.programsToLaunch[index].displayName = EditorText(id);
-                else rule_.processesToStop[index].displayName = EditorText(id);
-                changed = true;
+                if (starting_) rule_.programsToLaunch[index].displayName = editors_.Text(id);
+                else rule_.processesToStop[index].displayName = editors_.Text(id);
             }
             else if (code == BN_CLICKED && id == kGracefulId && !starting_)
             {
-                rule_.processesToStop[index].gracefulCloseFirst =
-                    SendMessageW(GetDlgItem(ruleList_.Handle(), kGracefulId), BM_GETCHECK, 0, 0) == BST_CHECKED;
+                rule_.processesToStop[index].gracefulCloseFirst = editors_.Checked(kGracefulId);
                 UpdateEditorStates();
-                changed = true;
             }
             else if (code == BN_CLICKED && id == kChangePathId)
             {
@@ -449,19 +363,15 @@ namespace
                     action.executablePath = path;
                     action.processName = std::filesystem::path(path).filename().wstring();
                 }
-                changed = true;
                 context_.scheduleSave();
                 RefreshRuleList();
                 BuildEditors(); // Shows the new path.
                 RefreshCandidates();
                 return true;
             }
-            else return id >= kStartDelayId && id <= kRestartDelayId;
-            if (changed)
-            {
-                context_.scheduleSave();
-                RefreshRuleList();
-            }
+            else return true;
+            context_.scheduleSave();
+            RefreshRuleList();
             return true;
         }
 
@@ -471,7 +381,7 @@ namespace
             else if (!starting_ && index < rule_.processesToStop.size()) rule_.processesToStop.erase(rule_.processesToStop.begin() + static_cast<std::ptrdiff_t>(index));
             else return;
             const int removed = static_cast<int>(index);
-            if (removed == expanded_) { expanded_ = -1; DestroyEditors(); }
+            if (removed == expanded_) { expanded_ = -1; editors_.Clear(); }
             else if (removed < expanded_) --expanded_;
             Changed();
         }
@@ -503,7 +413,7 @@ namespace
             if (OnEditorCommand(id, code)) return true;
             if (id == kRuleListId && code == RowList::kLayoutChanged)
             {
-                PositionEditors();
+                editors_.Position();
                 return true;
             }
             if (id == kRuleListId)
@@ -683,7 +593,7 @@ namespace
         std::vector<Candidate> shown_;
         // Item whose settings are expanded, or -1.
         int expanded_{-1};
-        std::vector<Editor> editors_;
+        RowEditors editors_;
         // Set while the editors are filled, so their change notifications are ignored.
         bool syncing_{};
         std::optional<std::vector<RunningProcessEntry>> running_;

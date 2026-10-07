@@ -6,7 +6,7 @@
 #include "UpdateChecker.h"
 #include "ui/CardList.h"
 #include "ui/NavBar.h"
-#include "RuleActionsDialog.h"
+#include "Pages.h"
 #include "ui/ScrollHost.h"
 #include "ui/StatusPanel.h"
 #include <array>
@@ -46,7 +46,8 @@ private:
         IdExitCards,
         IdRuleBack,
         IdRuleToggleEnabled,
-        IdSectionBack
+        IdSectionBack,
+        IdRuleAppSettings
     };
 
     enum class Page

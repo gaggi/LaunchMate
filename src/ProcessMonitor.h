@@ -64,6 +64,18 @@ private:
         std::unordered_set<DWORD> startedProcessIds;
         std::vector<std::shared_ptr<void>> startedProcessHandles;
         FILETIME launchTime{};
+        // ShellExecute returned a process handle. Its descendants are then owned by
+        // ancestry; same-path processes are only matched when it was unavailable.
+        bool rootProcessKnown{false};
+    };
+
+    struct StoppedProcessRecord
+    {
+        ProcessStopAction action;
+        // Captured from the running instance, so restarts work without a configured
+        // path and keep flags such as --start-minimized.
+        std::wstring executablePath;
+        std::wstring arguments;
     };
 
     struct ProcessSnapshot
@@ -76,15 +88,27 @@ private:
     struct PerformanceTargetState
     {
         unsigned appliedSettings{};
+        unsigned attempts{};
         std::wstring lastFailure;
         bool successReported{};
     };
+
+    // Each watched instance of an active session; null when it could not be opened.
+    using WatchedInstances = std::unordered_map<DWORD, std::shared_ptr<void>>;
 
     void WorkerLoop();
     void CheckRules();
     void ApplySnapshot(const RuntimeConfiguration& configuration, const ProcessSnapshot& snapshot);
     void ProcessEtwEvents();
+    void RestartEtw(const RuntimeConfiguration& configuration);
+    std::unordered_set<std::wstring> EtwProcessKeys(const RuntimeConfiguration& configuration) const;
     void RefreshEtwProcessKeys(const RuntimeConfiguration& configuration);
+    void ActivateRule(const RuntimeConfiguration& configuration, const RuntimeRule& rule, const std::vector<DWORD>& processIds);
+    void SyncWatchedInstances(const std::wstring& processKey, const std::vector<DWORD>& processIds);
+    void TrackWatchedInstance(const std::wstring& processKey, DWORD processId);
+    void OnWatchedInstanceGone(const RuntimeConfiguration& configuration, const std::wstring& processKey, DWORD processId);
+    bool AllActiveInstancesTracked() const;
+    void WaitForWork(const RuntimeConfiguration& configuration, DWORD timeoutMs);
     void CacheProcessState(const std::wstring& processKey, bool running);
     void CacheProcessStates(const RuntimeConfiguration& configuration, const ProcessSnapshot& snapshot);
     void FinishRule(const RuntimeRule& rule);
@@ -94,6 +118,7 @@ private:
     void RestoreMonitorSetupForRule(const RuntimeRule& rule, ULONGLONG exitTick);
     void ExecuteExitActions(const RuntimeRule& rule, ULONGLONG exitTick);
     void StopProgramsForRule(const RuntimeRule& rule);
+    void StopConfiguredProcesses(const RuntimeRule& rule);
     ProcessSnapshot CaptureProcessSnapshot(
         bool includeProcessTree,
         const std::unordered_set<std::wstring>* processKeyFilter = nullptr) const;
@@ -109,6 +134,7 @@ private:
 
     std::shared_ptr<const RuntimeConfiguration> runtimeConfiguration_;
     StatusCallback statusCallback_;
+    std::mutex lifecycleMutex_;
     std::atomic<bool> running_{false};
     std::atomic<DWORD> idlePollIntervalMs_{1000};
     std::atomic<DWORD> activePollIntervalMs_{1000};
@@ -118,8 +144,9 @@ private:
     EtwProcessListener etwProcessListener_;
     std::mutex etwEventsMutex_;
     std::vector<EtwProcessListener::ProcessEvent> pendingEtwEvents_;
-    std::unordered_map<std::wstring, std::unordered_set<DWORD>> etwProcessIds_;
+    std::unordered_map<std::wstring, WatchedInstances> watchedInstances_;
     std::atomic<bool> etwInitialSnapshotComplete_{false};
+    int etwRestarts_{0};
     std::thread worker_;
     std::mutex mutex_;
     // The UI reads the same snapshot that drives rule transitions.  Keeping this
@@ -130,7 +157,7 @@ private:
     // Keep the settings that actually started a session, even if its rule is edited/deleted.
     std::unordered_map<std::wstring, RuntimeRule> activeRules_;
     std::map<std::wstring, std::vector<LaunchedProgramRecord>> startedPrograms_;
-    std::map<std::wstring, std::vector<ProcessStopAction>> stoppedProcesses_;
+    std::map<std::wstring, std::vector<StoppedProcessRecord>> stoppedProcesses_;
     std::map<std::wstring, MonitorPowerSetup> previousMonitorSetups_;
     std::map<std::wstring, GUID> previousPowerSchemes_;
     std::map<std::wstring, std::unordered_map<size_t, std::unordered_map<DWORD, PerformanceTargetState>>> performanceTargetStates_;

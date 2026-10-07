@@ -18,6 +18,9 @@ namespace
     // Kernel-Process publishes its analytic ProcessStart/ProcessStop events
     // under both WINEVENT_KEYWORD_PROCESS and the analytic-channel keyword.
     constexpr ULONGLONG kProcessKeyword = 0x8000000000000010ULL;
+    // RTLostEventGuid: real-time consumers receive this when buffers or events were dropped.
+    constexpr GUID kRealTimeLostEvent{
+        0x6a399ae0, 0x4bc6, 0x4de9, {0x87, 0x0b, 0x36, 0x57, 0xf8, 0x94, 0x7e, 0x7e}};
 
     std::wstring NormalizeProcessName(std::wstring name)
     {
@@ -92,6 +95,17 @@ namespace
         std::copy(loggerName.c_str(), loggerName.c_str() + loggerName.size() + 1, name);
         return storage;
     }
+
+    // One fixed name per executable: a session orphaned by a crash is reclaimed on the
+    // next start instead of piling up until Windows runs out of logger slots.
+    std::wstring SessionName()
+    {
+        wchar_t module[MAX_PATH]{};
+        const DWORD length = GetModuleFileNameW(nullptr, module, static_cast<DWORD>(std::size(module)));
+        const auto stem = length != 0 && length < std::size(module)
+            ? std::filesystem::path(module).stem().wstring() : std::wstring(L"LaunchMate");
+        return L"LaunchMate ETW " + stem;
+    }
 }
 
 EtwProcessListener::EtwProcessListener(ProcessEventCallback callback)
@@ -108,9 +122,13 @@ bool EtwProcessListener::Start(const std::unordered_set<std::wstring>& watchedPr
 {
     Stop();
     UpdateWatchedProcessKeys(watchedProcessKeys);
-    if (watchedProcessKeys.empty()) return true;
 
-    sessionName_ = L"LaunchMate ETW " + std::to_wstring(GetCurrentProcessId());
+    sessionName_ = SessionName();
+    {
+        auto staleStorage = TraceProperties(sessionName_);
+        ControlTraceW(0, sessionName_.c_str(), reinterpret_cast<EVENT_TRACE_PROPERTIES*>(staleStorage.data()),
+            EVENT_TRACE_CONTROL_STOP);
+    }
     auto propertiesStorage = TraceProperties(sessionName_);
     auto* properties = reinterpret_cast<EVENT_TRACE_PROPERTIES*>(propertiesStorage.data());
     CoCreateGuid(&properties->Wnode.Guid);
@@ -193,7 +211,13 @@ VOID WINAPI EtwProcessListener::EventRecordCallback(PEVENT_RECORD eventRecord)
 
 void EtwProcessListener::HandleEvent(PEVENT_RECORD eventRecord)
 {
-    if (!active_.load() || !IsEqualGUID(eventRecord->EventHeader.ProviderId, kKernelProcessProvider) ||
+    if (!active_.load()) return;
+    if (IsEqualGUID(eventRecord->EventHeader.ProviderId, kRealTimeLostEvent))
+    {
+        if (callback_) callback_({ProcessEvent::Type::EventsLost});
+        return;
+    }
+    if (!IsEqualGUID(eventRecord->EventHeader.ProviderId, kKernelProcessProvider) ||
         (eventRecord->EventHeader.EventDescriptor.Id != 1 && eventRecord->EventHeader.EventDescriptor.Id != 2)) return;
     DWORD processId = 0;
     if (!ReadDwordProperty(eventRecord, L"ProcessID", processId)) return;
@@ -209,7 +233,7 @@ void EtwProcessListener::HandleEvent(PEVENT_RECORD eventRecord)
             processKey = found->second;
             trackedProcessKeys_.erase(found);
         }
-        if (callback_) callback_({std::move(processKey), processId, true});
+        if (callback_) callback_({ProcessEvent::Type::ProcessStopped, std::move(processKey), processId});
         return;
     }
 
@@ -222,13 +246,16 @@ void EtwProcessListener::HandleEvent(PEVENT_RECORD eventRecord)
         std::scoped_lock lock(mutex_);
         trackedProcessKeys_[processId] = processKey;
     }
-    if (callback_) callback_({processKey, processId, false});
+    if (callback_) callback_({ProcessEvent::Type::ProcessStarted, processKey, processId});
 }
 
 void EtwProcessListener::ConsumeEvents()
 {
     TRACEHANDLE handle = traceHandle_;
     if (handle != INVALID_PROCESSTRACE_HANDLE) ProcessTrace(&handle, 1, nullptr, nullptr);
+    // Stop() clears active_ before ending the session, so this only fires when the
+    // session died on its own (stopped externally, provider failure, ...).
+    if (active_.load() && callback_) callback_({ProcessEvent::Type::SessionEnded});
 }
 
 bool EtwProcessListener::IsWatchedProcess(const std::wstring& imageName) const

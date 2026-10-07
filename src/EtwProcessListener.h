@@ -15,9 +15,19 @@ class EtwProcessListener
 public:
     struct ProcessEvent
     {
+        enum class Type
+        {
+            ProcessStarted,
+            ProcessStopped,
+            // The real-time session dropped events; process state must be resynchronized.
+            EventsLost,
+            // ProcessTrace returned although the listener was not stopped.
+            SessionEnded
+        };
+
+        Type type{Type::ProcessStarted};
         std::wstring imageName;
         DWORD processId{};
-        bool processStopped{};
     };
     using ProcessEventCallback = std::function<void(ProcessEvent)>;
 

@@ -45,6 +45,193 @@ bool MonitorPowerController::ApplySetup(const MonitorPowerSetup&, const std::fun
 
 struct ProcessMonitorTestAccess
 {
+    static std::wstring TestExecutable()
+    {
+        wchar_t executable[32768]{};
+        Require(GetModuleFileNameW(nullptr, executable, 32768) != 0, "Test executable unavailable");
+        return executable;
+    }
+
+    // Disposable copy of the test executable; terminated when the last reference goes.
+    static std::shared_ptr<void> SpawnChild(const std::wstring& path, const wchar_t* mode)
+    {
+        std::wstring command = L"\"" + path + L"\" " + mode;
+        STARTUPINFOW startup{sizeof(startup)};
+        PROCESS_INFORMATION info{};
+        Require(CreateProcessW(path.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+            nullptr, nullptr, &startup, &info) != FALSE, "Could not create disposable test child");
+        CloseHandle(info.hThread);
+        return std::shared_ptr<void>(info.hProcess, [](void* process)
+        {
+            if (WaitForSingleObject(process, 0) == WAIT_TIMEOUT) TerminateProcess(process, 0);
+            WaitForSingleObject(process, 2000);
+            CloseHandle(process);
+        });
+    }
+
+    static bool WaitForTopLevelWindow(DWORD processId)
+    {
+        struct Search { DWORD processId; bool found; } search{processId, false};
+        for (int attempt = 0; attempt < 100 && !search.found; ++attempt)
+        {
+            EnumWindows([](HWND window, LPARAM parameter) -> BOOL
+            {
+                auto& search = *reinterpret_cast<Search*>(parameter);
+                DWORD owner = 0;
+                GetWindowThreadProcessId(window, &owner);
+                if (owner == search.processId) search.found = true;
+                return !search.found;
+            }, reinterpret_cast<LPARAM>(&search));
+            if (!search.found) Sleep(50);
+        }
+        return search.found;
+    }
+
+    static bool Running(const std::shared_ptr<void>& process)
+    {
+        return WaitForSingleObject(process.get(), 0) == WAIT_TIMEOUT;
+    }
+
+    static void TestGracefulProgramClose()
+    {
+        const auto executable = TestExecutable();
+        const auto windowed = SpawnChild(executable, L"--idle-child-pump");
+        Require(WaitForTopLevelWindow(GetProcessId(windowed.get())), "Windowed test child did not create its window");
+        FILETIME launchTime{};
+        GetSystemTimeAsFileTime(&launchTime);
+        const auto unrelated = SpawnChild(executable, L"--idle-child");
+
+        ProcessMonitor monitor([](const auto&) {});
+        monitor.running_ = true;
+        ProcessMonitor::RuntimeRule rule;
+        rule.processKey = L"graceful-test";
+        ProcessMonitor::LaunchedProgramRecord record;
+        record.program.displayName = L"graceful child";
+        record.executablePath = executable;
+        record.launchTime = launchTime;
+        record.rootProcessKnown = true;
+        record.startedProcessHandles.push_back(windowed);
+        monitor.startedPrograms_[rule.processKey].push_back(std::move(record));
+        const auto start = GetTickCount64();
+        monitor.StopProgramsForRule(rule);
+        DWORD exitCode = 0;
+        Require(GetExitCodeProcess(windowed.get(), &exitCode) != FALSE && exitCode == 7,
+            "Launched program was terminated instead of closed through its window");
+        Require(GetTickCount64() - start < 2500, "Graceful close waited for the full grace period");
+        Require(Running(unrelated), "Same-executable process started by someone else was closed");
+        std::cout << "Launched program closed gracefully; unrelated same-path instance kept.\n";
+    }
+
+    static void TestLaunchIgnoresUnrelatedWindows()
+    {
+        const auto executable = TestExecutable();
+        const auto directory = std::filesystem::temp_directory_path() /
+            (L"LaunchMate-unrelated-test-" + std::to_wstring(GetCurrentProcessId()));
+        std::filesystem::create_directory(directory);
+        const auto childPath = directory / L"LaunchMateOwnedChild.exe";
+        std::filesystem::copy_file(executable, childPath, std::filesystem::copy_options::overwrite_existing);
+        struct Cleanup
+        {
+            std::filesystem::path file, directory;
+            ~Cleanup() { std::error_code error; std::filesystem::remove(file, error); std::filesystem::remove(directory, error); }
+        } cleanup{childPath, directory};
+
+        ProcessMonitor monitor([](const auto&) {});
+        monitor.running_ = true;
+        ProcessMonitor::RuntimeRule rule;
+        rule.processKey = L"unrelated-window-test";
+        LaunchProgram program;
+        program.displayName = L"owned child";
+        program.filePath = childPath.wstring();
+        program.arguments = L"--idle-child";
+        rule.programsToLaunch.push_back(program);
+
+        // A window the user opens while the launch settles must not be adopted.
+        std::shared_ptr<void> unrelated;
+        std::thread opener([&] { Sleep(300); unrelated = SpawnChild(executable, L"--idle-child-window"); });
+        monitor.StartProgramsForRule(rule);
+        opener.join();
+        Require(unrelated != nullptr, "Unrelated test window was not opened");
+        const auto& records = monitor.startedPrograms_.at(rule.processKey);
+        Require(records.size() == 1 && records[0].rootProcessKnown, "Launch record missing");
+        Require(!records[0].startedProcessIds.contains(GetProcessId(unrelated.get())),
+            "Unrelated windowed process was adopted by a launch");
+        const auto owned = records[0].startedProcessHandles.front();
+        monitor.StopProgramsForRule(rule);
+        Require(!Running(owned), "Launched program was not closed");
+        Require(Running(unrelated), "Unrelated windowed process was closed with the launched program");
+        std::cout << "Launch ownership ignores unrelated windows.\n";
+    }
+
+    static void TestStopActionCapturesRestartArguments()
+    {
+        const auto executable = TestExecutable();
+        const auto child = SpawnChild(executable, L"--idle-child");
+        ProcessMonitor monitor([](const auto&) {});
+        monitor.running_ = true;
+        ProcessMonitor::RuntimeRule rule;
+        rule.processKey = L"restart-arguments-test";
+        ProcessStopAction action;
+        action.processName = std::filesystem::path(executable).filename().wstring();
+        action.restartAfterWatchProcessEnds = true;
+        action.forceAfterMilliseconds = 500;
+        rule.processesToStop.push_back(action);
+        monitor.StopConfiguredProcesses(rule);
+        Require(!Running(child), "Stop action did not stop the test child");
+        const auto& records = monitor.stoppedProcesses_.at(rule.processKey);
+        Require(records.size() == 1, "Stopped process was not recorded for restart");
+        Require(records[0].arguments == L"--idle-child", "Restart arguments were not captured");
+        Require(_wcsicmp(records[0].executablePath.c_str(), executable.c_str()) == 0,
+            "Restart path was not captured from the running process");
+        std::cout << "Stop action captured restart path and arguments.\n";
+    }
+
+    static void TestEtwInstanceHandles()
+    {
+        using EventType = EtwProcessListener::ProcessEvent::Type;
+        const auto executable = TestExecutable();
+        const auto child = SpawnChild(executable, L"--idle-child");
+        std::vector<std::wstring> statuses;
+        ProcessMonitor monitor([&](const auto& status) { statuses.push_back(status); });
+        AppConfiguration config;
+        WatchedProcessRule rule;
+        rule.displayName = L"Handle test";
+        rule.processName = std::filesystem::path(executable).filename().wstring();
+        config.watchedProcesses.push_back(rule);
+        monitor.UpdateConfiguration(config);
+        const auto configuration = monitor.runtimeConfiguration_;
+        const auto key = configuration->watchedRules.at(0).processKey;
+        monitor.running_ = true;
+        monitor.usingEtw_ = true;
+        monitor.etwInitialSnapshotComplete_ = true;
+
+        const DWORD childId = GetProcessId(child.get());
+        monitor.pendingEtwEvents_.push_back({EventType::ProcessStarted, key, childId});
+        monitor.ProcessEtwEvents();
+        Require(monitor.activeRules_.contains(key) && monitor.watchedInstances_.at(key).at(childId) != nullptr,
+            "ETW start did not track the watched instance handle");
+
+        // No ETW stop event: the process handle alone must end the session.
+        Require(TerminateProcess(child.get(), 0) != FALSE, "Could not stop handle test child");
+        ResetEvent(monitor.wakeEvent_);
+        monitor.WaitForWork(*configuration, 2000);
+        Require(monitor.activeRules_.empty(), "Watched exit was not detected from its process handle");
+        monitor.pendingEtwEvents_.push_back({EventType::ProcessStopped, key, childId});
+        monitor.ProcessEtwEvents();
+        const auto ended = std::count_if(statuses.begin(), statuses.end(), [](const auto& status)
+        {
+            return status.find(L"session ended") != std::wstring::npos;
+        });
+        Require(ended == 1, "A late ETW stop event ended the session twice");
+
+        monitor.pendingEtwEvents_.push_back({EventType::EventsLost});
+        monitor.ProcessEtwEvents();
+        Require(!monitor.etwInitialSnapshotComplete_, "Lost ETW events did not request a resynchronization");
+        monitor.usingEtw_ = false;
+        monitor.Stop();
+        std::cout << "ETW sessions end through process handles; lost events trigger a resync.\n";
+    }
+
     static void TestPerformanceSettings()
     {
         HANDLE currentToken = nullptr;
@@ -101,6 +288,16 @@ struct ProcessMonitorTestAccess
         monitor.ApplyPerformanceActions(rule, snapshot);
         const auto& finalState = monitor.performanceTargetStates_.at(rule.processKey).at(0).at(child.dwProcessId);
         Require(finalState.successReported, "Failed performance setting was not retried");
+
+        ProcessMonitor::RuntimeRule invalidRule;
+        invalidRule.processKey = L"performance-retry-limit-test.exe";
+        ProcessPerformanceAction invalid;
+        invalid.processName = action.processName;
+        invalid.memoryPriority = 6;
+        invalidRule.processPerformanceActions.push_back(invalid);
+        for (int attempt = 0; attempt < 8; ++attempt) monitor.ApplyPerformanceActions(invalidRule, snapshot);
+        Require(monitor.performanceTargetStates_.at(invalidRule.processKey).at(0).at(child.dwProcessId).attempts == 5,
+            "Permanently failing performance settings were retried without limit");
 
         HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, child.dwProcessId);
         Require(process != nullptr, "Could not inspect performance test child");
@@ -563,6 +760,34 @@ int main(int argc, char** argv)
         Sleep(60000);
         return 0;
     }
+    if (argc == 2 && std::string(argv[1]) == "--idle-child-pump")
+    {
+        // Closes on WM_CLOSE with a distinctive exit code, unlike TerminateProcess.
+        const wchar_t className[] = L"LaunchMateCoreTestPumpWindow";
+        WNDCLASSW windowClass{};
+        windowClass.lpfnWndProc = [](HWND window, UINT message, WPARAM wParam, LPARAM lParam) -> LRESULT
+        {
+            if (message == WM_DESTROY) { PostQuitMessage(7); return 0; }
+            return DefWindowProcW(window, message, wParam, lParam);
+        };
+        windowClass.hInstance = GetModuleHandleW(nullptr);
+        windowClass.lpszClassName = className;
+        RegisterClassW(&windowClass);
+        if (!CreateWindowExW(0, className, L"LaunchMate pump child", WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT, CW_USEDEFAULT, 320, 200, nullptr, nullptr, windowClass.hInstance, nullptr)) return 2;
+        MSG message{};
+        const auto deadline = GetTickCount64() + 60000;
+        while (GetTickCount64() < deadline)
+        {
+            if (MsgWaitForMultipleObjects(0, nullptr, FALSE, 100, QS_ALLINPUT) != WAIT_OBJECT_0) continue;
+            while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
+            {
+                if (message.message == WM_QUIT) return static_cast<int>(message.wParam);
+                DispatchMessageW(&message);
+            }
+        }
+        return 0;
+    }
     if (argc == 2 && std::string(argv[1]) == "--idle-child-check-directory")
     {
         wchar_t executable[32768]{};
@@ -584,6 +809,10 @@ int main(int argc, char** argv)
         ProcessMonitorTestAccess::TestBatchStop();
         ProcessMonitorTestAccess::TestDetectionAndLaunch();
         ProcessMonitorTestAccess::TestHandoffOwnership();
+        ProcessMonitorTestAccess::TestGracefulProgramClose();
+        ProcessMonitorTestAccess::TestLaunchIgnoresUnrelatedWindows();
+        ProcessMonitorTestAccess::TestStopActionCapturesRestartArguments();
+        ProcessMonitorTestAccess::TestEtwInstanceHandles();
         std::cout << "JSON, atomic persistence, and monitor session regression tests passed.\n";
         return 0;
     }

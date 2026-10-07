@@ -15,6 +15,11 @@
 // a toggle switch, one text button and icon buttons. Clicks arrive at the parent as
 // WM_COMMAND(MAKEWPARAM(id, notification), hwnd); NotifiedRow() and
 // NotifiedIconButton() say which row and icon button were used.
+//
+// A row with expandHeight > 0 shows an extra area below its top line. The parent
+// creates edit controls there as children of Handle(), places them with
+// ExpansionRect() and moves them again on kLayoutChanged (scrolling, resizing).
+// Their WM_COMMAND messages are passed on to the parent unchanged.
 class RowList
 {
 public:
@@ -24,7 +29,9 @@ public:
         kButton = 2,
         kIconButton = 3,
         kActivated = 4,
-        kDeleteRequested = 5
+        kDeleteRequested = 5,
+        // Rows moved (scrolled, resized or replaced); reposition controls in expansions.
+        kLayoutChanged = 6
     };
 
     enum class Tone
@@ -55,6 +62,8 @@ public:
         std::vector<wchar_t> iconButtons;
         bool muted{};
         bool selected{};
+        // Height in DIPs of the expanded area below the row; 0 when collapsed.
+        int expandHeight{};
         bool operator==(const Row&) const = default;
     };
 
@@ -76,7 +85,8 @@ public:
             if (!RegisterClassW(&windowClass)) return false;
         }
         id_ = id;
-        window_ = CreateWindowExW(0, kClassName, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL,
+        window_ = CreateWindowExW(WS_EX_CONTROLPARENT, kClassName, nullptr,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WS_CLIPCHILDREN,
             0, 0, 100, 100, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, this);
         if (!window_) return false;
         SetFonts(titleFont, textFont);
@@ -113,6 +123,23 @@ public:
         hover_ = {};
         UpdateScrollRange();
         InvalidateRect(window_, nullptr, FALSE);
+        NotifyLayout();
+    }
+
+    // Client rectangle of a row's expanded area; empty when the row is collapsed.
+    RECT ExpansionRect(int index) const
+    {
+        const auto layouts = Compute();
+        if (index < 0 || index >= static_cast<int>(layouts.size())) return {};
+        RECT rect = layouts[static_cast<size_t>(index)].expansion;
+        OffsetRect(&rect, 0, -scroll_);
+        return rect;
+    }
+
+    // Keeps the expanded area of a row in view, e.g. right after expanding it.
+    void ScrollIntoView(int index)
+    {
+        EnsureVisible(index);
     }
 
 private:
@@ -136,6 +163,7 @@ private:
         RECT pill{};
         RECT text{};
         RECT icon{};
+        RECT expansion{};
         bool firstInCard{};
         bool lastInCard{};
     };
@@ -176,6 +204,12 @@ private:
     int RowHeight(const Row& row) const
     {
         if (row.header) return Scale(34);
+        return LineHeight(row) + Scale(row.expandHeight);
+    }
+
+    // Height of the row's top line, without an expanded area.
+    int LineHeight(const Row& row) const
+    {
         return Scale(row.detail.empty() ? 44 : 58);
     }
 
@@ -206,8 +240,11 @@ private:
             layout.firstInCard = !inCard;
             inCard = true;
             layout.bounds = {0, y, right, y + height};
+            const int lineHeight = LineHeight(row);
+            if (row.expandHeight > 0)
+                layout.expansion = {Scale(14), y + lineHeight, right - Scale(14), y + height - Scale(10)};
             int x = right - Scale(12);
-            const int middle = y + height / 2;
+            const int middle = y + lineHeight / 2;
             for (size_t button = 0; button < row.iconButtons.size(); ++button)
             {
                 layout.iconButtons.push_back({x - Scale(30), middle - Scale(15), x, middle + Scale(15)});
@@ -243,7 +280,7 @@ private:
                 layout.icon = {left, middle - Scale(10), left + Scale(20), middle + Scale(10)};
                 left += Scale(32);
             }
-            layout.text = {left, y, std::max<int>(left, x), y + height};
+            layout.text = {left, y, std::max<int>(left, x), y + lineHeight};
             y += height;
         }
         ReleaseDC(window_, dc);
@@ -283,6 +320,12 @@ private:
         scroll_ = position;
         SetScrollPos(window_, SB_VERT, scroll_, TRUE);
         InvalidateRect(window_, nullptr, FALSE);
+        NotifyLayout();
+    }
+
+    void NotifyLayout()
+    {
+        SendMessageW(GetParent(window_), WM_COMMAND, MAKEWPARAM(id_, kLayoutChanged), reinterpret_cast<LPARAM>(window_));
     }
 
     void EnsureVisible(int index)
@@ -305,6 +348,8 @@ private:
             const auto& row = rows_[index];
             const auto& layout = layouts[index];
             if (row.header || !PtInRect(&layout.bounds, point)) continue;
+            // The expanded area belongs to the parent's controls.
+            if (PtInRect(&layout.expansion, point)) return {};
             for (size_t button = 0; button < layout.iconButtons.size(); ++button)
                 if (PtInRect(&layout.iconButtons[button], point)) return {static_cast<int>(index), PartKind::IconButton, static_cast<int>(button)};
             if (!row.button.empty() && PtInRect(&layout.button, point)) return {static_cast<int>(index), PartKind::Button};
@@ -393,6 +438,7 @@ private:
         auto layout = base;
         const auto shift = [this](RECT& rect) { OffsetRect(&rect, 0, -scroll_); };
         shift(layout.bounds); shift(layout.text); shift(layout.toggle); shift(layout.button); shift(layout.pill); shift(layout.icon);
+        shift(layout.expansion);
         for (auto& rect : layout.iconButtons) shift(rect);
         SetBkMode(dc, TRANSPARENT);
 
@@ -406,7 +452,9 @@ private:
 
         const COLORREF border = RGB(220, 222, 225);
         const bool hovered = hover_.row == static_cast<int>(index);
-        COLORREF fill = row.selected ? RGB(232, 240, 252) : hovered && hover_.kind == PartKind::Body ? RGB(248, 249, 251) : UiTheme::Surface;
+        // Expanded rows stay white: the controls in them are drawn on white.
+        COLORREF fill = row.selected ? RGB(232, 240, 252)
+            : hovered && hover_.kind == PartKind::Body && row.expandHeight == 0 ? RGB(248, 249, 251) : UiTheme::Surface;
         // Rows of a card share one rounded outline; inner edges are hairlines.
         RECT outline = layout.bounds;
         const int radius = Scale(10);
@@ -418,6 +466,11 @@ private:
         if (!layout.firstInCard)
         {
             const RECT line{layout.bounds.left + Scale(14), layout.bounds.top, layout.bounds.right - Scale(14), layout.bounds.top + 1};
+            FillRect(dc, line, RGB(234, 236, 239));
+        }
+        if (row.expandHeight > 0)
+        {
+            const RECT line{layout.expansion.left, layout.expansion.top, layout.expansion.right, layout.expansion.top + 1};
             FillRect(dc, line, RGB(234, 236, 239));
         }
         if (focused)
@@ -554,7 +607,33 @@ private:
         switch (message)
         {
         case WM_ERASEBKGND:
+        case WM_PRINTCLIENT:
+        {
+            // Themed child controls (checkboxes) ask their parent to paint behind them;
+            // they always sit on a white card.
+            const HDC dc = reinterpret_cast<HDC>(wParam);
+            if (message == WM_PRINTCLIENT || WindowFromDC(dc) != window_)
+            {
+                RECT client{};
+                GetClientRect(window_, &client);
+                ::FillRect(dc, &client, UiTheme::SurfaceBrush());
+            }
             return 1;
+        }
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLOREDIT:
+        {
+            const HDC dc = reinterpret_cast<HDC>(wParam);
+            const HWND control = reinterpret_cast<HWND>(lParam);
+            SetBkMode(dc, TRANSPARENT);
+            SetBkColor(dc, UiTheme::Surface);
+            SetTextColor(dc, IsWindowEnabled(control) ? UiTheme::Text : RGB(160, 162, 168));
+            return reinterpret_cast<LRESULT>(UiTheme::SurfaceBrush());
+        }
+        case WM_COMMAND:
+            // Controls in expanded rows report to the page that created them.
+            return SendMessageW(GetParent(window_), WM_COMMAND, wParam, lParam);
         case WM_PAINT:
         {
             PAINTSTRUCT paint{};
@@ -566,6 +645,7 @@ private:
         case WM_SIZE:
             UpdateScrollRange();
             InvalidateRect(window_, nullptr, FALSE);
+            NotifyLayout();
             return 0;
         case WM_VSCROLL:
         {

@@ -82,7 +82,7 @@ gray means "idle". Do not use color as the only signal; pills always carry text.
 | `NavBar` | The sidebar. Page items stay highlighted; non-page items only send a command. Icons are Segoe Fluent glyphs. |
 | `StatusPanel` | The banner at the top: neutral, active (green) or busy (amber), title, detail line and one primary button. |
 | `CardList` | Overviews of objects (rules, profiles, sessions): title, subtitle, status pill, summary chips, chevron. A click opens the object. |
-| `RowList` | Settings-style lists: section headers with cards of rows; a row can have an icon, detail, pill, toggle with label, one text button and icon buttons. |
+| `RowList` | Settings-style lists: section headers with cards of rows; a row can have an icon, detail, pill, toggle with label, one text button and icon buttons. A row can expand to show edit controls below its top line (`expandHeight`, `ExpansionRect()`, `kLayoutChanged`). |
 | `SegmentedControl` | Switching between 2–4 views of the same data (for example sources of a list). |
 | `PageWindow` | Base class for an embedded page: owns its controls, handles their messages, deletes itself with its window. |
 | `ScrollHost` | Container for the current page; scrolls when the window is smaller than the page. |
@@ -97,8 +97,10 @@ the control tells which row or item was used (`NotifiedRow()`, `FocusedIndex()` 
 - **Sidebar pages** for places the user visits: overviews, settings, libraries.
   Sub-pages (one object, one section of it) get a back button with the parent's
   name ("← iRacing") next to the page title.
-- **Small modal dialogs only for one item** (the options of one app, one webhook).
-  Everything else is a page.
+- **Expand a row for an item's settings** (an arrow on the right, or a click on the
+  row). The most important option stays a switch in the row itself; the expanded
+  area holds the rest. Times are entered in seconds. Use a small modal dialog only
+  where a row cannot hold the fields (for example a multi-line JSON payload).
 - **Save immediately.** Toggles and buttons save at once; typing is saved 0.5 s after
   the last keystroke. If something cannot be saved yet, the page says what is
   missing ("Not saved yet: …") instead of showing a message box.

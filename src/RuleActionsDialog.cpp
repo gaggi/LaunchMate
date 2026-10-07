@@ -39,142 +39,12 @@ namespace
         return end != value && *end == L'\0' ? static_cast<int>(parsed) : fallback;
     }
 
-    std::wstring PickExecutable(HWND owner)
-    {
-        wchar_t path[MAX_PATH]{};
-        OPENFILENAMEW info{};
-        info.lStructSize = sizeof(info);
-        info.hwndOwner = owner;
-        info.lpstrFilter = L"Programs (*.exe)\0*.exe\0All files (*.*)\0*.*\0";
-        info.lpstrFile = path;
-        info.nMaxFile = MAX_PATH;
-        info.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-        return GetOpenFileNameW(&info) ? std::wstring(path) : std::wstring{};
-    }
-
-    void SetDefaultName(HWND dialog, const std::wstring& path)
-    {
-        if (GetText(dialog, IDC_ACTION_NAME).empty())
-        {
-            SetDlgItemTextW(dialog, IDC_ACTION_NAME, std::filesystem::path(path).stem().c_str());
-        }
-    }
-
     template<typename T>
     struct ItemDialogState
     {
         T* item{};
         bool accepted{};
     };
-
-    INT_PTR CALLBACK StartActionProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
-    {
-        auto* state = reinterpret_cast<ItemDialogState<LaunchProgram>*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
-        if (message == WM_INITDIALOG)
-        {
-            UiTheme::Apply(dialog);
-            state = reinterpret_cast<ItemDialogState<LaunchProgram>*>(lParam);
-            SetWindowLongPtrW(dialog, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-            const auto& item = *state->item;
-            SetDlgItemTextW(dialog, IDC_ACTION_NAME, item.displayName.c_str());
-            SetDlgItemTextW(dialog, IDC_ACTION_PATH, item.filePath.c_str());
-            SetDlgItemTextW(dialog, IDC_ACTION_ARGUMENTS, item.arguments.c_str());
-            SetDlgItemInt(dialog, IDC_ACTION_DELAY, item.waitTimeMilliseconds, FALSE);
-            CheckDlgButton(dialog, IDC_ACTION_CLOSE, item.closeWhenGameStops ? BST_CHECKED : BST_UNCHECKED);
-            SetDlgItemInt(dialog, IDC_ACTION_CLOSE_DELAY, item.closeDelayMilliseconds, FALSE);
-            return TRUE;
-        }
-        if (message != WM_COMMAND) return FALSE;
-        if (LOWORD(wParam) == IDC_ACTION_BROWSE)
-        {
-            const auto path = PickExecutable(dialog);
-            if (!path.empty()) { SetDlgItemTextW(dialog, IDC_ACTION_PATH, path.c_str()); SetDefaultName(dialog, path); }
-            return TRUE;
-        }
-        if (LOWORD(wParam) == IDOK)
-        {
-            const auto path = GetText(dialog, IDC_ACTION_PATH);
-            if (path.empty()) { MessageBoxW(dialog, L"Select a program first.", L"LaunchMate", MB_OK | MB_ICONINFORMATION); return TRUE; }
-            auto& item = *state->item;
-            item.displayName = GetText(dialog, IDC_ACTION_NAME);
-            item.filePath = path;
-            item.arguments = GetText(dialog, IDC_ACTION_ARGUMENTS);
-            item.waitTimeMilliseconds = GetNumber(dialog, IDC_ACTION_DELAY);
-            item.closeWhenGameStops = IsDlgButtonChecked(dialog, IDC_ACTION_CLOSE) == BST_CHECKED;
-            item.closeDelayMilliseconds = GetNumber(dialog, IDC_ACTION_CLOSE_DELAY);
-            if (item.displayName.empty()) item.displayName = std::filesystem::path(path).stem().wstring();
-            state->accepted = true;
-            EndDialog(dialog, IDOK);
-            return TRUE;
-        }
-        if (LOWORD(wParam) == IDCANCEL) { EndDialog(dialog, IDCANCEL); return TRUE; }
-        return FALSE;
-    }
-
-    INT_PTR CALLBACK StopActionProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
-    {
-        auto* state = reinterpret_cast<ItemDialogState<ProcessStopAction>*>(GetWindowLongPtrW(dialog, GWLP_USERDATA));
-        if (message == WM_INITDIALOG)
-        {
-            UiTheme::Apply(dialog);
-            state = reinterpret_cast<ItemDialogState<ProcessStopAction>*>(lParam);
-            SetWindowLongPtrW(dialog, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-            const auto& item = *state->item;
-            SetDlgItemTextW(dialog, IDC_ACTION_NAME, item.displayName.c_str());
-            SetDlgItemTextW(dialog, IDC_ACTION_PROCESS, item.processName.c_str());
-            SetDlgItemTextW(dialog, IDC_ACTION_PATH, item.executablePath.c_str());
-            CheckDlgButton(dialog, IDC_ACTION_GRACEFUL, item.gracefulCloseFirst ? BST_CHECKED : BST_UNCHECKED);
-            SetDlgItemInt(dialog, IDC_ACTION_FORCE_DELAY, item.forceAfterMilliseconds, FALSE);
-            CheckDlgButton(dialog, IDC_ACTION_RESTART, item.restartAfterWatchProcessEnds ? BST_CHECKED : BST_UNCHECKED);
-            SetDlgItemInt(dialog, IDC_ACTION_RESTART_DELAY, item.restartDelayMilliseconds, FALSE);
-            EnableWindow(GetDlgItem(dialog, IDC_ACTION_RESTART_DELAY), item.restartAfterWatchProcessEnds);
-            return TRUE;
-        }
-        if (message != WM_COMMAND) return FALSE;
-        if (LOWORD(wParam) == IDC_ACTION_BROWSE)
-        {
-            const auto path = PickExecutable(dialog);
-            if (!path.empty())
-            {
-                SetDlgItemTextW(dialog, IDC_ACTION_PATH, path.c_str());
-                SetDlgItemTextW(dialog, IDC_ACTION_PROCESS, std::filesystem::path(path).filename().c_str());
-                SetDefaultName(dialog, path);
-            }
-            return TRUE;
-        }
-        if (LOWORD(wParam) == IDC_ACTION_RESTART)
-        {
-            EnableWindow(GetDlgItem(dialog, IDC_ACTION_RESTART_DELAY), IsDlgButtonChecked(dialog, IDC_ACTION_RESTART) == BST_CHECKED);
-            return TRUE;
-        }
-        if (LOWORD(wParam) == IDOK)
-        {
-            auto process = GetText(dialog, IDC_ACTION_PROCESS);
-            const auto path = GetText(dialog, IDC_ACTION_PATH);
-            if (process.empty() && !path.empty()) process = std::filesystem::path(path).filename().wstring();
-            if (process.empty()) { MessageBoxW(dialog, L"Enter a process name or select a program.", L"LaunchMate", MB_OK | MB_ICONINFORMATION); return TRUE; }
-            const bool restart = IsDlgButtonChecked(dialog, IDC_ACTION_RESTART) == BST_CHECKED;
-            if (restart && path.empty())
-            {
-                MessageBoxW(dialog, L"Select the program path so LaunchMate can restart it later.", L"LaunchMate", MB_OK | MB_ICONINFORMATION);
-                return TRUE;
-            }
-            auto& item = *state->item;
-            item.displayName = GetText(dialog, IDC_ACTION_NAME);
-            item.processName = process;
-            item.executablePath = path;
-            item.gracefulCloseFirst = IsDlgButtonChecked(dialog, IDC_ACTION_GRACEFUL) == BST_CHECKED;
-            item.forceAfterMilliseconds = GetNumber(dialog, IDC_ACTION_FORCE_DELAY, 3000);
-            item.restartAfterWatchProcessEnds = restart;
-            item.restartDelayMilliseconds = GetNumber(dialog, IDC_ACTION_RESTART_DELAY);
-            if (item.displayName.empty()) item.displayName = std::filesystem::path(process).stem().wstring();
-            state->accepted = true;
-            EndDialog(dialog, IDOK);
-            return TRUE;
-        }
-        if (LOWORD(wParam) == IDCANCEL) { EndDialog(dialog, IDCANCEL); return TRUE; }
-        return FALSE;
-    }
 
     INT_PTR CALLBACK HomeActionProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
     {
@@ -472,14 +342,4 @@ HWND CreateRuleSectionPane(
         reinterpret_cast<LPARAM>(state));
     if (!pane) delete state;
     return pane;
-}
-
-bool EditLaunchProgram(HINSTANCE instanceHandle, HWND owner, LaunchProgram& program)
-{
-    return ShowItemDialog(instanceHandle, owner, IDD_START_ACTION, StartActionProc, program);
-}
-
-bool EditStopAction(HINSTANCE instanceHandle, HWND owner, ProcessStopAction& action)
-{
-    return ShowItemDialog(instanceHandle, owner, IDD_STOP_ACTION, StopActionProc, action);
 }

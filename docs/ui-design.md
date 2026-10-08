@@ -84,7 +84,8 @@ gray means "idle". Do not use color as the only signal; pills always carry text.
 | `CardList` | Overviews of objects (rules, profiles, sessions): title, subtitle, status pill, summary chips, chevron. A click opens the object. |
 | `RowList` | Settings-style lists: section headers with cards of rows; a row can have an icon, detail, pill, toggle with label, one text button and icon buttons. A row can expand to show edit controls below its top line (`expandHeight`, `ExpansionRect()`, `kLayoutChanged`). |
 | `SegmentedControl` | Switching between 2–4 views of the same data (for example sources of a list). |
-| `PageWindow` | Base class for an embedded page: owns its controls, handles their messages, deletes itself with its window. |
+| `RowEditors` | The edit controls inside an expanded `RowList` row: `Begin(row)`, then `Label`, `Edit`, `Seconds`, `Check`, `Combo`, `Button` at DIP offsets inside the expansion (width 0 stretches); `Position()` after scrolling or a layout change, `Clear()` when the row collapses. `SecondsText` / `ParseSeconds` convert milliseconds and accept "1,5" as well as "1.5". |
+| `PageWindow` | Base class for an embedded page: owns its controls, handles their messages, deletes itself with its window. `ChooseFromMenu(items, checked, disabled)` shows a pick list as a popup menu at the cursor (empty item = separator) and returns the chosen index or -1. |
 | `ScrollHost` | Container for the current page; scrolls when the window is smaller than the page. |
 | `UiTheme` | Colors, brushes, `Apply()` for native controls in dialogs, `IconFontFace()`. |
 | `BackgroundTask` | Runs slow work (process lists, disk scans) on a worker thread; poll the result from a timer. Cancelling never blocks the UI. |
@@ -99,12 +100,36 @@ the control tells which row or item was used (`NotifiedRow()`, `FocusedIndex()` 
   name ("← iRacing") next to the page title.
 - **Expand a row for an item's settings** (an arrow on the right, or a click on the
   row). The most important option stays a switch in the row itself; the expanded
-  area holds the rest. Times are entered in seconds. Use a small modal dialog only
-  where a row cannot hold the fields (for example a multi-line JSON payload).
+  area holds the rest, including multi-line fields such as a JSON payload. Times
+  are entered in seconds. Only one row is expanded at a time; the arrow flips
+  (`` / ``), a remove button (``) sits right of it. Pages have no
+  edit dialogs any more.
+- **One kind of row per decision.** A yes/no setting is a toggle row; a choice
+  among a few named options is a row with a "Choose..." button that opens
+  `ChooseFromMenu` (current option checked, an explanation as a disabled item when
+  the list is empty); numbers and text go into the expanded area. Group rows under
+  section headers that say when they apply ("When iRacing starts", "When iRacing
+  exits") or what they belong to ("Microsoft Defender").
+- **Settings of one specific program get their own sub-page**, opened from a
+  button in the object's header ("iRacing settings"), shown only when the object
+  is that program. Generic pages (power plan and priorities) stay generic.
+- **Checks are rows, not text boxes.** Each finding is a row with a pill: green
+  for "fine" ("Highest refresh rate", "Excluded"), amber with the fix for
+  "needs attention" ("144 Hz available", "X3D: try Balanced"). A "Check again" row
+  at the end reruns the check in the background.
+- **Files of other programs are saved explicitly.** When saving writes outside the
+  app's own settings (a game's ini file) or needs a condition (the game is
+  closed), use a "Save" row: the button is enabled only when there are changes and
+  saving is possible, an "Unsaved" pill shows pending changes, and the detail line
+  says why saving is blocked ("Close iRacing first") or what happens ("A backup is
+  made first"). Results appear in that detail line, not in a message box.
 - **Save immediately.** Toggles and buttons save at once; typing is saved 0.5 s after
   the last keystroke. If something cannot be saved yet, the page says what is
   missing ("Not saved yet: …") instead of showing a message box.
-- **Confirm only what destroys data** ("Remove the rule for iRacing? …").
+- **Confirm only what destroys data or weakens the system** ("Remove the rule for
+  iRacing? …", "Stop Microsoft Defender from scanning these folders?"). The
+  question names what changes, the risk, and that Windows asks for administrator
+  approval if it does.
 - **Status in the banner**, not in message boxes: what the app is doing, since when.
 - **Pick, don't type.** Offer lists to choose from (installed apps, running
   processes) with a search box and an "Add" button per row; "Browse…" is the fallback.
@@ -120,3 +145,20 @@ the control tells which row or item was used (`NotifiedRow()`, `FocusedIndex()` 
 - Short and concrete: "Asks to close, ends it after 3 s" rather than
   "Graceful close with forced termination after timeout".
 - No "please", no exclamation marks, no "successfully".
+
+## Building and trying a build
+
+- Build exes that you or the user will run inside the repository, for example
+  `cmake -S . -B build\<name> -G Ninja` and `cmake --build build\<name>`, never in
+  `%TEMP%` or a tool's scratch folder. Microsoft Defender quarantined LaunchMate
+  builds run from `%TEMP%` (`Behavior:Win32/Execution.A!ml`,
+  `Trojan:Win32/Bearfoos.A!ml`): an exe in a temp folder that an elevated "start
+  with Windows" logon task points to looks like malware persistence. The build
+  then seems to vanish ("the exe is gone").
+- A build that registers "Start with Windows" rewrites the logon task to its own
+  path. After trying a test build, switch the option off and on again in the
+  version that is normally used, so the task points to a stable location.
+- Never add Defender exclusions for build folders to work around this.
+- Code that writes files with non-ASCII text (tools, scripts) can turn `\u`
+  escapes back into literal characters; check that sources are still ASCII
+  before building.

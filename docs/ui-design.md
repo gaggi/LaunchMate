@@ -102,7 +102,7 @@ the control tells which row or item was used (`NotifiedRow()`, `FocusedIndex()` 
   row). The most important option stays a switch in the row itself; the expanded
   area holds the rest, including multi-line fields such as a JSON payload. Times
   are entered in seconds. Only one row is expanded at a time; the arrow flips
-  (`` / ``), a remove button (``) sits right of it. Pages have no
+  (`\uE70D` / `\uE70E`), a remove button (`\uE711`) sits right of it. Pages have no
   edit dialogs any more.
 - **One kind of row per decision.** A yes/no setting is a toggle row; a choice
   among a few named options is a row with a "Choose..." button that opens

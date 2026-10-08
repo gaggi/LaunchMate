@@ -65,6 +65,16 @@ public:
         InvalidateRect(window_, nullptr, FALSE);
     }
 
+    // Changes the line at the bottom, for example to announce an update; `highlight`
+    // draws it in the accent color.
+    void SetFooter(std::wstring footer, bool highlight)
+    {
+        if (footer == footer_ && highlight == footerHighlight_) return;
+        footer_ = std::move(footer);
+        footerHighlight_ = highlight;
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+
     void SetSelected(int id)
     {
         if (id == selected_) return;
@@ -150,7 +160,7 @@ private:
         }
 
         SelectObject(dc, textFont_);
-        SetTextColor(dc, RGB(136, 135, 128));
+        SetTextColor(dc, footerHighlight_ ? RGB(24, 95, 165) : RGB(136, 135, 128));
         RECT footer{Scale(22), client.bottom - Scale(40), client.right - Scale(10), client.bottom - Scale(16)};
         DrawTextW(dc, footer_.c_str(), -1, &footer, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
@@ -228,6 +238,7 @@ private:
     HWND window_{};
     std::wstring title_;
     std::wstring footer_;
+    bool footerHighlight_{};
     std::vector<Item> items_;
     HFONT titleFont_{};
     HFONT textFont_{};

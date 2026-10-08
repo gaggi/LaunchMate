@@ -95,8 +95,11 @@ private:
     void AddWatchedProcess();
     void RemoveWatchedProcess(int index);
     void HandleTrayCommand(UINT command);
-    void StartUpdateCheck(bool interactive);
-    void BeginUpdateInstall(UpdateReleaseInfo release);
+    // `startup` checks only when enabled in the settings and stays quiet on failure.
+    void StartUpdateCheck(bool startup);
+    void BeginUpdateInstall();
+    // Lets the shown page redraw state it reads from the window (the update check).
+    void RefreshPage();
     void RefreshStatusPanel();
     WatchedProcessRule SelectWatchedProcess();
     int SelectedWatchedIndex() const;
@@ -136,8 +139,7 @@ private:
     bool monitorStopping_{false};
     // Hotkey ids registered last time; configs may have been removed since.
     size_t registeredHotkeys_{0};
-    bool updateCheckInProgress_{false};
-    bool updateInstallInProgress_{false};
+    UpdateState update_;
     bool appliedStartWithWindows_{false};
     bool appliedStartAsAdministrator_{false};
 };

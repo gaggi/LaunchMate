@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Models.h"
+#include "UpdateChecker.h"
 
 #include <functional>
 #include <windows.h>
@@ -18,6 +19,19 @@ enum class RuleSection
     AppSpecific
 };
 
+// Where the update check and install stand; shown in the Settings page's version row.
+struct UpdateState
+{
+    enum class Phase { Idle, Checking, UpToDate, Available, Downloading, Failed };
+    Phase phase{Phase::Idle};
+    std::wstring message;
+    UpdateReleaseInfo release;
+};
+
+// The main window sends WM_TIMER with this id to the shown page when state the page
+// displays (the update check) has changed.
+inline constexpr UINT_PTR kPageRefreshTimer = 90;
+
 // What the main window shares with the pages it embeds.
 struct PageContext
 {
@@ -29,12 +43,17 @@ struct PageContext
     std::function<void()> scheduleSave;
     // Saves right away; needed when saving has side effects such as the startup task.
     std::function<void()> saveNow;
+
+    // Settings page
+    const UpdateState* update{};
+    std::function<void()> checkForUpdates;
+    std::function<void()> installUpdate;
 };
 
 // Each function creates a page as a child of `parent` (the page scroll host). The
 // page owns itself and is gone when its window is destroyed. Rules passed by
 // reference must outlive the page.
-HWND CreateSettingsPage(const PageContext& context, HWND parent, std::function<void()> checkForUpdates);
+HWND CreateSettingsPage(const PageContext& context, HWND parent);
 HWND CreateDisplaysPage(const PageContext& context, HWND parent, std::function<bool(size_t)> applySetup);
 HWND CreateServicesPage(const PageContext& context, HWND parent, WatchedProcessRule& rule);
 // For RuleSection::StartPrograms and RuleSection::StopProcesses.

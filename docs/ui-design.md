@@ -79,7 +79,7 @@ gray means "idle". Do not use color as the only signal; pills always carry text.
 
 | Control | Use it for |
 | --- | --- |
-| `NavBar` | The sidebar. Page items stay highlighted; non-page items only send a command. Icons are Segoe Fluent glyphs. |
+| `NavBar` | The sidebar. Page items stay highlighted; non-page items only send a command. Icons are Segoe Fluent glyphs. `SetFooter(text, highlight)` changes the version line, for example to "Update available: 0.4.0" in the accent color. |
 | `StatusPanel` | The banner at the top: neutral, active (green) or busy (amber), title, detail line and one primary button. |
 | `CardList` | Overviews of objects (rules, profiles, sessions): title, subtitle, status pill, summary chips, chevron. A count (`trailing`) is a gray pill centered next to the chevron. A click opens the object. |
 | `RowList` | Settings-style lists: section headers with cards of rows; a row can have an icon, detail, pill, toggle with label, one text button and icon buttons. A row can expand to show edit controls below its top line (`expandHeight`, `ExpansionRect()`, `kLayoutChanged`). |
@@ -131,6 +131,10 @@ the control tells which row or item was used (`NotifiedRow()`, `FocusedIndex()` 
   question names what changes, the risk, and that Windows asks for administrator
   approval if it does.
 - **Status in the banner**, not in message boxes: what the app is doing, since when.
+- **Updates without dialogs.** The version row in Settings shows the state: "Check now",
+  "Checking GitHub...", an "Up to date" pill, or an "Update available" pill with an
+  "Install update" button and an icon button for the release page. A check at startup
+  only changes that row and the sidebar footer; a failed startup check stays silent.
 - **Pick, don't type.** Offer lists to choose from (installed apps, running
   processes) with a search box and an "Add" button per row; "Browse…" is the fallback.
 - **Explain in one line.** Every page has a one-sentence hint; every setting row a

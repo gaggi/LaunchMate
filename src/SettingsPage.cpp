@@ -15,6 +15,7 @@ namespace
 {
     constexpr int kListId = 100;
     constexpr UINT_PTR kMpoTimer = 1;
+    constexpr wchar_t kOpenPageGlyph = L'\uE8A7';
 
     // Rows of the page; headers have no key.
     enum class Setting
@@ -35,8 +36,8 @@ namespace
     class SettingsPage : public PageWindow
     {
     public:
-        SettingsPage(const PageContext& context, std::function<void()> checkForUpdates)
-            : PageWindow(context.headingFont, context.textFont), context_(context), checkForUpdates_(std::move(checkForUpdates))
+        explicit SettingsPage(const PageContext& context)
+            : PageWindow(context.headingFont, context.textFont), context_(context)
         {
         }
 
@@ -59,7 +60,9 @@ namespace
             if (index < 0 || static_cast<size_t>(index) >= keys_.size()) return true;
             const Setting setting = keys_[static_cast<size_t>(index)];
             if (code == RowList::kToggled) Toggle(setting, list_.Rows()[static_cast<size_t>(index)].toggle == 1);
-            else if (code == RowList::kButton && setting == Setting::CheckNow) checkForUpdates_();
+            else if (code == RowList::kButton && setting == Setting::CheckNow) VersionButton();
+            else if (code == RowList::kIconButton && setting == Setting::CheckNow)
+                UpdateChecker::OpenReleasePage(context_.update->release.releasePageUrl);
             else if (code == RowList::kButton && setting == Setting::Mpo) ChangeMpoSetting();
             return true;
         }
@@ -112,8 +115,63 @@ namespace
             Refresh();
         }
 
+        void VersionButton()
+        {
+            const auto& update = *context_.update;
+            if (update.phase != UpdateState::Phase::Available) context_.checkForUpdates();
+            else if (!update.release.assetDownloadUrl.empty()) context_.installUpdate();
+            else UpdateChecker::OpenReleasePage(update.release.releasePageUrl);
+        }
+
+        RowList::Row VersionRow() const
+        {
+            using Phase = UpdateState::Phase;
+            const auto& update = *context_.update;
+            RowList::Row row;
+            row.title = L"Version " + UpdateChecker::CurrentVersion();
+            row.button = L"Check now";
+            switch (update.phase)
+            {
+            case Phase::Idle:
+                row.detail = L"Look for a newer release on GitHub.";
+                break;
+            case Phase::Checking:
+                row.detail = L"Checking GitHub...";
+                row.buttonEnabled = false;
+                break;
+            case Phase::UpToDate:
+                row.detail = update.message;
+                row.pill = L"Up to date";
+                row.pillTone = RowList::Tone::Active;
+                break;
+            case Phase::Available:
+            {
+                const bool installable = !update.release.assetDownloadUrl.empty();
+                row.detail = L"Version " + update.release.versionDisplay + L" is available. " +
+                    (installable ? L"LaunchMate restarts after installing it." : L"It has no download for this Windows version.");
+                row.pill = L"Update available";
+                row.pillTone = RowList::Tone::Accent;
+                row.button = installable ? L"Install update" : L"Open release";
+                if (installable && !update.release.releasePageUrl.empty()) row.iconButtons = {kOpenPageGlyph};
+                break;
+            }
+            case Phase::Downloading:
+                row.detail = L"Downloading the update...";
+                row.button = L"Install update";
+                row.buttonEnabled = false;
+                break;
+            case Phase::Failed:
+                row.detail = update.message;
+                row.pill = L"Not updated";
+                row.pillTone = RowList::Tone::Warning;
+                break;
+            }
+            return row;
+        }
+
         void OnTimer(UINT_PTR id) override
         {
+            if (id == kPageRefreshTimer) { Refresh(); return; }
             if (id != kMpoTimer) return;
             std::optional<std::pair<bool, std::wstring>> result;
             if (!mpoTask_.Poll(result)) return;
@@ -170,14 +228,8 @@ namespace
 
             header(L"Updates");
             toggle(Setting::CheckForUpdatesOnStartup, L"Check for updates on startup", L"", config.checkForUpdatesOnStartup);
-            {
-                RowList::Row row;
-                row.title = L"Version " + UpdateChecker::CurrentVersion();
-                row.detail = L"Look for a newer release on GitHub.";
-                row.button = L"Check now";
-                rows.push_back(std::move(row));
-                keys_.push_back(Setting::CheckNow);
-            }
+            rows.push_back(VersionRow());
+            keys_.push_back(Setting::CheckNow);
 
             header(L"System tweaks");
             {
@@ -199,7 +251,6 @@ namespace
         }
 
         PageContext context_;
-        std::function<void()> checkForUpdates_;
         RowList list_;
         std::vector<Setting> keys_;
         std::wstring mpoError_;
@@ -207,7 +258,7 @@ namespace
     };
 }
 
-HWND CreateSettingsPage(const PageContext& context, HWND parent, std::function<void()> checkForUpdates)
+HWND CreateSettingsPage(const PageContext& context, HWND parent)
 {
-    return PageWindow::Show(std::make_unique<SettingsPage>(context, std::move(checkForUpdates)), context.instance, parent, 520, 360);
+    return PageWindow::Show(std::make_unique<SettingsPage>(context), context.instance, parent, 520, 360);
 }

@@ -29,77 +29,6 @@
 namespace
 {
     constexpr UINT kMonitorSetupHotkeyBase = 5000;
-    constexpr int kUpdateDialogInstall = 6101;
-    constexpr int kUpdateDialogOpenGitHub = 6102;
-    constexpr int kUpdateDialogLater = 6103;
-
-    HRESULT CALLBACK UpdateDialogCallback(HWND, UINT notification, WPARAM, LPARAM lParam, LONG_PTR)
-    {
-        if (notification == TDN_HYPERLINK_CLICKED && lParam != 0)
-        {
-            UpdateChecker::OpenReleasePage(reinterpret_cast<const wchar_t*>(lParam));
-        }
-        return S_OK;
-    }
-
-    int ShowUpdateDetailsDialog(HWND owner, const UpdateCheckResult& result)
-    {
-        const std::wstring currentVersion = UpdateChecker::CurrentVersion();
-        const std::wstring githubVersion = result.release.versionDisplay.empty() ? L"Unavailable" : result.release.versionDisplay;
-        const bool updateAvailable = result.state == UpdateCheckState::UpdateAvailable;
-        const std::wstring instruction = updateAvailable
-            ? L"A newer LaunchMate version is available"
-            : L"LaunchMate is up to date";
-
-        std::wstring content = L"Current version:  " + currentVersion +
-            L"\nGitHub version:  " + githubVersion;
-        if (!result.release.releasePageUrl.empty())
-        {
-            content += L"\n\n<a href=\"" + result.release.releasePageUrl + L"\">Open this release on GitHub</a>";
-        }
-
-        TASKDIALOGCONFIG config{};
-        config.cbSize = sizeof(config);
-        config.hwndParent = owner;
-        config.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
-        config.pszWindowTitle = L"LaunchMate Update";
-        config.pszMainIcon = TD_INFORMATION_ICON;
-        config.pszMainInstruction = instruction.c_str();
-        config.pszContent = content.c_str();
-        config.pfCallback = UpdateDialogCallback;
-
-        TASKDIALOG_BUTTON buttons[2]{};
-        if (updateAvailable)
-        {
-            if (!result.release.assetDownloadUrl.empty())
-            {
-                buttons[0] = {kUpdateDialogInstall, L"Download and install update"};
-            }
-            else
-            {
-                buttons[0] = {kUpdateDialogOpenGitHub, L"Open release on GitHub"};
-            }
-            buttons[1] = {kUpdateDialogLater, L"Later"};
-            config.pButtons = buttons;
-            config.cButtons = 2;
-            config.nDefaultButton = buttons[0].nButtonID;
-        }
-        else
-        {
-            config.dwCommonButtons = TDCBF_OK_BUTTON;
-        }
-
-        int selectedButton = IDCANCEL;
-        if (FAILED(TaskDialogIndirect(&config, &selectedButton, nullptr, nullptr)))
-        {
-            const UINT flags = updateAvailable ? MB_YESNO | MB_ICONINFORMATION : MB_OK | MB_ICONINFORMATION;
-            selectedButton = MessageBoxW(owner, content.c_str(), L"LaunchMate Update", flags) == IDYES
-                ? (result.release.assetDownloadUrl.empty() ? kUpdateDialogOpenGitHub : kUpdateDialogInstall)
-                : IDCANCEL;
-        }
-        return selectedButton;
-    }
-
     bool IsValidRect(const RECT& rect)
     {
         return rect.right > rect.left && rect.bottom > rect.top;
@@ -233,7 +162,7 @@ namespace
     struct PostedUpdateCheckResult
     {
         UpdateCheckResult result;
-        bool interactive{false};
+        bool startup{false};
     };
 
 }
@@ -326,7 +255,7 @@ bool MainWindow::Create(int showCommand)
     });
 
     RegisterMonitorHotkeys();
-    StartUpdateCheck(false);
+    StartUpdateCheck(true);
     return true;
 }
 
@@ -507,49 +436,31 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     default:
         if (message == kUpdateCheckResultMessage)
         {
-            std::unique_ptr<PostedUpdateCheckResult> postedResult(reinterpret_cast<PostedUpdateCheckResult*>(lParam));
-            updateCheckInProgress_ = false;
-            if (!postedResult)
+            std::unique_ptr<PostedUpdateCheckResult> posted(reinterpret_cast<PostedUpdateCheckResult*>(lParam));
+            if (!posted) return 0;
+            const auto& result = posted->result;
+            update_.release = result.release;
+            update_.message = result.message;
+            switch (result.state)
             {
-                return 0;
-            }
-
-            const auto& result = postedResult->result;
-            if (result.state == UpdateCheckState::Failed)
-            {
+            case UpdateCheckState::Failed:
                 app_.Log(L"Update check failed: " + result.message);
-                if (postedResult->interactive)
-                {
-                    const std::wstring details = L"Current version:  " + UpdateChecker::CurrentVersion() +
-                        L"\nGitHub version:  Unavailable\n\nUpdate check failed:\n" + result.message;
-                    MessageBoxW(windowHandle_, details.c_str(), L"LaunchMate Update", MB_OK | MB_ICONWARNING);
-                }
-                return 0;
-            }
-
-            if (result.state == UpdateCheckState::UpToDate)
-            {
+                // A failed check at startup (no network yet) is not worth a warning.
+                update_.phase = posted->startup ? UpdateState::Phase::Idle : UpdateState::Phase::Failed;
+                break;
+            case UpdateCheckState::UpToDate:
                 app_.Log(L"Update check complete. LaunchMate is up to date.");
-                if (postedResult->interactive)
-                {
-                    ShowUpdateDetailsDialog(windowHandle_, result);
-                }
-                return 0;
+                update_.phase = UpdateState::Phase::UpToDate;
+                if (!result.release.versionDisplay.empty())
+                    update_.message = L"Latest release on GitHub: " + result.release.versionDisplay + L".";
+                break;
+            case UpdateCheckState::UpdateAvailable:
+                app_.Log(L"Update available: " + result.release.versionDisplay);
+                update_.phase = UpdateState::Phase::Available;
+                navBar_.SetFooter(L"Update available: " + result.release.versionDisplay, true);
+                break;
             }
-
-            app_.Log(L"Update available: " + result.release.versionDisplay);
-
-            const int selectedButton = ShowUpdateDetailsDialog(windowHandle_, result);
-            if (selectedButton == kUpdateDialogInstall)
-            {
-                BeginUpdateInstall(result.release);
-            }
-            else if (selectedButton == kUpdateDialogOpenGitHub &&
-                !UpdateChecker::OpenReleasePage(result.release.releasePageUrl))
-            {
-                MessageBoxW(windowHandle_, L"Could not open the GitHub release page.", L"LaunchMate Update", MB_OK | MB_ICONWARNING);
-            }
-
+            RefreshPage();
             return 0;
         }
 
@@ -565,12 +476,10 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         if (message == kUpdateErrorMessage)
         {
             std::unique_ptr<std::wstring> errorText(reinterpret_cast<std::wstring*>(lParam));
-            updateInstallInProgress_ = false;
-            if (errorText && !errorText->empty())
-            {
-                app_.Log(*errorText);
-                MessageBoxW(windowHandle_, errorText->c_str(), L"LaunchMate Update", MB_OK | MB_ICONWARNING);
-            }
+            update_.phase = UpdateState::Phase::Failed;
+            update_.message = errorText && !errorText->empty() ? *errorText : L"The update could not be installed.";
+            app_.Log(update_.message);
+            RefreshPage();
             return 0;
         }
 
@@ -1012,11 +921,14 @@ HWND MainWindow::CreatePagePane(Page page)
     context.configuration = &config;
     context.scheduleSave = [this] { ScheduleSave(); };
     context.saveNow = [this] { SaveConfiguration(); };
+    context.update = &update_;
+    context.checkForUpdates = [this] { StartUpdateCheck(false); };
+    context.installUpdate = [this] { BeginUpdateInstall(); };
     if (page == Page::Settings)
     {
         SetWindowTextW(pageTitleHandle_, L"Settings");
         SetWindowTextW(pageHintHandle_, L"Changes are saved immediately.");
-        return CreateSettingsPage(context, host, [this] { StartUpdateCheck(true); });
+        return CreateSettingsPage(context, host);
     }
     if (page == Page::Displays)
     {
@@ -1377,66 +1289,57 @@ void MainWindow::HandleTrayCommand(UINT command)
     }
 }
 
-void MainWindow::StartUpdateCheck(bool interactive)
+void MainWindow::StartUpdateCheck(bool startup)
 {
-    if (!interactive && !app_.Configuration().checkForUpdatesOnStartup)
-    {
-        return;
-    }
-
-    if (updateCheckInProgress_)
-    {
-        if (interactive)
-        {
-            MessageBoxW(windowHandle_, L"An update check is already running.", L"LaunchMate Update", MB_OK | MB_ICONINFORMATION);
-        }
-        return;
-    }
-
-    updateCheckInProgress_ = true;
-    app_.Log(interactive
-        ? L"Running manual GitHub release check for LaunchMate updates."
-        : L"Checking GitHub releases for LaunchMate updates.");
+    if (startup && !app_.Configuration().checkForUpdatesOnStartup) return;
+    if (update_.phase == UpdateState::Phase::Checking || update_.phase == UpdateState::Phase::Downloading) return;
+    update_.phase = UpdateState::Phase::Checking;
+    RefreshPage();
+    app_.Log(startup ? L"Checking GitHub releases for LaunchMate updates." : L"Running manual GitHub release check for LaunchMate updates.");
 
     const HWND windowHandle = windowHandle_;
-    std::thread([windowHandle, interactive]()
+    std::thread([windowHandle, startup]()
     {
         auto* result = new PostedUpdateCheckResult{};
-        result->result = UpdateChecker::CheckForUpdate();
-        result->interactive = interactive;
+        try { result->result = UpdateChecker::CheckForUpdate(); }
+        catch (...) { result->result = {}; result->result.message = L"The update check failed unexpectedly."; }
+        result->startup = startup;
         PostOwnedMessage(windowHandle, MainWindow::kUpdateCheckResultMessage, result);
     }).detach();
 }
 
-void MainWindow::BeginUpdateInstall(UpdateReleaseInfo release)
+void MainWindow::BeginUpdateInstall()
 {
-    if (updateInstallInProgress_)
-    {
-        return;
-    }
-
-    updateInstallInProgress_ = true;
-    app_.Log(L"Downloading LaunchMate " + release.versionDisplay + L" for self-update.");
+    if (update_.phase != UpdateState::Phase::Available || update_.release.assetDownloadUrl.empty()) return;
+    update_.phase = UpdateState::Phase::Downloading;
+    RefreshPage();
+    app_.Log(L"Downloading LaunchMate " + update_.release.versionDisplay + L" for self-update.");
 
     const HWND windowHandle = windowHandle_;
-    std::thread([windowHandle, release = std::move(release)]() mutable
+    std::thread([windowHandle, release = update_.release]() mutable
     {
         std::filesystem::path downloadedPath;
         std::wstring errorMessage;
         if (!UpdateChecker::DownloadReleaseAsset(release, downloadedPath, errorMessage))
         {
-            PostOwnedMessage(windowHandle, MainWindow::kUpdateErrorMessage, new std::wstring(L"Failed to download the LaunchMate update.\n\n" + errorMessage));
+            PostOwnedMessage(windowHandle, MainWindow::kUpdateErrorMessage, new std::wstring(L"Could not download the update. " + errorMessage));
             return;
         }
 
         if (!UpdateChecker::LaunchSelfUpdater(downloadedPath, GetCurrentProcessId(), errorMessage))
         {
-            PostOwnedMessage(windowHandle, MainWindow::kUpdateErrorMessage, new std::wstring(L"Failed to prepare the LaunchMate update.\n\n" + errorMessage));
+            PostOwnedMessage(windowHandle, MainWindow::kUpdateErrorMessage, new std::wstring(L"Could not prepare the update. " + errorMessage));
             return;
         }
 
         PostMessageW(windowHandle, MainWindow::kApplyDownloadedUpdateMessage, 0, 0);
     }).detach();
+}
+
+void MainWindow::RefreshPage()
+{
+    if (page_ != Page::Settings) return;
+    if (const HWND page = pageHost_.Content()) SendMessageW(page, WM_TIMER, kPageRefreshTimer, 0);
 }
 
 WatchedProcessRule MainWindow::SelectWatchedProcess()

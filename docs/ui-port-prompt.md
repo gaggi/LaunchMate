@@ -5,8 +5,8 @@ Paste the text below into a Claude Code session opened in the other app's folder
 
 ---
 
-<APP> should get the same user interface as LaunchMate. LaunchMate lives in
-`C:\Users\gstur\Documents\GitHub\LaunchMate`.
+<APP> should get the same user interface as LaunchMate. LaunchMate is checked out
+next to this project, in `..\LaunchMate`.
 
 1. Read `docs/ui-design.md` in the LaunchMate folder. It describes the layout,
    colors, controls and rules (sidebar pages, status banner, cards, settings rows

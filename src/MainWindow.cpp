@@ -900,8 +900,20 @@ void MainWindow::PopulateRuleDetail()
         sections.push_back(section);
     };
 
-    // Same order as the monitor runs them.
+    // Start apps first, as the main thing a rule does; the rest in the order the
+    // monitor runs them.
     std::vector<std::wstring> names;
+    int latestStart = 0;
+    for (const auto& program : rule.programsToLaunch)
+    {
+        names.push_back(program.displayName.empty() ? FileNameWithoutExtension(program.filePath) : program.displayName);
+        latestStart = std::max(latestStart, program.waitTimeMilliseconds);
+    }
+    std::wstring started = JoinNames(names);
+    if (!started.empty() && latestStart > 0) started += L"  \u00B7  within " + Seconds(latestStart);
+    add(start, startCardSections_, RuleSection::StartPrograms, L"Start apps", started, names.size(), L"Not used \u00B7 add tools such as SimHub or CrewChief");
+
+    names.clear();
     for (const auto& action : rule.processesToStop)
         names.push_back(action.displayName.empty() ? action.processName : action.displayName);
     add(start, startCardSections_, RuleSection::StopProcesses, L"Close apps", JoinNames(names), names.size(), L"Not used \u00B7 add apps that should not run in the background");
@@ -927,17 +939,6 @@ void MainWindow::PopulateRuleDetail()
     names.clear();
     for (const auto& action : rule.homeAssistantActions) names.push_back(action.displayName);
     add(start, startCardSections_, RuleSection::HomeAssistant, L"Home Assistant webhooks", JoinNames(names), names.size(), L"Not used");
-
-    names.clear();
-    int latestStart = 0;
-    for (const auto& program : rule.programsToLaunch)
-    {
-        names.push_back(program.displayName.empty() ? FileNameWithoutExtension(program.filePath) : program.displayName);
-        latestStart = std::max(latestStart, program.waitTimeMilliseconds);
-    }
-    std::wstring started = JoinNames(names);
-    if (!started.empty() && latestStart > 0) started += L"  \u00B7  within " + Seconds(latestStart);
-    add(start, startCardSections_, RuleSection::StartPrograms, L"Start apps", started, names.size(), L"Not used \u00B7 add tools such as SimHub or CrewChief");
 
     std::vector<CardList::Item> exit;
     exitCardSections_.clear();

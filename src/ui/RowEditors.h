@@ -103,11 +103,18 @@ public:
     bool Checked(int id) const { return SendMessageW(Get(id), BM_GETCHECK, 0, 0) == BST_CHECKED; }
     int Selection(int id) const { return static_cast<int>(SendMessageW(Get(id), CB_GETCURSEL, 0, 0)); }
 
-    // Moves the controls to the row's current place and shows them.
+    // Moves the controls to the row's current place and shows them. While the row is
+    // collapsed (for example between SetRows and Begin for another row) they stay
+    // hidden; otherwise they would flash at the top of the list.
     void Position()
     {
         if (editors_.empty()) return;
         const RECT area = list_->ExpansionRect(row_);
+        if (IsRectEmpty(&area))
+        {
+            for (const auto& editor : editors_) ShowWindow(editor.control, SW_HIDE);
+            return;
+        }
         const UINT dpi = GetDpiForWindow(list_->Handle());
         const auto scale = [dpi](int value) { return MulDiv(value, static_cast<int>(dpi), 96); };
         const int width = MulDiv(area.right - area.left, 96, static_cast<int>(dpi));

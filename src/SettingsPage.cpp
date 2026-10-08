@@ -2,14 +2,19 @@
 
 #include "IRacingPerformance.h"
 #include "UpdateChecker.h"
+#include "ui/BackgroundTask.h"
 #include "ui/PageWindow.h"
 #include "ui/RowList.h"
 
 #include <algorithm>
+#include <objbase.h>
+#include <optional>
+#include <utility>
 
 namespace
 {
     constexpr int kListId = 100;
+    constexpr UINT_PTR kMpoTimer = 1;
 
     // Rows of the page; headers have no key.
     enum class Setting
@@ -88,12 +93,39 @@ namespace
             Refresh();
         }
 
+        // The approval prompt can take a while; keep the window responsive meanwhile.
         void ChangeMpoSetting()
         {
-            const auto state = ReadMpoState();
-            std::wstring error;
-            mpoError_ = ChangeMpo(!state.customized, error) ? std::wstring{} : error;
+            if (mpoTask_.Running()) return;
+            const bool disable = !ReadMpoState().customized;
+            mpoTask_.Start([disable](const std::atomic_bool&)
+            {
+                // ShellExecuteEx with "runas" expects COM on the calling thread.
+                const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+                std::wstring error;
+                const bool ok = ChangeMpo(disable, error);
+                if (SUCCEEDED(com)) CoUninitialize();
+                return std::make_pair(ok, error);
+            });
+            mpoError_.clear();
+            SetTimer(Handle(), kMpoTimer, 200, nullptr);
             Refresh();
+        }
+
+        void OnTimer(UINT_PTR id) override
+        {
+            if (id != kMpoTimer) return;
+            std::optional<std::pair<bool, std::wstring>> result;
+            if (!mpoTask_.Poll(result)) return;
+            KillTimer(Handle(), kMpoTimer);
+            mpoError_ = !result ? L"The setting could not be changed." : result->first ? std::wstring{} : result->second;
+            Refresh();
+        }
+
+        void OnDestroy() override
+        {
+            KillTimer(Handle(), kMpoTimer);
+            mpoTask_.Cancel();
         }
 
         void Refresh()
@@ -152,12 +184,13 @@ namespace
                 const auto state = ReadMpoState();
                 RowList::Row row;
                 row.title = L"Multiplane overlay (MPO)";
-                if (!mpoError_.empty()) row.detail = mpoError_;
+                if (mpoTask_.Running()) row.detail = L"Waiting for administrator approval...";
+                else if (!mpoError_.empty()) row.detail = mpoError_;
                 else if (!state.readable) row.detail = L"The current setting cannot be read.";
                 else row.detail = std::wstring(state.disabled ? L"Disabled" : state.customized ? L"Partly changed" : L"Windows default") +
                     L"  \u00B7  May help with flickering or stutter from overlays. Needs a Windows restart.";
                 row.button = state.customized ? L"Restore default" : L"Disable MPO";
-                row.buttonEnabled = state.readable;
+                row.buttonEnabled = state.readable && !mpoTask_.Running();
                 if (state.disabled) { row.pill = L"Disabled"; row.pillTone = RowList::Tone::Warning; }
                 rows.push_back(std::move(row));
                 keys_.push_back(Setting::Mpo);
@@ -170,6 +203,7 @@ namespace
         RowList list_;
         std::vector<Setting> keys_;
         std::wstring mpoError_;
+        BackgroundTask<std::pair<bool, std::wstring>> mpoTask_;
     };
 }
 

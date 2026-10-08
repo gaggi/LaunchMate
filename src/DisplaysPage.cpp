@@ -64,6 +64,8 @@ namespace
         for (const auto& setup : setups)
         {
             if (setup.name.empty()) return L"Each config needs a name.";
+            if (std::count_if(setups.begin(), setups.end(), [&setup](const auto& other) { return other.name == setup.name; }) > 1)
+                return L"Two configs are called " + setup.name + L". Rules find their config by name.";
             if (setup.displayPaths.empty()) return L"Click Detect current to capture the monitors for " + setup.name + L".";
             const auto enabled = std::count_if(setup.displayPaths.begin(), setup.displayPaths.end(), [](const auto& display) { return display.enabled; });
             const auto primary = std::count_if(setup.displayPaths.begin(), setup.displayPaths.end(),
@@ -101,6 +103,7 @@ namespace
             : PageWindow(context.headingFont, context.textFont), context_(context), applySetup_(std::move(applySetup)),
               setups_(context.configuration->monitorPowerSetups), detected_(context.configuration->detectedDisplays)
         {
+            for (const auto& setup : setups_) savedNames_.push_back(setup.name);
         }
 
     private:
@@ -152,6 +155,14 @@ namespace
 
         bool HasSelection() const { return selected_ >= 0 && selected_ < static_cast<int>(setups_.size()); }
 
+        std::wstring UniqueName(const std::wstring& base) const
+        {
+            std::wstring name = base;
+            for (int number = 2; std::any_of(setups_.begin(), setups_.end(), [&name](const auto& setup) { return setup.name == name; }); ++number)
+                name = base + L" " + std::to_wstring(number);
+            return name;
+        }
+
         // Reads the name and hotkey fields into the selected config.
         void Store()
         {
@@ -176,6 +187,16 @@ namespace
             const auto problem = Validate(setups_);
             if (problem.empty())
             {
+                // Rules refer to configs by name, so a rename moves them along.
+                for (size_t index = 0; index < setups_.size(); ++index)
+                {
+                    const auto& oldName = savedNames_[index];
+                    if (oldName.empty() || oldName == setups_[index].name) continue;
+                    for (auto& rule : context_.configuration->watchedProcesses)
+                        if (rule.monitorPowerSetupName == oldName) rule.monitorPowerSetupName = setups_[index].name;
+                }
+                savedNames_.clear();
+                for (const auto& setup : setups_) savedNames_.push_back(setup.name);
                 context_.configuration->monitorPowerSetups = setups_;
                 context_.configuration->detectedDisplays = detected_;
                 context_.scheduleSave();
@@ -257,16 +278,14 @@ namespace
             {
                 Store();
                 MonitorPowerSetup setup;
-                setup.name = L"New config";
-                setup.displayPaths = detected_;
-                if (setup.displayPaths.empty() && HasSelection()) setup.displayPaths = setups_[static_cast<size_t>(selected_)].displayPaths;
-                if (setup.displayPaths.empty())
-                {
-                    MonitorPowerSetup current;
-                    std::wstring error;
-                    if (MonitorPowerController::CaptureSetup(current, &error)) detected_ = setup.displayPaths = current.displayPaths;
-                }
+                setup.name = UniqueName(L"New config");
+                // Start from the monitors as they are now; fall back to what was seen before.
+                MonitorPowerSetup current;
+                std::wstring error;
+                if (MonitorPowerController::CaptureSetup(current, &error)) detected_ = setup.displayPaths = current.displayPaths;
+                else setup.displayPaths = detected_;
                 setups_.push_back(std::move(setup));
+                savedNames_.emplace_back();
                 selected_ = static_cast<int>(setups_.size()) - 1;
                 Load();
                 Commit();
@@ -289,6 +308,7 @@ namespace
                 {
                     Store();
                     setups_.erase(setups_.begin() + row);
+                    savedNames_.erase(savedNames_.begin() + row);
                     selected_ = setups_.empty() ? -1 : std::min(selected_, static_cast<int>(setups_.size()) - 1);
                     Load();
                     Commit();
@@ -348,6 +368,8 @@ namespace
         std::function<bool(size_t)> applySetup_;
         std::vector<MonitorPowerSetup> setups_;
         std::vector<MonitorPowerSetup::DisplayPath> detected_;
+        // Config names as last saved, to find renamed configs.
+        std::vector<std::wstring> savedNames_;
         int selected_{-1};
         bool loading_{};
         RowList configs_;

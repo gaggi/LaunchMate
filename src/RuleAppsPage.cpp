@@ -381,9 +381,12 @@ namespace
             else if (!starting_ && index < rule_.processesToStop.size()) rule_.processesToStop.erase(rule_.processesToStop.begin() + static_cast<std::ptrdiff_t>(index));
             else return;
             const int removed = static_cast<int>(index);
+            const bool movedUp = removed < expanded_;
             if (removed == expanded_) { expanded_ = -1; editors_.Clear(); }
-            else if (removed < expanded_) --expanded_;
+            else if (movedUp) --expanded_;
             Changed();
+            // The expanded item moved up a row; its controls must move with it.
+            if (movedUp) BuildEditors();
         }
 
         void Changed()

@@ -134,6 +134,8 @@ private:
     // take seconds or wait for UAC, so it runs off the UI thread.
     std::thread monitorStopThread_;
     bool monitorStopping_{false};
+    // Hotkey ids registered last time; configs may have been removed since.
+    size_t registeredHotkeys_{0};
     bool updateCheckInProgress_{false};
     bool updateInstallInProgress_{false};
     bool appliedStartWithWindows_{false};

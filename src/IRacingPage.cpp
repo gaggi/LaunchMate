@@ -7,6 +7,7 @@
 #include "ui/RowList.h"
 
 #include <algorithm>
+#include <objbase.h>
 #include <optional>
 
 namespace
@@ -14,6 +15,14 @@ namespace
     constexpr int kListId = 100;
     constexpr int kSizeId = 200;
     constexpr UINT_PTR kPollTimer = 1;
+    constexpr UINT_PTR kDefenderTimer = 2;
+
+    struct DefenderResult
+    {
+        bool ok{};
+        bool removed{};
+        std::wstring error;
+    };
     constexpr wchar_t kExpandGlyph = L'\uE70D';
     constexpr wchar_t kCollapseGlyph = L'\uE70E';
 
@@ -53,7 +62,9 @@ namespace
         void OnDestroy() override
         {
             KillTimer(Handle(), kPollTimer);
+            KillTimer(Handle(), kDefenderTimer);
             task_.Cancel();
+            defenderTask_.Cancel();
         }
 
         void Check()
@@ -66,6 +77,21 @@ namespace
 
         void OnTimer(UINT_PTR id) override
         {
+            if (id == kDefenderTimer)
+            {
+                std::optional<DefenderResult> result;
+                if (!defenderTask_.Poll(result)) return;
+                KillTimer(Handle(), kDefenderTimer);
+                if (result && result->ok)
+                {
+                    defenderVerified_ = !result->removed;
+                    defenderMessage_ = result->removed ? L"Removed. The folders are scanned again." : L"Added and verified.";
+                    Check();
+                }
+                else defenderMessage_ = result ? result->error : L"The exclusions could not be changed.";
+                Refresh();
+                return;
+            }
             if (id != kPollTimer) return;
             std::optional<IRacingCheck> result;
             if (!task_.Poll(result)) return;
@@ -165,7 +191,7 @@ namespace
                 else row.detail = defenderVerified_ ? L"Added and verified this session."
                                                     : L"Windows shows the current exclusions only to administrators.";
                 row.button = bothExcluded ? L"Remove exclusions" : L"Add exclusions";
-                row.buttonEnabled = !check_->install.empty() && !check_->documents.empty();
+                row.buttonEnabled = !check_->install.empty() && !check_->documents.empty() && !defenderTask_.Running();
                 if (bothExcluded) { row.pill = L"Excluded"; row.pillTone = RowList::Tone::Active; }
                 add(row, Row::Defender);
             }
@@ -269,14 +295,19 @@ namespace
                 L"\n\nWindows asks for administrator approval.";
             if (MessageBoxW(Handle(), prompt.c_str(), L"Defender exclusions", MB_YESNO | (remove ? MB_ICONQUESTION : MB_ICONWARNING)) != IDYES)
                 return;
-            std::wstring error;
-            if (ChangeIRacingDefenderExclusions(check_->install, check_->documents, remove, error))
+            // The approval prompt and PowerShell can take a while; keep the window responsive.
+            defenderTask_.Start([install = check_->install, documents = check_->documents, remove](const std::atomic_bool&)
             {
-                defenderVerified_ = !remove;
-                defenderMessage_ = remove ? L"Removed. The folders are scanned again." : L"Added and verified.";
-                Check();
-            }
-            else defenderMessage_ = error;
+                // ShellExecuteEx with "runas" expects COM on the calling thread.
+                const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+                DefenderResult result;
+                result.removed = remove;
+                result.ok = ChangeIRacingDefenderExclusions(install, documents, remove, result.error);
+                if (SUCCEEDED(com)) CoUninitialize();
+                return result;
+            });
+            defenderMessage_ = L"Waiting for administrator approval...";
+            SetTimer(Handle(), kDefenderTimer, 200, nullptr);
             Refresh();
         }
 
@@ -328,6 +359,7 @@ namespace
         RowList list_;
         RowEditors editors_;
         BackgroundTask<IRacingCheck> task_;
+        BackgroundTask<DefenderResult> defenderTask_;
         std::optional<IRacingCheck> check_;
         std::vector<Row> rows_;
         bool carPreload_{};

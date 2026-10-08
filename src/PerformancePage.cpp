@@ -266,6 +266,8 @@ namespace
         void Expand(const std::wstring& name)
         {
             expandedName_ = _wcsicmp(expandedName_.c_str(), name.c_str()) == 0 ? std::wstring{} : name;
+            // Keep the row while it is open, even if its last setting is reset.
+            if (!expandedName_.empty()) extraProcesses_.push_back(expandedName_);
             Refresh();
             BuildEditors();
             if (const int row = ExpandedRow(); row >= 0) list_.ScrollIntoView(row);

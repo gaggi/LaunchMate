@@ -1163,15 +1163,17 @@ void MainWindow::ToggleMonitoring()
 
 void MainWindow::UnregisterMonitorHotkeys()
 {
-    for (size_t index = 0; index < app_.Configuration().monitorPowerSetups.size(); ++index)
+    for (size_t index = 0; index < registeredHotkeys_; ++index)
     {
         UnregisterHotKey(windowHandle_, static_cast<int>(kMonitorSetupHotkeyBase + index));
     }
+    registeredHotkeys_ = 0;
 }
 
 void MainWindow::RegisterMonitorHotkeys()
 {
     UnregisterMonitorHotkeys();
+    registeredHotkeys_ = app_.Configuration().monitorPowerSetups.size();
     for (size_t index = 0; index < app_.Configuration().monitorPowerSetups.size(); ++index)
     {
         const auto& setup = app_.Configuration().monitorPowerSetups[index];

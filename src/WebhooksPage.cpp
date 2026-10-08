@@ -125,11 +125,14 @@ namespace
             auto& actions = rule_.homeAssistantActions;
             if (index < 0 || index >= static_cast<int>(actions.size())) return;
             actions.erase(actions.begin() + index);
+            const bool movedUp = index < expanded_;
             if (index == expanded_) { expanded_ = -1; editors_.Clear(); }
-            else if (index < expanded_) --expanded_;
+            else if (movedUp) --expanded_;
             context_.scheduleSave();
             Refresh();
-            editors_.Position();
+            // The expanded webhook moved up a row; its controls must move with it.
+            if (movedUp) BuildEditors();
+            else editors_.Position();
         }
 
         bool OnCommand(int id, int code, HWND) override

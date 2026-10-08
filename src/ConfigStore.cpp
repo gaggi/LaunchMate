@@ -245,6 +245,7 @@ namespace
             performance["IoPriority"] = static_cast<double>(action.ioPriority);
             performance["MemoryPriority"] = static_cast<double>(action.memoryPriority);
             performance["AffinityMask"] = std::to_string(action.affinityMask);
+            performance["EfficiencyMode"] = static_cast<double>(action.efficiencyMode);
             performanceActions.push_back(performance);
         }
         object["ProcessPerformanceActions"] = performanceActions;
@@ -322,6 +323,7 @@ namespace
                 action.cpuPriorityClass = ReadInt(performance, "CpuPriorityClass");
                 action.ioPriority = ReadInt(performance, "IoPriority", -1);
                 action.memoryPriority = ReadInt(performance, "MemoryPriority", -1);
+                action.efficiencyMode = ReadInt(performance, "EfficiencyMode", -1);
                 const auto affinity = performance.find("AffinityMask");
                 if (affinity != performance.end() && affinity->second.IsString())
                 {

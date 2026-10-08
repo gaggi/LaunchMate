@@ -270,6 +270,7 @@ struct ProcessMonitorTestAccess
         action.ioPriority = 3; // High exercises the privilege path in both token modes.
         action.memoryPriority = 6; // Invalid on purpose so we can verify per-setting retry.
         action.affinityMask = 1;
+        action.efficiencyMode = 1;
         rule.processPerformanceActions.push_back(action);
         ProcessMonitor::ProcessSnapshot snapshot;
         snapshot.valid = true;
@@ -309,6 +310,12 @@ struct ProcessMonitorTestAccess
         DWORD_PTR processMask = 0, systemMask = 0;
         Require(GetProcessAffinityMask(process, &processMask, &systemMask) != FALSE && processMask == 1,
             "CPU affinity was not applied");
+        PROCESS_POWER_THROTTLING_STATE throttling{};
+        throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        Require(GetProcessInformation(process, ProcessPowerThrottling, &throttling, sizeof(throttling)) != FALSE &&
+            (throttling.ControlMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) != 0 &&
+            (throttling.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) != 0,
+            "Efficiency mode was not applied");
         CloseHandle(process);
         std::cout << "Performance settings and retry passed; test token elevated: "
             << (tokenElevationKnown && currentElevation.TokenIsElevated ? "yes" : "no/unknown")

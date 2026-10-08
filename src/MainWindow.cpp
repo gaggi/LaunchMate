@@ -739,11 +739,7 @@ namespace
     size_t ConfiguredPerformanceActions(const WatchedProcessRule& rule)
     {
         return static_cast<size_t>(std::count_if(rule.processPerformanceActions.begin(), rule.processPerformanceActions.end(),
-            [](const ProcessPerformanceAction& action)
-            {
-                return action.cpuPriorityClass != 0 || action.ioPriority >= 0 || action.memoryPriority >= 0 ||
-                    action.affinityMask != 0;
-            }));
+            [](const ProcessPerformanceAction& action) { return !action.ChangesNothing(); }));
     }
 }
 

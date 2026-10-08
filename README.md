@@ -18,7 +18,7 @@ LaunchMate is a native Windows desktop app for monitoring processes and automati
 - Optional GitHub update checks on startup
 - Global MPO control in Settings with two registry values and a Windows Default action
 - Store configuration as JSON in the roaming profile
-- Set a power plan and per-process CPU, I/O and memory priorities and CPU affinity for each rule
+- Set a power plan and per-process CPU, I/O and memory priorities, CPU affinity and Windows efficiency mode for each rule
 - iRacing rules get an **iRacing settings** page with app.ini texture loading, Defender exclusions and a system check for display refresh rates and RTSS/MSI Afterburner
 - Optionally switch power plans for any watched process and restore the prior plan when it exits
 - Show detected cloud-sync apps, game launchers, overlays, communication and work apps with verified executable paths, running status, and a measurement-based potential-effect estimate

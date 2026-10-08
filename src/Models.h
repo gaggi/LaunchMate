@@ -41,6 +41,13 @@ struct ProcessPerformanceAction
     int ioPriority{-1}; // -1 means leave unchanged; otherwise IO_PRIORITY_HINT.
     int memoryPriority{-1}; // -1 means leave unchanged; otherwise MEMORY_PRIORITY_INFORMATION.
     std::uint64_t affinityMask{0}; // 0 means use all available logical processors.
+    // Windows efficiency mode (EcoQoS): -1 leaves it to Windows, 1 turns it on, 0 keeps it off.
+    int efficiencyMode{-1};
+
+    bool ChangesNothing() const
+    {
+        return cpuPriorityClass == 0 && ioPriority < 0 && memoryPriority < 0 && affinityMask == 0 && efficiencyMode < 0;
+    }
 };
 
 struct CatalogProgram

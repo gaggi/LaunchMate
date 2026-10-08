@@ -1279,13 +1279,13 @@ void ProcessMonitor::ApplyPerformanceActions(const RuntimeRule& rule, const Proc
     constexpr unsigned kIoPriorityApplied = 1u << 1;
     constexpr unsigned kMemoryPriorityApplied = 1u << 2;
     constexpr unsigned kAffinityApplied = 1u << 3;
+    constexpr unsigned kEfficiencyApplied = 1u << 4;
 
     auto& ruleStates = performanceTargetStates_[rule.processKey];
     for (size_t actionIndex = 0; actionIndex < rule.processPerformanceActions.size(); ++actionIndex)
     {
         const auto& action = rule.processPerformanceActions[actionIndex];
-        if (action.cpuPriorityClass == 0 && action.ioPriority < 0 && action.memoryPriority < 0 && action.affinityMask == 0)
-            continue;
+        if (action.ChangesNothing()) continue;
 
         const auto targetKey = NormalizeProcessKey(action.processName);
         const auto found = snapshot.processIdsByName.find(targetKey);
@@ -1357,6 +1357,18 @@ void ProcessMonitor::ApplyPerformanceActions(const RuntimeRule& rule, const Proc
                     failures.push_back(L"CPU affinity (Windows error " + std::to_wstring(GetLastError()) + L")");
                 else state.appliedSettings |= kAffinityApplied;
             }
+            if (action.efficiencyMode >= 0 && (state.appliedSettings & kEfficiencyApplied) == 0)
+            {
+                // Setting the control bit without the state bit keeps Windows from
+                // throttling the process on its own.
+                PROCESS_POWER_THROTTLING_STATE throttling{};
+                throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+                throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+                throttling.StateMask = action.efficiencyMode == 1 ? PROCESS_POWER_THROTTLING_EXECUTION_SPEED : 0;
+                if (!SetProcessInformation(process, ProcessPowerThrottling, &throttling, sizeof(throttling)))
+                    failures.push_back(L"Efficiency mode (Windows error " + std::to_wstring(GetLastError()) + L")");
+                else state.appliedSettings |= kEfficiencyApplied;
+            }
             CloseHandle(process);
             if (failures.empty())
             {
@@ -1364,7 +1376,8 @@ void ProcessMonitor::ApplyPerformanceActions(const RuntimeRule& rule, const Proc
                     (action.cpuPriorityClass != 0 ? kCpuPriorityApplied : 0) |
                     (action.ioPriority >= 0 ? kIoPriorityApplied : 0) |
                     (action.memoryPriority >= 0 ? kMemoryPriorityApplied : 0) |
-                    (action.affinityMask != 0 ? kAffinityApplied : 0);
+                    (action.affinityMask != 0 ? kAffinityApplied : 0) |
+                    (action.efficiencyMode >= 0 ? kEfficiencyApplied : 0);
                 if (!state.successReported && state.appliedSettings == requestedSettings)
                 {
                     statusCallback_(L"Applied performance settings to " + action.processName + L".");

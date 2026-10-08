@@ -17,6 +17,7 @@ namespace
     constexpr int kIoPriorityId = 201;
     constexpr int kMemoryPriorityId = 202;
     constexpr int kAllCpusId = 203;
+    constexpr int kEfficiencyId = 204;
     constexpr int kCpuFirstId = 300;
     constexpr wchar_t kExpandGlyph = L'\uE70D';
     constexpr wchar_t kCollapseGlyph = L'\uE70E';
@@ -35,6 +36,7 @@ namespace
     constexpr Choice kIoChoices[] = {{L"Do not change", -1}, {L"Very low", 0}, {L"Low", 1}, {L"Normal", 2}, {L"High", 3}};
     constexpr Choice kMemoryChoices[] = {
         {L"Do not change", -1}, {L"Very low", 1}, {L"Low", 2}, {L"Medium", 3}, {L"Below normal", 4}, {L"Normal", 5}};
+    constexpr Choice kEfficiencyChoices[] = {{L"Do not change", -1}, {L"On", 1}, {L"Off", 0}};
 
     template<size_t Count>
     const wchar_t* LabelOf(const Choice (&choices)[Count], int value)
@@ -64,7 +66,7 @@ namespace
 
     bool IsDefault(const ProcessPerformanceAction& action)
     {
-        return action.cpuPriorityClass == 0 && action.ioPriority < 0 && action.memoryPriority < 0 && action.affinityMask == 0;
+        return action.ChangesNothing();
     }
 
     std::wstring Summary(const ProcessPerformanceAction& action)
@@ -74,6 +76,7 @@ namespace
         if (action.cpuPriorityClass != 0) parts.push_back(std::wstring(L"CPU ") + LabelOf(kCpuChoices, action.cpuPriorityClass));
         if (action.ioPriority >= 0) parts.push_back(std::wstring(L"I/O ") + LabelOf(kIoChoices, action.ioPriority));
         if (action.memoryPriority >= 0) parts.push_back(std::wstring(L"memory ") + LabelOf(kMemoryChoices, action.memoryPriority));
+        if (action.efficiencyMode >= 0) parts.push_back(action.efficiencyMode == 1 ? L"efficiency mode" : L"no efficiency mode");
         if (action.affinityMask != 0)
         {
             int count = 0;
@@ -223,9 +226,9 @@ namespace
 
         static int ExpandHeight(const ProcessPerformanceAction& settings)
         {
-            if (settings.affinityMask == 0) return 166;
+            if (settings.affinityMask == 0) return 202;
             const int rows = (CpuCount() + 7) / 8;
-            return 166 + rows * 26 + 4;
+            return 202 + rows * 26 + 4;
         }
 
         int ExpandedRow() const
@@ -250,13 +253,16 @@ namespace
             editors_.Combo(kIoPriorityId, Labels(kIoChoices), IndexOf(kIoChoices, settings.ioPriority), 126, 48, 180);
             editors_.Label(L"Memory priority", 0, 84, 120);
             editors_.Combo(kMemoryPriorityId, Labels(kMemoryChoices), IndexOf(kMemoryChoices, settings.memoryPriority), 126, 84, 180);
-            editors_.Check(kAllCpusId, L"Use all CPUs", settings.affinityMask == 0, 0, 122, 200);
+            editors_.Label(L"Efficiency mode", 0, 120, 120);
+            editors_.Combo(kEfficiencyId, Labels(kEfficiencyChoices), IndexOf(kEfficiencyChoices, settings.efficiencyMode), 126, 120, 180);
+            editors_.Label(L"Like Task Manager. Off keeps Windows from throttling it.", 318, 120, 0);
+            editors_.Check(kAllCpusId, L"Use all CPUs", settings.affinityMask == 0, 0, 158, 200);
             if (settings.affinityMask != 0)
             {
                 for (int cpu = 0; cpu < CpuCount(); ++cpu)
                 {
                     const std::wstring label = L"CPU " + std::to_wstring(cpu);
-                    editors_.Check(kCpuFirstId + cpu, label.c_str(), (settings.affinityMask >> cpu) & 1, (cpu % 8) * 72, 156 + (cpu / 8) * 26, 70);
+                    editors_.Check(kCpuFirstId + cpu, label.c_str(), (settings.affinityMask >> cpu) & 1, (cpu % 8) * 72, 192 + (cpu / 8) * 26, 70);
                 }
             }
             syncing_ = false;
@@ -312,6 +318,19 @@ namespace
             if (id == kCpuPriorityId) settings.cpuPriorityClass = kCpuChoices[std::max(0, editors_.Selection(id))].value;
             else if (id == kIoPriorityId) settings.ioPriority = kIoChoices[std::max(0, editors_.Selection(id))].value;
             else if (id == kMemoryPriorityId) settings.memoryPriority = kMemoryChoices[std::max(0, editors_.Selection(id))].value;
+            else if (id == kEfficiencyId)
+            {
+                settings.efficiencyMode = kEfficiencyChoices[std::max(0, editors_.Selection(id))].value;
+                // Task Manager's efficiency mode also lowers the CPU priority; do the same
+                // unless a priority was chosen, and show it in the CPU priority box.
+                if (settings.efficiencyMode == 1 && settings.cpuPriorityClass == 0)
+                {
+                    settings.cpuPriorityClass = IDLE_PRIORITY_CLASS;
+                    syncing_ = true;
+                    SendMessageW(editors_.Get(kCpuPriorityId), CB_SETCURSEL, IndexOf(kCpuChoices, IDLE_PRIORITY_CLASS), 0);
+                    syncing_ = false;
+                }
+            }
             else if (id == kAllCpusId)
             {
                 // Start a custom selection from all CPUs, so nothing changes until a box is cleared.
@@ -336,7 +355,8 @@ namespace
         {
             if (id >= kCpuPriorityId && id < kCpuFirstId + 64)
             {
-                const bool relevant = (code == CBN_SELCHANGE && id <= kMemoryPriorityId) || (code == BN_CLICKED && id >= kAllCpusId);
+                const bool relevant = (code == CBN_SELCHANGE && (id <= kMemoryPriorityId || id == kEfficiencyId)) ||
+                    (code == BN_CLICKED && (id == kAllCpusId || id >= kCpuFirstId));
                 if (!syncing_ && relevant) ApplyEditors(id);
                 return true;
             }

@@ -1,5 +1,6 @@
 #include "Pages.h"
 
+#include "DisplayLayout.h"
 #include "MonitorLayout.h"
 #include "MonitorPowerController.h"
 #include "ui/PageWindow.h"
@@ -42,6 +43,8 @@ namespace
             if (std::none_of(merged.begin(), merged.end(), [&existing](const auto& path) { return IsSameDisplay(path, existing); }))
                 merged.push_back(existing);
         }
+        // Monitors detected at different times may share positions; keep the tiles apart.
+        SeparateOverlappingDisplays(merged);
         setup.displayPaths = std::move(merged);
     }
 

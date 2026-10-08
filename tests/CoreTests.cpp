@@ -6,6 +6,7 @@
 #include "IRacingPerformance.h"
 #include "IRacingServices.h"
 #include "MonitorPowerController.h"
+#include "DisplayLayout.h"
 #include "Utils.h"
 
 #include <fstream>
@@ -701,6 +702,42 @@ void TestBackgroundTasks()
     Require(doneFuture.get(), "Owner destruction did not cancel publication");
 }
 
+void TestDisplayOverlaps()
+{
+    // A 4K main monitor captured alone at 0,0 plus three monitors from another
+    // desktop at 0, 2560 and 5120: all four must end up side by side.
+    const auto display = [](const wchar_t* name, LONG x, UINT width, bool enabled, bool primary)
+    {
+        MonitorPowerSetup::DisplayPath path;
+        path.displayName = name;
+        path.positionX = x;
+        path.width = width;
+        path.enabled = enabled;
+        path.isPrimary = primary;
+        return path;
+    };
+    std::vector<MonitorPowerSetup::DisplayPath> displays{
+        display(L"LG1", 0, 2560, false, false), display(L"LG2", 5120, 2560, true, false),
+        display(L"LG3", 2560, 2560, true, false), display(L"U28", 0, 3840, true, true)};
+    SeparateOverlappingDisplays(displays);
+    Require(displays[3].positionX == 0, "Main monitor keeps its place");
+    Require(displays[0].positionX == 3840 && displays[2].positionX == 6400 && displays[1].positionX == 8960,
+        "Overlapping monitors move right in their order");
+
+    auto enabledOnly = std::vector<MonitorPowerSetup::DisplayPath>{
+        display(L"LG1", 0, 2560, false, false), display(L"U28", 0, 3840, true, true), display(L"LG3", 2560, 2560, true, false)};
+    SeparateOverlappingDisplays(enabledOnly, true);
+    Require(enabledOnly[0].positionX == 0 && enabledOnly[2].positionX == 3840, "Disabled monitors are ignored when applying");
+
+    std::vector<MonitorPowerSetup::DisplayPath> clean{
+        display(L"A", -2560, 2560, true, false), display(L"B", 0, 2560, true, true), display(L"C", 2560, 2560, true, false)};
+    const auto before = clean;
+    SeparateOverlappingDisplays(clean);
+    for (size_t index = 0; index < clean.size(); ++index)
+        Require(clean[index].positionX == before[index].positionX, "A layout without overlaps stays unchanged");
+    std::cout << "Overlapping monitors are placed side by side." << std::endl;
+}
+
 void TestJson()
 {
     using namespace jsonlite;
@@ -814,6 +851,7 @@ int main(int argc, char** argv)
     try
     {
         TestJson();
+        TestDisplayOverlaps();
         TestBackgroundTasks();
         TestAtomicFile();
         ProcessMonitorTestAccess::Run();

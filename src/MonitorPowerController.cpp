@@ -1,5 +1,7 @@
 #include "MonitorPowerController.h"
 
+#include "DisplayLayout.h"
+
 #include <windows.h>
 
 #include <algorithm>
@@ -400,7 +402,9 @@ bool MonitorPowerController::ApplySetup(
         return false;
     }
 
-    auto targetDisplays = PreparePrimary(setup.displayPaths);
+    auto targetDisplays = setup.displayPaths;
+    SeparateOverlappingDisplays(targetDisplays, true);
+    targetDisplays = PreparePrimary(std::move(targetDisplays));
     const bool allConnected = std::all_of(targetDisplays.begin(), targetDisplays.end(), [](const auto& display)
     {
         return IsConnected(display.displayName);

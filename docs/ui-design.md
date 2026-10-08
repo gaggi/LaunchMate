@@ -81,7 +81,7 @@ gray means "idle". Do not use color as the only signal; pills always carry text.
 | --- | --- |
 | `NavBar` | The sidebar. Page items stay highlighted; non-page items only send a command. Icons are Segoe Fluent glyphs. |
 | `StatusPanel` | The banner at the top: neutral, active (green) or busy (amber), title, detail line and one primary button. |
-| `CardList` | Overviews of objects (rules, profiles, sessions): title, subtitle, status pill, summary chips, chevron. A click opens the object. |
+| `CardList` | Overviews of objects (rules, profiles, sessions): title, subtitle, status pill, summary chips, chevron. A count (`trailing`) is a gray pill centered next to the chevron. A click opens the object. |
 | `RowList` | Settings-style lists: section headers with cards of rows; a row can have an icon, detail, pill, toggle with label, one text button and icon buttons. A row can expand to show edit controls below its top line (`expandHeight`, `ExpansionRect()`, `kLayoutChanged`). |
 | `SegmentedControl` | Switching between 2–4 views of the same data (for example sources of a list). |
 | `RowEditors` | The edit controls inside an expanded `RowList` row: `Begin(row)`, then `Label`, `Edit`, `Seconds`, `Check`, `Combo`, `Button` at DIP offsets inside the expansion (width 0 stretches); `Position()` after scrolling or a layout change, `Clear()` when the row collapses. `SecondsText` / `ParseSeconds` convert milliseconds and accept "1,5" as well as "1.5". |

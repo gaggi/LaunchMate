@@ -45,6 +45,10 @@ public:
     CardList() = default;
     CardList(const CardList&) = delete;
     CardList& operator=(const CardList&) = delete;
+    ~CardList()
+    {
+        if (glyphFont_) DeleteObject(glyphFont_);
+    }
 
     bool Create(HINSTANCE instance, HWND parent, int id, HFONT titleFont, HFONT textFont)
     {
@@ -63,6 +67,7 @@ public:
         textFont_ = textFont;
         window_ = CreateWindowExW(0, kClassName, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL,
             0, 0, 100, 100, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, this);
+        if (window_) CreateGlyphFont();
         return window_ != nullptr;
     }
 
@@ -74,6 +79,7 @@ public:
     {
         titleFont_ = titleFont;
         textFont_ = textFont;
+        CreateGlyphFont();
         UpdateScrollRange();
         InvalidateRect(window_, nullptr, FALSE);
     }
@@ -200,6 +206,13 @@ private:
         SendMessageW(GetParent(window_), WM_COMMAND, MAKEWPARAM(id_, notification), reinterpret_cast<LPARAM>(window_));
     }
 
+    void CreateGlyphFont()
+    {
+        if (glyphFont_) DeleteObject(glyphFont_);
+        glyphFont_ = CreateFontW(-Scale(12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, UiTheme::IconFontFace());
+    }
+
     static void FillRounded(HDC dc, const RECT& rect, int radius, COLORREF fill, COLORREF border)
     {
         const HBRUSH brush = CreateSolidBrush(fill);
@@ -223,11 +236,27 @@ private:
         int right = rect.right - padding;
 
         // Chevron: the whole card is a button.
-        SelectObject(dc, titleFont_);
-        SetTextColor(dc, RGB(150, 152, 158));
-        RECT chevron{right - Scale(10), rect.top, right, rect.bottom};
-        DrawTextW(dc, L"\u203A", -1, &chevron, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        right -= Scale(22);
+        SelectObject(dc, glyphFont_ ? glyphFont_ : titleFont_);
+        SetTextColor(dc, RGB(110, 112, 118));
+        RECT chevron{right - Scale(14), rect.top, right, rect.bottom};
+        DrawTextW(dc, glyphFont_ ? L"\uE76C" : L"\u203A", -1, &chevron, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        right -= Scale(24);
+
+        // The count sits next to the chevron as a neutral pill, centered on the card.
+        if (!item.trailing.empty())
+        {
+            SelectObject(dc, textFont_);
+            SIZE size{};
+            GetTextExtentPoint32W(dc, item.trailing.c_str(), static_cast<int>(item.trailing.size()), &size);
+            const int width = std::max<int>(size.cx + Scale(16), Scale(26));
+            const int height = Scale(20);
+            const int top = (rect.top + rect.bottom - height) / 2;
+            RECT count{right - width, top, right, top + height};
+            FillRounded(dc, count, height, RGB(241, 239, 232), RGB(241, 239, 232));
+            SetTextColor(dc, RGB(95, 94, 90));
+            DrawTextW(dc, item.trailing.c_str(), -1, &count, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            right = count.left - Scale(10);
+        }
 
         const int titleTop = rect.top + Padding() - Scale(1);
         if (!item.pill.empty())
@@ -243,16 +272,6 @@ private:
             SetTextColor(dc, text);
             DrawTextW(dc, item.pill.c_str(), -1, &pill, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             right = pill.left - Scale(10);
-        }
-        if (!item.trailing.empty())
-        {
-            SelectObject(dc, textFont_);
-            SetTextColor(dc, detailColor);
-            RECT trailing{right - Scale(120), titleTop, right, titleTop + Scale(22)};
-            DrawTextW(dc, item.trailing.c_str(), -1, &trailing, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            SIZE size{};
-            GetTextExtentPoint32W(dc, item.trailing.c_str(), static_cast<int>(item.trailing.size()), &size);
-            right -= size.cx + Scale(10);
         }
 
         SelectObject(dc, titleFont_);
@@ -448,6 +467,7 @@ private:
     int id_{};
     HFONT titleFont_{};
     HFONT textFont_{};
+    HFONT glyphFont_{};
     std::vector<Item> items_;
     std::wstring emptyText_;
     int scroll_{};

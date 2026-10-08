@@ -2,3 +2,31 @@
 #include "../src/resource.h"
 
 IDI_APPICON ICON "launchmate.ico"
+
+// Task Manager shows FileDescription as the process name.
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION LAUNCHMATE_VERSION_MAJOR, LAUNCHMATE_VERSION_MINOR, LAUNCHMATE_VERSION_PATCH, 0
+PRODUCTVERSION LAUNCHMATE_VERSION_MAJOR, LAUNCHMATE_VERSION_MINOR, LAUNCHMATE_VERSION_PATCH, 0
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "LaunchMate"
+            VALUE "ProductName", "LaunchMate"
+            VALUE "FileVersion", LAUNCHMATE_VERSION
+            VALUE "ProductVersion", LAUNCHMATE_VERSION
+            VALUE "InternalName", "LaunchMate"
+            VALUE "OriginalFilename", "LaunchMate.exe"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

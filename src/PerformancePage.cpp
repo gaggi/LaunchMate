@@ -18,6 +18,8 @@ namespace
     constexpr int kMemoryPriorityId = 202;
     constexpr int kAllCpusId = 203;
     constexpr int kEfficiencyId = 204;
+    constexpr int kEvenCpusId = 205;
+    constexpr int kOddCpusId = 206;
     constexpr int kCpuFirstId = 300;
     constexpr wchar_t kExpandGlyph = L'\uE70D';
     constexpr wchar_t kCollapseGlyph = L'\uE70E';
@@ -257,6 +259,10 @@ namespace
             editors_.Combo(kEfficiencyId, Labels(kEfficiencyChoices), IndexOf(kEfficiencyChoices, settings.efficiencyMode), 126, 120, 180);
             editors_.Label(L"Like Task Manager. Off keeps Windows from throttling it.", 318, 120, 0);
             editors_.Check(kAllCpusId, L"Use all CPUs", settings.affinityMask == 0, 0, 158, 200);
+            // With Hyper-Threading or SMT, the even CPUs are the first thread of each core.
+            editors_.Button(kEvenCpusId, L"Even CPUs only", 210, 156, 130);
+            editors_.Button(kOddCpusId, L"Odd CPUs only", 350, 156, 130);
+            EnableWindow(editors_.Get(kOddCpusId), CpuCount() > 1);
             if (settings.affinityMask != 0)
             {
                 for (int cpu = 0; cpu < CpuCount(); ++cpu)
@@ -337,6 +343,13 @@ namespace
                 const std::uint64_t all = CpuCount() == 64 ? ~std::uint64_t{0} : ((std::uint64_t{1} << CpuCount()) - 1);
                 settings.affinityMask = editors_.Checked(kAllCpusId) ? 0 : all;
             }
+            else if (id == kEvenCpusId || id == kOddCpusId)
+            {
+                std::uint64_t mask = 0;
+                for (int cpu = id == kEvenCpusId ? 0 : 1; cpu < CpuCount(); cpu += 2) mask |= std::uint64_t{1} << cpu;
+                if (mask == 0) return;
+                settings.affinityMask = mask;
+            }
             else if (id >= kCpuFirstId && id < kCpuFirstId + CpuCount())
             {
                 std::uint64_t mask = 0;
@@ -345,7 +358,7 @@ namespace
                 if (mask == 0) { BuildEditors(); return; } // At least one CPU must stay.
                 settings.affinityMask = mask;
             }
-            const bool layoutChanged = id == kAllCpusId;
+            const bool layoutChanged = id == kAllCpusId || id == kEvenCpusId || id == kOddCpusId;
             Store(settings);
             Refresh();
             if (layoutChanged) BuildEditors();
@@ -356,7 +369,7 @@ namespace
             if (id >= kCpuPriorityId && id < kCpuFirstId + 64)
             {
                 const bool relevant = (code == CBN_SELCHANGE && (id <= kMemoryPriorityId || id == kEfficiencyId)) ||
-                    (code == BN_CLICKED && (id == kAllCpusId || id >= kCpuFirstId));
+                    (code == BN_CLICKED && (id == kAllCpusId || id == kEvenCpusId || id == kOddCpusId || id >= kCpuFirstId));
                 if (!syncing_ && relevant) ApplyEditors(id);
                 return true;
             }

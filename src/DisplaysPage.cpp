@@ -20,14 +20,8 @@ namespace
     constexpr int kApplyId = 106;
     constexpr wchar_t kRemoveGlyph = L'\uE711';
 
-    bool IsSameDisplay(const MonitorPowerSetup::DisplayPath& left, const MonitorPowerSetup::DisplayPath& right)
-    {
-        return left.targetAdapterLowPart == right.targetAdapterLowPart &&
-            left.targetAdapterHighPart == right.targetAdapterHighPart &&
-            left.targetId == right.targetId;
-    }
-
-    // Keeps a config's choices for known monitors and adds newly detected ones.
+    // Keeps a config's choices for known monitors, takes their current adapter ids and
+    // adds monitors the config does not know yet, turned off.
     void MergeDetectedDisplays(MonitorPowerSetup& setup, const std::vector<MonitorPowerSetup::DisplayPath>& detected)
     {
         if (detected.empty()) return;
@@ -35,12 +29,27 @@ namespace
         for (const auto& display : detected)
         {
             const auto existing = std::find_if(setup.displayPaths.begin(), setup.displayPaths.end(),
-                [&display](const auto& path) { return IsSameDisplay(path, display); });
-            merged.push_back(existing == setup.displayPaths.end() ? display : *existing);
+                [&display](const auto& path) { return IsSameMonitor(path, display); });
+            if (existing == setup.displayPaths.end())
+            {
+                auto added = display;
+                added.enabled = false;
+                added.isPrimary = false;
+                merged.push_back(std::move(added));
+                continue;
+            }
+            auto kept = *existing;
+            kept.sourceAdapterLowPart = display.sourceAdapterLowPart;
+            kept.sourceAdapterHighPart = display.sourceAdapterHighPart;
+            kept.sourceId = display.sourceId;
+            kept.targetAdapterLowPart = display.targetAdapterLowPart;
+            kept.targetAdapterHighPart = display.targetAdapterHighPart;
+            kept.displayName = display.displayName;
+            merged.push_back(std::move(kept));
         }
         for (const auto& existing : setup.displayPaths)
         {
-            if (std::none_of(merged.begin(), merged.end(), [&existing](const auto& path) { return IsSameDisplay(path, existing); }))
+            if (std::none_of(merged.begin(), merged.end(), [&existing](const auto& path) { return IsSameMonitor(path, existing); }))
                 merged.push_back(existing);
         }
         // Monitors detected at different times may share positions; keep the tiles apart.
@@ -316,8 +325,9 @@ namespace
                     SetWindowTextW(status_, error.c_str());
                     return true;
                 }
+                // The selected config becomes exactly what Windows shows now.
                 detected_ = current.displayPaths;
-                for (auto& setup : setups_) MergeDetectedDisplays(setup, detected_);
+                if (HasSelection()) setups_[static_cast<size_t>(selected_)].displayPaths = current.displayPaths;
                 Load();
                 Commit();
                 return true;

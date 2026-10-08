@@ -731,10 +731,20 @@ void TestDisplayOverlaps()
 
     std::vector<MonitorPowerSetup::DisplayPath> clean{
         display(L"A", -2560, 2560, true, false), display(L"B", 0, 2560, true, true), display(L"C", 2560, 2560, true, false)};
-    const auto before = clean;
+    const auto cleanBefore = clean;
     SeparateOverlappingDisplays(clean);
     for (size_t index = 0; index < clean.size(); ++index)
-        Require(clean[index].positionX == before[index].positionX, "A layout without overlaps stays unchanged");
+        Require(clean[index].positionX == cleanBefore[index].positionX, "A layout without overlaps stays unchanged");
+    auto before = display(L"U28", 0, 3840, true, true);
+    before.monitorName = L"U28D590";
+    before.targetId = 512;
+    before.targetAdapterLowPart = 59966;
+    auto afterRestart = before;
+    afterRestart.targetAdapterLowPart = 61234;
+    Require(IsSameMonitor(before, afterRestart), "A monitor stays the same when Windows assigns new adapter ids");
+    auto otherMonitor = afterRestart;
+    otherMonitor.targetId = 4353;
+    Require(!IsSameMonitor(before, otherMonitor), "Monitors on different targets differ");
     std::cout << "Overlapping monitors are placed side by side." << std::endl;
 }
 

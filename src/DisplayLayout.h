@@ -6,6 +6,16 @@
 #include <vector>
 #include <windows.h>
 
+// Windows assigns new adapter ids (LUIDs) after a restart or driver update, so a
+// monitor is also the same when its target id and name match.
+inline bool IsSameMonitor(const MonitorPowerSetup::DisplayPath& left, const MonitorPowerSetup::DisplayPath& right)
+{
+    if (left.targetId != right.targetId) return false;
+    if (left.targetAdapterLowPart == right.targetAdapterLowPart && left.targetAdapterHighPart == right.targetAdapterHighPart)
+        return true;
+    return !left.monitorName.empty() && left.monitorName == right.monitorName;
+}
+
 // Positions captured at different times can come from different desktops: a monitor
 // that was the only active one sits at 0,0 just like the first monitor of another
 // arrangement. Windows needs monitors that do not overlap, so overlapping monitors

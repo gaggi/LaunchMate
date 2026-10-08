@@ -190,6 +190,72 @@ namespace
         return displays;
     }
 
+    // Connected monitors that are turned off have no active path. Each is listed once,
+    // turned off, through a source that no other listed monitor uses.
+    void AddInactiveDisplays(std::vector<DisplayPath>& displays)
+    {
+        DisplayConfiguration configuration;
+        if (!QueryConfiguration(QDC_ALL_PATHS, configuration, nullptr)) return;
+        for (const auto& path : configuration.paths)
+        {
+            if (path.targetInfo.targetAvailable == FALSE || (path.flags & DISPLAYCONFIG_PATH_ACTIVE) != 0) continue;
+            const bool listed = std::any_of(displays.begin(), displays.end(), [&path](const auto& display)
+            {
+                const bool sameTarget = display.targetId == path.targetInfo.id &&
+                    display.targetAdapterLowPart == path.targetInfo.adapterId.LowPart &&
+                    display.targetAdapterHighPart == path.targetInfo.adapterId.HighPart;
+                const bool sameSource = display.sourceId == path.sourceInfo.id &&
+                    display.sourceAdapterLowPart == path.sourceInfo.adapterId.LowPart &&
+                    display.sourceAdapterHighPart == path.sourceInfo.adapterId.HighPart;
+                return sameTarget || sameSource;
+            });
+            if (listed) continue;
+            DisplayPath display;
+            display.monitorName = FriendlyName(path);
+            display.displayName = SourceName(path);
+            display.sourceAdapterLowPart = path.sourceInfo.adapterId.LowPart;
+            display.sourceAdapterHighPart = path.sourceInfo.adapterId.HighPart;
+            display.sourceId = path.sourceInfo.id;
+            display.targetAdapterLowPart = path.targetInfo.adapterId.LowPart;
+            display.targetAdapterHighPart = path.targetInfo.adapterId.HighPart;
+            display.targetId = path.targetInfo.id;
+            display.enabled = false;
+            displays.push_back(std::move(display));
+        }
+    }
+
+    // Saved configs keep the adapter ids from when they were captured; Windows assigns
+    // new ones after a restart. Points each monitor at the current ids.
+    void RefreshAdapterIds(std::vector<DisplayPath>& displays)
+    {
+        DisplayConfiguration configuration;
+        if (!QueryConfiguration(QDC_ALL_PATHS, configuration, nullptr)) return;
+        for (auto& display : displays)
+        {
+            const auto exact = std::find_if(configuration.paths.begin(), configuration.paths.end(), [&display](const auto& path)
+            {
+                return path.targetInfo.id == display.targetId &&
+                    path.targetInfo.adapterId.LowPart == display.targetAdapterLowPart &&
+                    path.targetInfo.adapterId.HighPart == display.targetAdapterHighPart;
+            });
+            if (exact != configuration.paths.end() || display.monitorName.empty()) continue;
+            const DISPLAYCONFIG_PATH_INFO* match = nullptr;
+            for (const auto& path : configuration.paths)
+            {
+                if (path.targetInfo.targetAvailable == FALSE || path.targetInfo.id != display.targetId ||
+                    FriendlyName(path) != display.monitorName) continue;
+                if (!match || path.sourceInfo.id == display.sourceId) match = &path;
+                if (path.sourceInfo.id == display.sourceId) break;
+            }
+            if (!match) continue;
+            display.sourceAdapterLowPart = match->sourceInfo.adapterId.LowPart;
+            display.sourceAdapterHighPart = match->sourceInfo.adapterId.HighPart;
+            display.sourceId = match->sourceInfo.id;
+            display.targetAdapterLowPart = match->targetInfo.adapterId.LowPart;
+            display.targetAdapterHighPart = match->targetInfo.adapterId.HighPart;
+        }
+    }
+
     bool SameDisplay(const DISPLAYCONFIG_PATH_INFO& path, const DisplayPath& display)
     {
         return path.sourceInfo.id == display.sourceId && path.targetInfo.id == display.targetId &&
@@ -376,6 +442,9 @@ bool MonitorPowerController::CaptureSetup(MonitorPowerSetup& setup, std::wstring
         }
         return false;
     }
+    AddInactiveDisplays(detectedDisplays);
+    // Turned-off monitors have no position yet; place them right of the others.
+    SeparateOverlappingDisplays(detectedDisplays);
     setup.displayPaths = std::move(detectedDisplays);
     return true;
 }
@@ -403,6 +472,7 @@ bool MonitorPowerController::ApplySetup(
     }
 
     auto targetDisplays = setup.displayPaths;
+    RefreshAdapterIds(targetDisplays);
     SeparateOverlappingDisplays(targetDisplays, true);
     targetDisplays = PreparePrimary(std::move(targetDisplays));
     const bool allConnected = std::all_of(targetDisplays.begin(), targetDisplays.end(), [](const auto& display)

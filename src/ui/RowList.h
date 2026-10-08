@@ -529,7 +529,8 @@ private:
         {
             if (!row.toggleLabel.empty())
             {
-                RECT label{layout.text.right, layout.bounds.top, layout.toggle.left - Scale(10), layout.bounds.bottom};
+                // Centered on the toggle, not the row, so it stays put when the row expands.
+                RECT label{layout.text.right, layout.toggle.top - Scale(10), layout.toggle.left - Scale(10), layout.toggle.bottom + Scale(10)};
                 SetTextColor(dc, row.toggleEnabled ? RGB(80, 85, 95) : RGB(160, 162, 168));
                 DrawTextW(dc, row.toggleLabel.c_str(), -1, &label, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }

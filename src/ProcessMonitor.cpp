@@ -15,7 +15,7 @@
 #include <winhttp.h>
 
 #ifndef LAUNCHMATE_VERSION
-#define LAUNCHMATE_VERSION "0.2.1"
+#define LAUNCHMATE_VERSION "0.3.0"
 #endif
 
 #define LAUNCHMATE_WIDEN_IMPL(value) L##value

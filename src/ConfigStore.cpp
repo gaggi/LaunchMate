@@ -349,6 +349,35 @@ ConfigStore::ConfigStore()
     configPath_ = appDirectory / L"config.json";
 }
 
+ConfigStore::ConfigStore(std::filesystem::path configPath)
+    : configPath_(std::move(configPath))
+{
+}
+
+AppConfiguration ConfigStore::KeepUnreadableFile(const std::wstring& reason) const
+{
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    wchar_t stamp[32]{};
+    swprintf_s(stamp, L"%04u%02u%02u-%02u%02u%02u", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+    auto backup = configPath_;
+    backup += std::wstring(L".unreadable-") + stamp;
+    std::error_code error;
+    std::filesystem::copy_file(configPath_, backup, std::filesystem::copy_options::overwrite_existing, error);
+    if (!error)
+    {
+        loadProblem_ = L"Your settings could not be read (" + reason + L"). LaunchMate started with defaults; the old file was kept as " +
+            backup.filename().wstring() + L".";
+    }
+    else
+    {
+        saveBlocked_ = true;
+        loadProblem_ = L"Your settings could not be read (" + reason + L"). LaunchMate started with defaults and does not save "
+            L"until it is restarted, so the file stays as it is.";
+    }
+    return AppConfiguration::CreateDefault();
+}
+
 const std::filesystem::path& ConfigStore::Path() const noexcept
 {
     return configPath_;
@@ -356,20 +385,26 @@ const std::filesystem::path& ConfigStore::Path() const noexcept
 
 AppConfiguration ConfigStore::Load() const
 {
-    if (!std::filesystem::exists(configPath_))
+    loadProblem_.clear();
+    saveBlocked_ = false;
+    std::error_code existsError;
+    if (!std::filesystem::exists(configPath_, existsError))
     {
+        if (existsError) return KeepUnreadableFile(L"its folder cannot be accessed");
         return AppConfiguration::CreateDefault();
     }
 
     std::ifstream stream(configPath_, std::ios::binary);
+    if (!stream) return KeepUnreadableFile(L"the file cannot be opened");
     const std::string content((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    if (stream.bad()) return KeepUnreadableFile(L"the file cannot be read");
 
     try
     {
         const auto root = jsonlite::Parse(content);
         if (!root.IsObject())
         {
-            return AppConfiguration::CreateDefault();
+            return KeepUnreadableFile(L"it is not a LaunchMate settings file");
         }
 
         const auto& object = root.AsObject();
@@ -465,12 +500,14 @@ AppConfiguration ConfigStore::Load() const
     }
     catch (...)
     {
-        return AppConfiguration::CreateDefault();
+        return KeepUnreadableFile(L"the file is damaged");
     }
 }
 
 bool ConfigStore::Save(const AppConfiguration& configuration) const
 {
+    // LoadProblem() tells the user; the unreadable original must survive.
+    if (saveBlocked_) return true;
     Object object;
     object["MinimizeToTray"] = configuration.minimizeToTray;
     object["CloseToTray"] = configuration.closeToTray;

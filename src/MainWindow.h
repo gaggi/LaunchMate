@@ -24,12 +24,15 @@ public:
     static constexpr UINT kUpdateCheckResultMessage = WM_APP + 3;
     static constexpr UINT kApplyDownloadedUpdateMessage = WM_APP + 4;
     static constexpr UINT kUpdateErrorMessage = WM_APP + 5;
+    static constexpr UINT kMonitorProblemMessage = WM_APP + 9;
 
     explicit MainWindow(App& app);
     ~MainWindow();
 
     bool Create(int showCommand);
     void SetStatus(const std::wstring& text);
+    // Thread-safe: a failed action for the status banner; empty clears the problems.
+    void ReportProblem(const std::wstring& problem);
     void SyncMonitoringState();
 
 private:
@@ -140,6 +143,8 @@ private:
     // Hotkey ids registered last time; configs may have been removed since.
     size_t registeredHotkeys_{0};
     UpdateState update_;
+    // Failed actions since the last session started, newest last.
+    std::vector<std::wstring> problems_;
     bool appliedStartWithWindows_{false};
     bool appliedStartAsAdministrator_{false};
 };

@@ -1,4 +1,5 @@
 #include "AtomicFile.h"
+#include "ConfigStore.h"
 #include "ui/BackgroundTask.h"
 #include <future>
 #include "JsonLite.h"
@@ -25,6 +26,10 @@ namespace
     }
     int powerApplied = 0, powerRestored = 0, servicesRestored = 0, displaysApplied = 0;
     bool pendingServices = false;
+    // Fake display state: the name of the arrangement currently "on screen".
+    std::wstring displayState = L"original";
+    bool displayCaptureFails = false;
+    int displayApplyFailures = 0;
 }
 
 // Deliberate fakes: tests must never modify Windows services, power plans or displays.
@@ -37,10 +42,17 @@ bool ApplyIRacingServices(const std::vector<std::wstring>&, std::wstring&)
     return false; // Partial success: a service was stopped before a later failure.
 }
 bool RestoreIRacingServices(std::wstring&) { if (pendingServices) ++servicesRestored; pendingServices = false; return true; }
-bool MonitorPowerController::CaptureSetup(MonitorPowerSetup&, std::wstring*) { return true; }
-bool MonitorPowerController::ApplySetup(const MonitorPowerSetup&, const std::function<void(const std::wstring&)>&, std::wstring*)
+bool MonitorPowerController::CaptureSetup(MonitorPowerSetup& setup, std::wstring*)
+{
+    if (displayCaptureFails) return false;
+    setup.name = displayState;
+    return true;
+}
+bool MonitorPowerController::ApplySetup(const MonitorPowerSetup& setup, const std::function<void(const std::wstring&)>&, std::wstring*)
 {
     ++displaysApplied;
+    if (displayApplyFailures > 0) { --displayApplyFailures; return false; }
+    if (!setup.name.empty()) displayState = setup.name;
     return true;
 }
 
@@ -231,6 +243,149 @@ struct ProcessMonitorTestAccess
         monitor.usingEtw_ = false;
         monitor.Stop();
         std::cout << "ETW sessions end through process handles; lost events trigger a resync.\n";
+    }
+
+    static void TestReviewRegressions()
+    {
+        using EventType = EtwProcessListener::ProcessEvent::Type;
+        const auto executable = TestExecutable();
+        auto key = std::filesystem::path(executable).filename().wstring();
+        std::transform(key.begin(), key.end(), key.begin(), towlower);
+        const auto first = SpawnChild(executable, L"--idle-child");
+        std::shared_ptr<void> second;
+
+        // A second instance of a watched program gets the rule's priorities too.
+        {
+            ProcessMonitor monitor([](const auto&) {});
+            monitor.running_ = true;
+            monitor.usingEtw_ = true;
+            auto config = std::make_shared<ProcessMonitor::RuntimeConfiguration>();
+            ProcessMonitor::RuntimeRule rule;
+            rule.processKey = key;
+            rule.displayName = L"Second instance";
+            ProcessPerformanceAction action;
+            action.processName = key;
+            action.cpuPriorityClass = BELOW_NORMAL_PRIORITY_CLASS;
+            rule.processPerformanceActions.push_back(action);
+            config->watchedRules.push_back(rule);
+            config->watchedProcessKeys.insert(key);
+            monitor.runtimeConfiguration_ = config;
+            monitor.pendingEtwEvents_.push_back({EventType::ProcessStarted, key, GetProcessId(first.get())});
+            monitor.ProcessEtwEvents();
+            // Started after the session began, like a real second instance.
+            second = SpawnChild(executable, L"--idle-child");
+            monitor.pendingEtwEvents_.push_back({EventType::ProcessStarted, key, GetProcessId(second.get())});
+            monitor.ProcessEtwEvents();
+            Require(GetPriorityClass(second.get()) == BELOW_NORMAL_PRIORITY_CLASS, "Second watched instance kept its priority");
+            monitor.usingEtw_ = false;
+            monitor.Stop();
+        }
+
+        // One ETW start event must not drop the state of other running instances.
+        {
+            ProcessMonitor monitor([](const auto&) {});
+            monitor.running_ = true;
+            monitor.usingEtw_ = true;
+            monitor.runtimeConfiguration_ = std::make_shared<ProcessMonitor::RuntimeConfiguration>();
+            ProcessMonitor::RuntimeRule rule;
+            rule.processKey = L"sparse-snapshot-test.exe";
+            ProcessPerformanceAction action;
+            action.processName = key;
+            action.cpuPriorityClass = BELOW_NORMAL_PRIORITY_CLASS;
+            rule.processPerformanceActions.push_back(action);
+            monitor.activeRules_[rule.processKey] = rule;
+            for (const auto& child : {first, second})
+            {
+                monitor.pendingEtwEvents_.push_back({EventType::ProcessStarted, key, GetProcessId(child.get())});
+                monitor.ProcessEtwEvents();
+            }
+            Require(monitor.performanceTargetStates_.at(rule.processKey).at(0).size() == 2,
+                "A single ETW start event cleared the state of another instance");
+            monitor.usingEtw_ = false;
+            monitor.Stop();
+        }
+
+        // Only one rule controls the displays, so overlapping sessions restore the original.
+        std::vector<std::wstring> problems;
+        {
+            displayState = L"original";
+            ProcessMonitor monitor([](const auto&) {});
+            monitor.SetProblemCallback([&](const std::wstring& problem) { if (!problem.empty()) problems.push_back(problem); });
+            monitor.running_ = true;
+            ProcessMonitor::RuntimeRule a, b;
+            a.processKey = L"display-a.exe"; b.processKey = L"display-b.exe";
+            a.displayName = L"A"; b.displayName = L"B";
+            a.hasMonitorPowerSetup = b.hasMonitorPowerSetup = true;
+            a.monitorPowerSetup.name = L"A"; b.monitorPowerSetup.name = L"B";
+            monitor.ExecuteStartActions(a);
+            monitor.ExecuteStartActions(b);
+            Require(displayState == L"A", "A second rule switched displays another rule controls");
+            Require(problems.size() == 1 && problems[0].find(L"another watched rule") != std::wstring::npos,
+                "Skipping the second display configuration was not reported");
+            monitor.FinishRule(a);
+            Require(displayState == L"original", "The display owner did not restore the original arrangement");
+            monitor.FinishRule(b);
+            Require(displayState == L"original", "A rule that never switched displays restored an arrangement");
+
+            // Without a saved arrangement the displays are not switched at all.
+            problems.clear();
+            displayCaptureFails = true;
+            const int applied = displaysApplied;
+            monitor.ExecuteStartActions(a);
+            displayCaptureFails = false;
+            Require(displaysApplied == applied && displayState == L"original", "Displays were switched although they could not be restored");
+            Require(problems.size() == 1, "The failed display capture was not reported");
+            monitor.FinishRule(a);
+            Require(monitor.displayOwnerKey_.empty(), "A rule that did not switch displays kept them");
+
+            // A restore that fails once is tried again.
+            monitor.ExecuteStartActions(a);
+            displayApplyFailures = 1;
+            monitor.FinishRule(a);
+            Require(displayApplyFailures == 0 && displayState == L"original", "A failed display restore was not retried");
+            Require(monitor.previousMonitorSetups_.empty() && monitor.displayOwnerKey_.empty(), "Display restore left stale state");
+            monitor.Stop();
+        }
+
+        // The 32-bit build cannot address CPUs above 31 and says so instead of truncating.
+        if constexpr (sizeof(DWORD_PTR) == 4)
+        {
+            std::vector<std::wstring> statuses;
+            ProcessMonitor monitor([&](const auto& status) { statuses.push_back(status); });
+            ProcessMonitor::RuntimeRule rule;
+            rule.processKey = L"affinity-width-test.exe";
+            ProcessPerformanceAction action;
+            action.processName = key;
+            action.affinityMask = std::uint64_t{1} << 40;
+            rule.processPerformanceActions.push_back(action);
+            ProcessMonitor::ProcessSnapshot snapshot;
+            snapshot.valid = true;
+            snapshot.processIdsByName[key] = {GetProcessId(first.get())};
+            monitor.ApplyPerformanceActions(rule, snapshot);
+            Require(std::any_of(statuses.begin(), statuses.end(), [](const auto& status) { return status.find(L"32-bit") != std::wstring::npos; }),
+                "An affinity mask beyond the 32-bit range was applied silently");
+        }
+
+        // A damaged settings file is kept before defaults are used.
+        {
+            const auto directory = std::filesystem::temp_directory_path() / (L"LaunchMate-config-test-" + std::to_wstring(GetCurrentProcessId()));
+            std::filesystem::create_directories(directory);
+            struct Cleanup { std::filesystem::path directory; ~Cleanup() { std::error_code error; std::filesystem::remove_all(directory, error); } } cleanup{directory};
+            const auto file = directory / L"config.json";
+            { std::ofstream damaged(file, std::ios::binary); damaged << "{\"WatchedProcesses\": [ {\"ProcessName\": "; }
+            ConfigStore store(file);
+            const auto loaded = store.Load();
+            Require(loaded.watchedProcesses.empty() && !store.LoadProblem().empty(), "A damaged settings file was not reported");
+            size_t backups = 0;
+            for (const auto& entry : std::filesystem::directory_iterator(directory))
+                if (entry.path().filename().wstring().starts_with(L"config.json.unreadable-")) ++backups;
+            Require(backups == 1, "The damaged settings file was not kept");
+            Require(store.Save(loaded), "Saving after a kept damaged file failed");
+            ConfigStore reread(file);
+            reread.Load();
+            Require(reread.LoadProblem().empty(), "The settings saved after recovery could not be read");
+        }
+        std::cout << "Second instances, single ETW events, display ownership and damaged settings regression tests passed.\n";
     }
 
     static void TestPerformanceSettings()
@@ -882,6 +1037,7 @@ int main(int argc, char** argv)
         ProcessMonitorTestAccess::TestLaunchIgnoresUnrelatedWindows();
         ProcessMonitorTestAccess::TestStopActionCapturesRestartArguments();
         ProcessMonitorTestAccess::TestEtwInstanceHandles();
+        ProcessMonitorTestAccess::TestReviewRegressions();
         std::cout << "JSON, atomic persistence, and monitor session regression tests passed.\n";
         return 0;
     }

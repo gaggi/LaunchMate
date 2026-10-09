@@ -17,11 +17,16 @@ class ProcessMonitor
 {
 public:
     using StatusCallback = std::function<void(const std::wstring&)>;
+    // Gets failed actions; an empty text means a new session started, so earlier
+    // problems no longer apply. Called on the worker thread.
+    using ProblemCallback = std::function<void(const std::wstring&)>;
 
     explicit ProcessMonitor(StatusCallback callback);
     ~ProcessMonitor();
 
     void UpdateConfiguration(const AppConfiguration& configuration);
+    // Set once before Start().
+    void SetProblemCallback(ProblemCallback callback);
     void SetPollInterval(DWORD pollIntervalMs);
     void SetActivePollInterval(DWORD pollIntervalMs);
     void Start();
@@ -118,7 +123,10 @@ private:
     void FinishRule(const RuntimeRule& rule);
     void StartProgramsForRule(const RuntimeRule& rule);
     void ExecuteStartActions(const RuntimeRule& rule);
-    void ApplyPerformanceActions(const RuntimeRule& rule, const ProcessSnapshot& snapshot);
+    // `complete` snapshots list every running process; others (one ETW start event)
+    // only add to the state and never clear what they do not mention.
+    void ApplyPerformanceActions(const RuntimeRule& rule, const ProcessSnapshot& snapshot, bool complete = true);
+    void ReportProblem(const std::wstring& text) const;
     void RestoreMonitorSetupForRule(const RuntimeRule& rule, ULONGLONG exitTick);
     void ExecuteExitActions(const RuntimeRule& rule, ULONGLONG exitTick);
     void StopProgramsForRule(const RuntimeRule& rule);
@@ -138,6 +146,7 @@ private:
 
     std::shared_ptr<const RuntimeConfiguration> runtimeConfiguration_;
     StatusCallback statusCallback_;
+    ProblemCallback problemCallback_;
     std::mutex lifecycleMutex_;
     std::atomic<bool> running_{false};
     std::atomic<DWORD> idlePollIntervalMs_{1000};
@@ -168,4 +177,6 @@ private:
     std::map<std::wstring, GUID> previousPowerSchemes_;
     std::map<std::wstring, std::unordered_map<size_t, std::unordered_map<DWORD, PerformanceTargetState>>> performanceTargetStates_;
     std::wstring serviceOwnerKey_;
+    // Rule whose display configuration is in effect; others leave the displays alone.
+    std::wstring displayOwnerKey_;
 };

@@ -16,7 +16,7 @@ set(LAUNCHMATE_VERSION_PATCH ${CMAKE_MATCH_3})
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(LaunchMateCoreTests tests/CoreTests.cpp src/JsonLite.cpp src/EtwProcessListener.cpp src/ProcessMonitor.cpp)
+    add_executable(LaunchMateCoreTests tests/CoreTests.cpp src/ConfigStore.cpp src/JsonLite.cpp src/EtwProcessListener.cpp src/ProcessMonitor.cpp)
     target_include_directories(LaunchMateCoreTests PRIVATE src)
     target_compile_features(LaunchMateCoreTests PRIVATE cxx_std_20)
     target_compile_definitions(LaunchMateCoreTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

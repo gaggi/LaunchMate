@@ -64,7 +64,12 @@ namespace
         return labels;
     }
 
-    int CpuCount() { return static_cast<int>(std::min<DWORD>(GetActiveProcessorCount(ALL_PROCESSOR_GROUPS), 64)); }
+    // CPUs of the first processor group, as far as an affinity mask of this build reaches
+    // (32 in the x86 build). Machines with more than 64 CPUs are not covered.
+    int CpuCount()
+    {
+        return static_cast<int>(std::min<DWORD>(GetActiveProcessorCount(0), static_cast<DWORD>(sizeof(DWORD_PTR) * 8)));
+    }
 
     bool IsDefault(const ProcessPerformanceAction& action)
     {
@@ -259,7 +264,9 @@ namespace
             editors_.Combo(kEfficiencyId, Labels(kEfficiencyChoices), IndexOf(kEfficiencyChoices, settings.efficiencyMode), 126, 120, 180);
             editors_.Label(L"Like Task Manager. Off keeps Windows from throttling it.", 318, 120, 0);
             editors_.Check(kAllCpusId, L"Use all CPUs", settings.affinityMask == 0, 0, 158, 200);
-            // With Hyper-Threading or SMT, the even CPUs are the first thread of each core.
+            // With Hyper-Threading or SMT, the two threads of a core usually have neighbouring
+            // numbers, so the even CPUs are one thread per core. Intel E-cores have a single
+            // thread each; there, even CPUs leave out every second E-core.
             editors_.Button(kEvenCpusId, L"Even CPUs only", 210, 156, 130);
             editors_.Button(kOddCpusId, L"Odd CPUs only", 350, 156, 130);
             EnableWindow(editors_.Get(kOddCpusId), CpuCount() > 1);

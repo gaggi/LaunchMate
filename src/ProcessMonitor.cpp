@@ -449,6 +449,17 @@ ProcessMonitor::~ProcessMonitor()
     if (stopEvent_ != nullptr) CloseHandle(stopEvent_);
 }
 
+void ProcessMonitor::SetProblemCallback(ProblemCallback callback)
+{
+    problemCallback_ = std::move(callback);
+}
+
+void ProcessMonitor::ReportProblem(const std::wstring& text) const
+{
+    statusCallback_(text);
+    if (problemCallback_) problemCallback_(text);
+}
+
 void ProcessMonitor::UpdateConfiguration(const AppConfiguration& configuration)
 {
     auto prepared = std::make_shared<RuntimeConfiguration>();
@@ -576,10 +587,11 @@ void ProcessMonitor::Stop()
     for (const auto& [key, rule] : activeRules_) FinishRule(rule);
     for (const auto& [processKey, previous] : previousPowerSchemes_)
     {
-        if (!RestorePowerScheme(previous)) statusCallback_(L"Could not restore the previous power plan for " + processKey + L".");
+        if (!RestorePowerScheme(previous)) ReportProblem(L"Could not restore the previous power plan for " + processKey + L".");
     }
     previousPowerSchemes_.clear();
     serviceOwnerKey_.clear();
+    displayOwnerKey_.clear();
     activeRules_.clear();
     watchedInstances_.clear();
     {
@@ -590,7 +602,7 @@ void ProcessMonitor::Stop()
     {
         std::wstring serviceReport;
         if (!RestoreIRacingServices(serviceReport))
-            statusCallback_(L"Monitoring stopped; Windows services still need restoration: " + serviceReport);
+            ReportProblem(L"Monitoring stopped; Windows services still need restoration: " + serviceReport);
         else
             statusCallback_(L"Monitoring stopped.");
     }
@@ -602,7 +614,7 @@ void ProcessMonitor::RecoverIRacingServices()
     if (!HasPendingIRacingServiceRestore()) return;
     std::wstring report;
     if (RestoreIRacingServices(report)) statusCallback_(L"Restored Windows services from the previous session.");
-    else statusCallback_(L"Windows services still need restoration. Run LaunchMate as Administrator. " + report);
+    else ReportProblem(L"Windows services still need restoration. Run LaunchMate as Administrator. " + report);
 }
 
 bool ProcessMonitor::IsRunning() const noexcept
@@ -913,6 +925,7 @@ void ProcessMonitor::ActivateRule(
     SyncWatchedInstances(rule.processKey, processIds);
     RefreshEtwProcessKeys(configuration);
     statusCallback_(rule.displayName + L" detected. Running actions.");
+    if (problemCallback_) problemCallback_({});
     ExecuteStartActions(rule);
 }
 
@@ -1083,6 +1096,15 @@ void ProcessMonitor::ProcessEtwEvents()
         }
 
         const bool started = event.type == EventType::ProcessStarted;
+        // ETW reports each start once; apply every active rule's settings to just that
+        // instance, without treating it as a full snapshot.
+        const auto applyToStartedInstance = [&]
+        {
+            ProcessSnapshot snapshot;
+            snapshot.valid = true;
+            snapshot.processIdsByName[event.imageName].push_back(event.processId);
+            for (const auto& [key, rule] : activeRules_) ApplyPerformanceActions(rule, snapshot, false);
+        };
         if (!configuration->watchedProcessKeys.contains(event.imageName) && !activeRules_.contains(event.imageName))
         {
             // This is a configured performance target, such as a helper
@@ -1102,14 +1124,7 @@ void ProcessMonitor::ProcessEtwEvents()
                     }
                 }
             }
-            else
-            {
-                ProcessSnapshot snapshot;
-                snapshot.valid = true;
-                snapshot.processIdsByName[event.imageName].push_back(event.processId);
-                for (const auto& [key, rule] : activeRules_)
-                    ApplyPerformanceActions(rule, snapshot);
-            }
+            else applyToStartedInstance();
             continue;
         }
 
@@ -1123,6 +1138,7 @@ void ProcessMonitor::ProcessEtwEvents()
         if (activeRules_.contains(event.imageName))
         {
             TrackWatchedInstance(event.imageName, event.processId);
+            applyToStartedInstance();
             continue;
         }
         const auto rule = std::find_if(configuration->watchedRules.begin(), configuration->watchedRules.end(),
@@ -1130,6 +1146,8 @@ void ProcessMonitor::ProcessEtwEvents()
         if (rule == configuration->watchedRules.end()) continue;
         CacheProcessState(event.imageName, true);
         ActivateRule(*configuration, *rule, {event.processId});
+        // Other active rules may list this program as a performance target.
+        applyToStartedInstance();
     }
 }
 
@@ -1173,14 +1191,14 @@ void ProcessMonitor::FinishRule(const RuntimeRule& rule)
         if (HasPendingIRacingServiceRestore())
         {
             std::wstring report;
-            if (!RestoreIRacingServices(report)) statusCallback_(L"Could not restore Windows services: " + report);
+            if (!RestoreIRacingServices(report)) ReportProblem(L"Could not restore Windows services: " + report);
         }
         serviceOwnerKey_.clear();
     }
     if (const auto previous = previousPowerSchemes_.find(rule.processKey); previous != previousPowerSchemes_.end())
     {
         if (RestorePowerScheme(previous->second)) previousPowerSchemes_.erase(previous);
-        else statusCallback_(L"Could not restore the previous power plan.");
+        else ReportProblem(L"Could not restore the previous power plan.");
     }
     RestoreMonitorSetupForRule(rule, exitTick);
     StopProgramsForRule(rule);
@@ -1200,42 +1218,51 @@ void ProcessMonitor::ExecuteStartActions(const RuntimeRule& rule)
     {
         if (!previousPowerSchemes_.empty())
         {
-            statusCallback_(L"Power Plan action skipped: another watched rule currently owns the power plan.");
+            ReportProblem(L"Power Plan action skipped: another watched rule currently owns the power plan.");
         }
         else
         {
             GUID previous{};
             if (ActivatePowerScheme(rule.powerSchemeGuid, previous)) previousPowerSchemes_[rule.processKey] = previous;
-            else statusCallback_(L"Could not activate the selected power plan.");
+            else ReportProblem(L"Could not activate the selected power plan.");
         }
     }
-    if (rule.hasMonitorPowerSetup)
+    if (rule.hasMonitorPowerSetup && !displayOwnerKey_.empty() && displayOwnerKey_ != rule.processKey)
+    {
+        // Two rules switching displays would restore each other's arrangement.
+        ReportProblem(L"Display configuration skipped for " + rule.displayName + L": another watched rule currently controls the displays.");
+    }
+    else if (rule.hasMonitorPowerSetup)
     {
         const DWORD applyDelay = static_cast<DWORD>(std::max(0, rule.monitorPowerSetupDelayMilliseconds));
         if (!WaitForDelay(applyDelay)) return;
 
         MonitorPowerSetup previousSetup;
         std::wstring errorMessage;
-        bool capturedPrevious = false;
+        bool canApply = true;
         if (rule.restoreMonitorPowerSetupOnExit)
         {
             previousSetup.name = L"Previous display configuration";
-            capturedPrevious = MonitorPowerController::CaptureSetup(previousSetup, &errorMessage);
-            if (!capturedPrevious)
+            if (MonitorPowerController::CaptureSetup(previousSetup, &errorMessage))
             {
-                statusCallback_(L"Could not capture the current monitor configuration: " + errorMessage);
+                std::scoped_lock lock(mutex_);
+                previousMonitorSetups_[rule.processKey] = std::move(previousSetup);
+            }
+            else
+            {
+                // Without the current arrangement the displays could not be put back.
+                ReportProblem(L"Display configuration not changed: the current arrangement could not be saved for restoring it later. " + errorMessage);
+                canApply = false;
             }
         }
-
-        if (capturedPrevious)
+        if (canApply)
         {
-            std::scoped_lock lock(mutex_);
-            previousMonitorSetups_[rule.processKey] = std::move(previousSetup);
-        }
-        errorMessage.clear();
-        if (!MonitorPowerController::ApplySetup(rule.monitorPowerSetup, {}, &errorMessage))
-        {
-            statusCallback_(L"Could not apply monitor config " + rule.monitorPowerSetup.name + L": " + errorMessage);
+            displayOwnerKey_ = rule.processKey;
+            errorMessage.clear();
+            if (!MonitorPowerController::ApplySetup(rule.monitorPowerSetup, {}, &errorMessage))
+            {
+                ReportProblem(L"Could not apply monitor config " + rule.monitorPowerSetup.name + L": " + errorMessage);
+            }
         }
     }
 
@@ -1254,18 +1281,18 @@ void ProcessMonitor::ExecuteStartActions(const RuntimeRule& rule)
         const DWORD delay = static_cast<DWORD>(std::max(0, action->waitTimeMilliseconds));
         const ULONGLONG elapsed = GetTickCount64() - startTick;
         if (!WaitForDelay(elapsed < delay ? static_cast<DWORD>(delay - elapsed) : 0)) return;
-        if (!PostWebhook(*action)) statusCallback_(L"Home Assistant webhook failed: " + action->displayName);
+        if (!PostWebhook(*action)) ReportProblem(L"Home Assistant webhook failed: " + action->displayName);
     }
 
     if (!running_.load()) return;
     if (!rule.servicesToStop.empty())
     {
-        if (!serviceOwnerKey_.empty()) statusCallback_(L"Services action skipped: another watched rule currently owns the service state.");
+        if (!serviceOwnerKey_.empty()) ReportProblem(L"Services action skipped: another watched rule currently owns the service state.");
         else
         {
             std::wstring report;
             if (!ApplyIRacingServices(rule.servicesToStop, report))
-                statusCallback_(L"Windows service action: " + report);
+                ReportProblem(L"Windows service action: " + report);
             // Partial success also leaves services that must be restored at session end.
             if (HasPendingIRacingServiceRestore()) serviceOwnerKey_ = rule.processKey;
         }
@@ -1273,7 +1300,7 @@ void ProcessMonitor::ExecuteStartActions(const RuntimeRule& rule)
     StartProgramsForRule(rule);
 }
 
-void ProcessMonitor::ApplyPerformanceActions(const RuntimeRule& rule, const ProcessSnapshot& snapshot)
+void ProcessMonitor::ApplyPerformanceActions(const RuntimeRule& rule, const ProcessSnapshot& snapshot, bool complete)
 {
     constexpr unsigned kCpuPriorityApplied = 1u << 0;
     constexpr unsigned kIoPriorityApplied = 1u << 1;
@@ -1292,7 +1319,7 @@ void ProcessMonitor::ApplyPerformanceActions(const RuntimeRule& rule, const Proc
         auto& processStates = ruleStates[actionIndex];
         if (found == snapshot.processIdsByName.end())
         {
-            processStates.clear();
+            if (complete) processStates.clear();
             continue;
         }
         std::unordered_set<DWORD> stillRunning(found->second.begin(), found->second.end());
@@ -1306,8 +1333,8 @@ void ProcessMonitor::ApplyPerformanceActions(const RuntimeRule& rule, const Proc
             const auto reportGiveUp = [&]
             {
                 if (lastAttempt)
-                    statusCallback_(L"Stopped retrying performance settings for " + action.processName +
-                        L" (PID " + std::to_wstring(processId) + L").");
+                    ReportProblem(state.lastFailure + L" Gave up after " + std::to_wstring(kMaxPerformanceAttempts) +
+                        L" attempts (PID " + std::to_wstring(processId) + L").");
             };
             HANDLE process = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
             if (!process)
@@ -1353,7 +1380,9 @@ void ProcessMonitor::ApplyPerformanceActions(const RuntimeRule& rule, const Proc
             }
             if (action.affinityMask != 0 && (state.appliedSettings & kAffinityApplied) == 0)
             {
-                if (!SetProcessAffinityMask(process, static_cast<DWORD_PTR>(action.affinityMask)))
+                if (static_cast<std::uint64_t>(static_cast<DWORD_PTR>(action.affinityMask)) != action.affinityMask)
+                    failures.push_back(L"CPU affinity (it uses CPUs that the 32-bit LaunchMate cannot address)");
+                else if (!SetProcessAffinityMask(process, static_cast<DWORD_PTR>(action.affinityMask)))
                     failures.push_back(L"CPU affinity (Windows error " + std::to_wstring(GetLastError()) + L")");
                 else state.appliedSettings |= kAffinityApplied;
             }
@@ -1400,31 +1429,45 @@ void ProcessMonitor::ApplyPerformanceActions(const RuntimeRule& rule, const Proc
                 reportGiveUp();
             }
         }
-        for (auto it = processStates.begin(); it != processStates.end();)
-            if (!stillRunning.contains(it->first)) it = processStates.erase(it); else ++it;
+        if (complete)
+            for (auto it = processStates.begin(); it != processStates.end();)
+                if (!stillRunning.contains(it->first)) it = processStates.erase(it); else ++it;
     }
 }
 
 void ProcessMonitor::RestoreMonitorSetupForRule(const RuntimeRule& rule, ULONGLONG exitTick)
 {
+    if (displayOwnerKey_ != rule.processKey) return;
     MonitorPowerSetup previousSetup;
     {
         std::scoped_lock lock(mutex_);
         const auto monitorIt = previousMonitorSetups_.find(rule.processKey);
-        if (monitorIt == previousMonitorSetups_.end()) return;
-        previousSetup = std::move(monitorIt->second);
-        previousMonitorSetups_.erase(monitorIt);
+        if (monitorIt == previousMonitorSetups_.end())
+        {
+            displayOwnerKey_.clear(); // No restore wanted; the displays are free again.
+            return;
+        }
+        previousSetup = monitorIt->second;
     }
 
     const DWORD restoreDelay = static_cast<DWORD>(std::max(0, rule.restoreMonitorPowerSetupDelayMilliseconds));
     const ULONGLONG elapsed = GetTickCount64() - exitTick;
     if (elapsed < restoreDelay) WaitForDelay(static_cast<DWORD>(restoreDelay - elapsed));
 
+    // Monitors that are just waking up can refuse the first attempt.
     std::wstring errorMessage;
-    if (!MonitorPowerController::ApplySetup(previousSetup, {}, &errorMessage))
+    bool restored = MonitorPowerController::ApplySetup(previousSetup, {}, &errorMessage);
+    if (!restored && WaitForDelay(2000))
     {
-        statusCallback_(L"Could not restore the previous monitor configuration: " + errorMessage);
+        errorMessage.clear();
+        restored = MonitorPowerController::ApplySetup(previousSetup, {}, &errorMessage);
     }
+    if (!restored) ReportProblem(L"Could not restore the previous monitor configuration: " + errorMessage);
+    {
+        std::scoped_lock lock(mutex_);
+        previousMonitorSetups_.erase(rule.processKey);
+    }
+    displayOwnerKey_.clear();
 }
 
 void ProcessMonitor::ExecuteExitActions(const RuntimeRule& rule, ULONGLONG exitTick)
@@ -1468,7 +1511,7 @@ void ProcessMonitor::ExecuteExitActions(const RuntimeRule& rule, ULONGLONG exitT
         program.arguments = record.arguments;
         if (!LaunchProgramProcess(program).success)
         {
-            statusCallback_(L"Could not restart process: " + action.displayName +
+            ReportProblem(L"Could not restart process: " + action.displayName +
                 L" (Windows error " + std::to_wstring(GetLastError()) + L"; " + launchStage + L")");
         }
         else statusCallback_(L"Restarted process: " + action.displayName + L".");
@@ -1490,7 +1533,7 @@ void ProcessMonitor::StopConfiguredProcesses(const RuntimeRule& rule)
     HANDLE processSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (processSnapshot == INVALID_HANDLE_VALUE)
     {
-        statusCallback_(L"Could not list running processes for the stop actions.");
+        ReportProblem(L"Could not list running processes for the stop actions.");
         return;
     }
     PROCESSENTRY32W entry{};
@@ -1570,11 +1613,11 @@ void ProcessMonitor::StopConfiguredProcesses(const RuntimeRule& rule)
     std::vector<StoppedProcessRecord> stoppedForRestart;
     for (size_t index = 0; index < actions.size(); ++index)
     {
-        if (failed[index]) statusCallback_(L"Could not stop " + actions[index].processName + L".");
+        if (failed[index]) ReportProblem(L"Could not stop " + actions[index].processName + L".");
         else if (stopped[index] && actions[index].restartAfterWatchProcessEnds)
         {
             if (restartRecords[index].executablePath.empty())
-                statusCallback_(L"Cannot restart " + actions[index].processName + L" later: its executable path is unknown.");
+                ReportProblem(L"Cannot restart " + actions[index].processName + L" later: its executable path is unknown.");
             else stoppedForRestart.push_back(std::move(restartRecords[index]));
         }
     }
@@ -1613,7 +1656,7 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeRule& rule)
         std::error_code pathError;
         if (program.filePath.empty() || !std::filesystem::exists(program.filePath, pathError))
         {
-            statusCallback_(L"Program file not found: " + program.filePath);
+            ReportProblem(L"Program file not found: " + program.filePath);
             continue;
         }
 
@@ -1627,7 +1670,7 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeRule& rule)
         if (!program.closeWhenGameStops)
         {
             if (!LaunchProgramProcess(program).success)
-                statusCallback_(L"Could not launch program: " + program.displayName +
+                ReportProblem(L"Could not launch program: " + program.displayName +
                     L" (Windows error " + std::to_wstring(GetLastError()) + L"; " + launchStage + L")");
             continue; // No ownership tracking or settling delay is needed.
         }
@@ -1648,7 +1691,7 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeRule& rule)
         const DWORD launchedRootProcessId = launch.processId;
         if (!launch.success)
         {
-            statusCallback_(L"Could not launch program: " + program.displayName +
+            ReportProblem(L"Could not launch program: " + program.displayName +
                 L" (Windows error " + std::to_wstring(GetLastError()) + L"; " + launchStage + L")");
             continue;
         }
@@ -1723,7 +1766,7 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeRule& rule)
         statusCallback_(L"Started " + program.displayName + L"; tracking " + std::to_wstring(liveCount) +
             L" running process(es) for closing.");
         if (liveCount == 0)
-            statusCallback_(L"Cannot track the running app for " + program.displayName +
+            ReportProblem(L"Cannot track the running app for " + program.displayName +
                 L". Its launcher may have handed off to another process; automatic closing is unavailable.");
         records.push_back(std::move(record));
     }
@@ -1839,7 +1882,7 @@ void ProcessMonitor::StopProgramsForRule(const RuntimeRule& rule)
         for (size_t index = 0; index < targets.size(); ++index)
         {
             if (exited[index]) continue;
-            statusCallback_(L"Could not close " + records[targets[index].group].program.displayName +
+            ReportProblem(L"Could not close " + records[targets[index].group].program.displayName +
                 L" (PID " + std::to_wstring(GetProcessId(targets[index].process.get())) + L").");
         }
         first = last;

@@ -90,8 +90,14 @@ App::~App()
 int App::Run(int showCommand)
 {
     LogMessage(L"Application starting.");
+    if (!configStore_.LoadProblem().empty()) LogMessage(configStore_.LoadProblem());
 
     mainWindow_ = std::make_unique<MainWindow>(*this);
+    // Stop() in the destructor ends the worker before the window goes away.
+    monitor_.SetProblemCallback([this](const std::wstring& problem)
+    {
+        if (mainWindow_) mainWindow_->ReportProblem(problem);
+    });
     if (!mainWindow_->Create(showCommand))
     {
         LogMessage(L"Failed to create main window.");

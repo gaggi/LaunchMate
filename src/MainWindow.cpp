@@ -159,6 +159,12 @@ namespace
         }
     }
 
+    // The watched program's file name; rules are matched by it, not by path.
+    std::wstring ProgramFileName(const WatchedProcessRule& rule)
+    {
+        return std::filesystem::path(rule.processName.empty() ? rule.executablePath : rule.processName).filename().wstring();
+    }
+
     struct PostedUpdateCheckResult
     {
         UpdateCheckResult result;
@@ -261,7 +267,13 @@ bool MainWindow::Create(int showCommand)
 
 void MainWindow::SetStatus(const std::wstring& text)
 {
+    // Progress messages go to the log (App); failures arrive through ReportProblem.
     (void)text;
+}
+
+void MainWindow::ReportProblem(const std::wstring& problem)
+{
+    PostOwnedMessage(windowHandle_, kMonitorProblemMessage, new std::wstring(problem));
 }
 
 void MainWindow::SyncMonitoringState()
@@ -284,6 +296,13 @@ void MainWindow::RefreshStatusPanel()
 {
     if (!statusPanel_.Handle()) return;
     auto& monitor = app_.Monitor();
+    // Problems come first: the banner is the one place that is always visible.
+    std::wstring warning = app_.Config().LoadProblem();
+    if (warning.empty() && !problems_.empty())
+    {
+        warning = problems_.back();
+        if (problems_.size() > 1) warning = L"(" + std::to_wstring(problems_.size()) + L" problems) " + warning;
+    }
     if (monitorStopping_)
     {
         statusPanel_.SetState(StatusPanel::Tone::Busy, L"Stopping monitoring...",
@@ -292,8 +311,8 @@ void MainWindow::RefreshStatusPanel()
     }
     if (!monitor.IsRunning())
     {
-        statusPanel_.SetState(StatusPanel::Tone::Neutral, L"Monitoring is off",
-            L"Start monitoring to run your rules automatically.", L"Start monitoring", true);
+        statusPanel_.SetState(warning.empty() ? StatusPanel::Tone::Neutral : StatusPanel::Tone::Busy, L"Monitoring is off",
+            warning.empty() ? L"Start monitoring to run your rules automatically." : warning, L"Start monitoring", true);
         return;
     }
 
@@ -320,7 +339,10 @@ void MainWindow::RefreshStatusPanel()
             : enabledRules.size() == 1 ? L"  \u00B7  Waiting for " + ruleName(rules[enabledRules.front()])
             : L"  \u00B7  Waiting for " + std::to_wstring(enabledRules.size()) + L" watched programs";
     }
-    statusPanel_.SetState(StatusPanel::Tone::Active, L"Monitoring active", detail, L"Stop monitoring", true);
+    if (!warning.empty())
+        statusPanel_.SetState(StatusPanel::Tone::Busy, L"Monitoring active", warning, L"Stop monitoring", true);
+    else
+        statusPanel_.SetState(StatusPanel::Tone::Active, L"Monitoring active", detail, L"Stop monitoring", true);
 }
 
 LRESULT CALLBACK MainWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -483,6 +505,20 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             return 0;
         }
 
+        if (message == kMonitorProblemMessage)
+        {
+            std::unique_ptr<std::wstring> problem(reinterpret_cast<std::wstring*>(lParam));
+            if (!problem) return 0;
+            if (problem->empty()) problems_.clear();
+            else
+            {
+                problems_.push_back(*problem);
+                if (problems_.size() > 20) problems_.erase(problems_.begin());
+            }
+            RefreshStatusPanel();
+            return 0;
+        }
+
         if (message == kMonitorStoppedMessage)
         {
             if (monitorStopThread_.joinable()) monitorStopThread_.join();
@@ -544,6 +580,8 @@ void MainWindow::CreateFonts()
     if (navBar_.Handle()) navBar_.SetFonts(headingFont_, uiFont_);
     for (CardList* cards : {&ruleCards_, &startCards_, &exitCards_})
         if (cards->Handle()) cards->SetFonts(headingFont_, uiFont_);
+    // Embedded pages and their lists keep the font handles they were created with.
+    if (pageHost_.Content()) ShowPage(page_);
     DeleteObject(oldUi);
     DeleteObject(oldHeading);
 }
@@ -756,7 +794,12 @@ void MainWindow::PopulateRuleCards()
         item.title = RuleName(rule);
         item.subtitle = rule.executablePath.empty() ? rule.processName : rule.executablePath;
         const auto& state = index < states.size() ? states[index] : std::wstring(L"Unknown");
+        const bool duplicate = std::any_of(rules.begin(), rules.begin() + static_cast<std::ptrdiff_t>(index), [&rule](const auto& earlier)
+        {
+            return earlier.enabled && _wcsicmp(ProgramFileName(earlier).c_str(), ProgramFileName(rule).c_str()) == 0;
+        });
         if (!rule.enabled) { item.pill = L"Disabled"; item.pillTone = CardList::Tone::Warning; }
+        else if (duplicate) { item.pill = L"Not watched: duplicate"; item.pillTone = CardList::Tone::Warning; }
         else if (state == L"Running") { item.pill = L"Running"; item.pillTone = CardList::Tone::Active; }
         else { item.pill = state; item.pillTone = CardList::Tone::Neutral; }
         item.muted = !rule.enabled;
@@ -1062,6 +1105,7 @@ void MainWindow::ToggleMonitoring()
     }
     else
     {
+        problems_.clear();
         app_.Monitor().UpdateConfiguration(app_.Configuration());
         app_.Monitor().Start();
     }
@@ -1243,6 +1287,15 @@ void MainWindow::AddWatchedProcess()
     const auto rule = SelectWatchedProcess();
     if (rule.processName.empty()) return;
     auto& rules = app_.Configuration().watchedProcesses;
+    // Programs are recognized by file name, so a second rule would never run; open the existing one.
+    for (size_t index = 0; index < rules.size(); ++index)
+    {
+        if (_wcsicmp(ProgramFileName(rules[index]).c_str(), ProgramFileName(rule).c_str()) == 0)
+        {
+            OpenRule(static_cast<int>(index));
+            return;
+        }
+    }
     rules.push_back(rule);
     SaveConfiguration();
     OpenRule(static_cast<int>(rules.size()) - 1);

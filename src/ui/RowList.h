@@ -695,9 +695,11 @@ private:
         case WM_LBUTTONDOWN:
         case WM_LBUTTONDBLCLK:
         {
-            SetFocus(window_);
+            // Hit-test before taking focus: the first focus scrolls the focused row into view,
+            // which would otherwise move another row under the mouse.
             pressed_ = HitTest({GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
             if (pressed_.row >= 0) focused_ = pressed_.row;
+            SetFocus(window_);
             InvalidateRect(window_, nullptr, FALSE);
             return 0;
         }

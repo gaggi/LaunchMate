@@ -197,6 +197,13 @@ private:
             if (wParam == VK_LEFT) { Select(selected_ - 1); return 0; }
             if (wParam == VK_RIGHT) { Select(selected_ + 1); return 0; }
             break;
+        // Like standard controls, so a parent can swap fonts after a DPI change.
+        case WM_SETFONT:
+            font_ = reinterpret_cast<HFONT>(wParam);
+            if (LOWORD(lParam)) InvalidateRect(window_, nullptr, FALSE);
+            return 0;
+        case WM_GETFONT:
+            return reinterpret_cast<LRESULT>(font_);
         case WM_SETFOCUS:
         case WM_KILLFOCUS:
             InvalidateRect(window_, nullptr, FALSE);

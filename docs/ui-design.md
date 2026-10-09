@@ -82,7 +82,7 @@ gray means "idle". Do not use color as the only signal; pills always carry text.
 | `NavBar` | The sidebar. Page items stay highlighted; non-page items only send a command. Icons are Segoe Fluent glyphs. `SetFooter(text, highlight)` changes the version line, for example to "Update available: 0.4.0" in the accent color. |
 | `StatusPanel` | The banner at the top: neutral, active (green) or busy (amber), title, detail line and one primary button. |
 | `CardList` | Overviews of objects (rules, profiles, sessions): title, subtitle, status pill, summary chips, chevron. A count (`trailing`) is a gray pill centered next to the chevron. A click opens the object. |
-| `RowList` | Settings-style lists: section headers with cards of rows; a row can have an icon, detail, pill, toggle with label, one text button and icon buttons. A row can expand to show edit controls below its top line (`expandHeight`, `ExpansionRect()`, `kLayoutChanged`). |
+| `RowList` | Settings-style lists: section headers with cards of rows; a row can have an icon, detail, pill, toggle with label, one text button and icon buttons. A row can expand to show edit controls below its top line (`expandHeight`, `ExpansionRect()`, `kLayoutChanged`). Rows of one card share their icon button columns, so toggles line up; a `0` glyph is an empty slot. |
 | `SegmentedControl` | Switching between 2–4 views of the same data (for example sources of a list). |
 | `RowEditors` | The edit controls inside an expanded `RowList` row: `Begin(row)`, then `Label`, `Edit`, `Seconds`, `Check`, `Combo`, `Button` at DIP offsets inside the expansion (width 0 stretches); `Position()` after scrolling or a layout change, `Clear()` when the row collapses. `SecondsText` / `ParseSeconds` convert milliseconds and accept "1,5" as well as "1.5". |
 | `PageWindow` | Base class for an embedded page: owns its controls, handles their messages, deletes itself with its window. `ChooseFromMenu(items, checked, disabled)` shows a pick list as a popup menu at the cursor (empty item = separator) and returns the chosen index or -1. |
@@ -98,6 +98,13 @@ the control tells which row or item was used (`NotifiedRow()`, `FocusedIndex()` 
 - **Sidebar pages** for places the user visits: overviews, settings, libraries.
   Sub-pages (one object, one section of it) get a back button with the parent's
   name ("← iRacing") next to the page title.
+- **Controls line up in columns.** Within a card, toggles, text buttons and icon
+  buttons of every row sit in the same columns, even when only some rows can expand.
+  `RowList` reserves as many icon button slots in each row as the row with the most
+  has. `iconButtons[0]` is the rightmost slot; give the same button the same index in
+  every row and fill gaps with `0`. For example, with move arrows on all rows and an
+  expand arrow on some: `{expand, down, up}` on rows that expand and `{0, down, up}`
+  on the others.
 - **Expand a row for an item's settings** (an arrow on the right, or a click on the
   row). The most important option stays a switch in the row itself; the expanded
   area holds the rest, including multi-line fields such as a JSON payload. Times

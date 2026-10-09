@@ -58,7 +58,10 @@ public:
         bool toggleEnabled{true};
         std::wstring button;
         bool buttonEnabled{true};
-        // Glyphs from Segoe Fluent Icons / Segoe MDL2 Assets.
+        // Glyphs from Segoe Fluent Icons / Segoe MDL2 Assets; [0] is the rightmost.
+        // Every row of a card reserves as many slots as the row with the most, so
+        // toggles and buttons line up. A 0 glyph leaves its slot empty, which keeps
+        // the same button in the same column when only some rows have, say, an arrow.
         std::vector<wchar_t> iconButtons;
         bool muted{};
         bool selected{};
@@ -221,6 +224,17 @@ private:
         const int right = client.right - Scale(1);
         std::vector<Layout> layouts(rows_.size());
         const HDC dc = GetDC(window_);
+        // Icon button slots per card: rows between two headers share one column layout.
+        std::vector<size_t> slots(rows_.size());
+        for (size_t first = 0; first < rows_.size();)
+        {
+            size_t last = first;
+            size_t most = 0;
+            for (; last < rows_.size() && !(rows_[last].header && last != first); ++last)
+                if (!rows_[last].header) most = std::max(most, rows_[last].iconButtons.size());
+            for (size_t index = first; index < last; ++index) slots[index] = most;
+            first = last;
+        }
         int y = 0;
         bool inCard = false;
         for (size_t index = 0; index < rows_.size(); ++index)
@@ -245,12 +259,15 @@ private:
                 layout.expansion = {Scale(14), y + lineHeight, right - Scale(14), y + height - Scale(10)};
             int x = right - Scale(12);
             const int middle = y + lineHeight / 2;
-            for (size_t button = 0; button < row.iconButtons.size(); ++button)
+            for (size_t button = 0; button < slots[index]; ++button)
             {
-                layout.iconButtons.push_back({x - Scale(30), middle - Scale(15), x, middle + Scale(15)});
+                // Empty slots (0 glyphs, or slots only other rows use) get an empty rectangle.
+                const bool used = button < row.iconButtons.size() && row.iconButtons[button] != 0;
+                if (button < row.iconButtons.size())
+                    layout.iconButtons.push_back(used ? RECT{x - Scale(30), middle - Scale(15), x, middle + Scale(15)} : RECT{});
                 x -= Scale(32);
             }
-            if (!row.iconButtons.empty()) x -= Scale(4);
+            if (slots[index] != 0) x -= Scale(4);
             if (!row.button.empty())
             {
                 const int width = TextWidth(dc, textFont_, row.button) + Scale(28);
@@ -550,6 +567,7 @@ private:
         SelectObject(dc, glyphFont_);
         for (size_t button = 0; button < row.iconButtons.size(); ++button)
         {
+            if (row.iconButtons[button] == 0) continue;
             const bool buttonHover = hovered && hover_.kind == PartKind::IconButton && hover_.iconButton == static_cast<int>(button);
             if (buttonHover) FillRounded(dc, layout.iconButtons[button], Scale(6), RGB(238, 240, 243), RGB(238, 240, 243));
             SetTextColor(dc, buttonHover ? UiTheme::Text : RGB(110, 112, 118));

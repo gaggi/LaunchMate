@@ -24,6 +24,28 @@ namespace
     {
         if (!condition) throw std::runtime_error(message);
     }
+
+    // Windows Server 2022 (build 20348, the GitHub runner) applies efficiency mode but
+    // does not report it back; Windows 11 (build 22000 and later) does.
+    bool ReportsEfficiencyMode()
+    {
+        using RtlGetVersionFunction = LONG(WINAPI*)(OSVERSIONINFOW*);
+        const auto getVersion = reinterpret_cast<RtlGetVersionFunction>(
+            GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
+        OSVERSIONINFOW version{sizeof(version)};
+        return getVersion && getVersion(&version) == 0 && version.dwBuildNumber >= 22000;
+    }
+
+    bool CurrentProcessIsElevated()
+    {
+        HANDLE token = nullptr;
+        TOKEN_ELEVATION elevation{};
+        DWORD size = 0;
+        const bool read = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) &&
+            GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size) != FALSE;
+        if (token) CloseHandle(token);
+        return read && elevation.TokenIsElevated;
+    }
     int powerApplied = 0, powerRestored = 0, servicesRestored = 0, displaysApplied = 0;
     bool pendingServices = false;
     // Fake display state: the name of the arrangement currently "on screen".
@@ -465,12 +487,15 @@ struct ProcessMonitorTestAccess
         DWORD_PTR processMask = 0, systemMask = 0;
         Require(GetProcessAffinityMask(process, &processMask, &systemMask) != FALSE && processMask == 1,
             "CPU affinity was not applied");
-        PROCESS_POWER_THROTTLING_STATE throttling{};
-        throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
-        Require(GetProcessInformation(process, ProcessPowerThrottling, &throttling, sizeof(throttling)) != FALSE &&
-            (throttling.ControlMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) != 0 &&
-            (throttling.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) != 0,
-            "Efficiency mode was not applied");
+        if (ReportsEfficiencyMode())
+        {
+            PROCESS_POWER_THROTTLING_STATE throttling{};
+            throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+            Require(GetProcessInformation(process, ProcessPowerThrottling, &throttling, sizeof(throttling)) != FALSE &&
+                (throttling.ControlMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) != 0 &&
+                (throttling.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) != 0,
+                "Efficiency mode was not applied");
+        }
         CloseHandle(process);
         std::cout << "Performance settings and retry passed; test token elevated: "
             << (tokenElevationKnown && currentElevation.TokenIsElevated ? "yes" : "no/unknown")
@@ -641,7 +666,9 @@ struct ProcessMonitorTestAccess
         const bool tokenRead = GetTokenInformation(childToken, TokenElevation, &childElevation,
             sizeof(childElevation), &tokenSize) != FALSE;
         CloseHandle(childToken);
-        Require(tokenRead && !childElevation.TokenIsElevated, "Launched child unexpectedly has administrator rights");
+        // Launched apps never gain rights; run elevated (the GitHub runner), they keep the parent's.
+        Require(tokenRead && (CurrentProcessIsElevated() || !childElevation.TokenIsElevated),
+            "Launched child unexpectedly has administrator rights");
         monitor.Stop();
         Require(WaitForSingleObject(owned.get(), 0) == WAIT_OBJECT_0, "Launched child was not cleaned up");
         std::cout << "Real snapshot detection, launch without inherited low priority or efficiency mode, and owned-child cleanup passed.\n";

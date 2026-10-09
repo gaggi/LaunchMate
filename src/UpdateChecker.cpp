@@ -1,15 +1,14 @@
 #include "UpdateChecker.h"
 
 #include "JsonLite.h"
-#include "Utils.h"
 
 #include <algorithm>
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <memory>
-#include <sstream>
 #include <vector>
+#include <limits>
 #include <windows.h>
 #include <bcrypt.h>
 #include <shellapi.h>
@@ -58,6 +57,16 @@ namespace
         bool hasSuffix{false};
     };
 
+    std::wstring ToWide(const std::string& text)
+    {
+        if (text.empty()) return {};
+        const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()), nullptr, 0);
+        if (count <= 0) return {};
+        std::wstring result(count, L'\0');
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()), result.data(), count);
+        return result;
+    }
+
     std::wstring ReadWideString(const Object& object, const char* key)
     {
         const auto it = object.find(key);
@@ -104,7 +113,10 @@ namespace
             int value = 0;
             while (index < normalized.size() && std::iswdigit(static_cast<wint_t>(normalized[index])) != 0)
             {
-                value = (value * 10) + (normalized[index] - L'0');
+                const int digit = normalized[index] - L'0';
+                if (value > ((std::numeric_limits<int>::max)() - digit) / 10)
+                    return {};
+                value = (value * 10) + digit;
                 ++index;
             }
 
@@ -127,7 +139,7 @@ namespace
         return parsed;
     }
 
-    bool IsNewerVersion(std::wstring_view candidate, std::wstring_view current)
+    bool NewerVersion(std::wstring_view candidate, std::wstring_view current)
     {
         const ParsedVersion candidateVersion = ParseVersion(candidate);
         const ParsedVersion currentVersion = ParseVersion(current);
@@ -194,6 +206,11 @@ namespace
             return false;
         }
 
+        if (components.nScheme != INTERNET_SCHEME_HTTPS)
+        {
+            errorMessage = L"The update URL must use HTTPS.";
+            return false;
+        }
         const std::wstring host(components.lpszHostName, components.dwHostNameLength);
         std::wstring resource(components.lpszUrlPath, components.dwUrlPathLength);
         if (components.dwExtraInfoLength > 0 && components.lpszExtraInfo != nullptr)
@@ -294,8 +311,8 @@ namespace
             return false;
         }
 
-        std::ofstream stream(outputPath, std::ios::binary | std::ios::trunc);
-        if (!stream)
+        HANDLE file = CreateFileW(outputPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE)
         {
             errorMessage = L"Could not create the temporary update file.";
             return false;
@@ -313,8 +330,8 @@ namespace
 
             if (availableBytes == 0)
             {
-                stream.close();
-                if (stream.good()) return true;
+                if (CloseHandle(file)) return true;
+                file = INVALID_HANDLE_VALUE;
                 errorMessage = L"Could not finalize the temporary update file.";
                 break;
             }
@@ -327,15 +344,15 @@ namespace
                 break;
             }
 
-            stream.write(buffer.data(), static_cast<std::streamsize>(downloadedBytes));
-            if (!stream.good())
+            DWORD writtenBytes = 0;
+            if (!WriteFile(file, buffer.data(), downloadedBytes, &writtenBytes, nullptr) || writtenBytes != downloadedBytes)
             {
                 errorMessage = L"Could not write the temporary update file.";
                 break;
             }
         }
 
-        stream.close();
+        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
         std::error_code removeError;
         std::filesystem::remove(outputPath, removeError);
         return false;
@@ -377,13 +394,13 @@ namespace
 
     std::filesystem::path CurrentExecutablePath()
     {
-        wchar_t modulePath[MAX_PATH] = {};
+        wchar_t modulePath[32768]{};
         const DWORD length = GetModuleFileNameW(nullptr, modulePath, static_cast<DWORD>(std::size(modulePath)));
         return length == 0 || length >= std::size(modulePath) ? std::filesystem::path{} : std::filesystem::path(modulePath);
     }
 
-    // The update helper runs with LaunchMate's rights; in a protected folder such as
-    // Program Files its copy would fail after LaunchMate had already exited.
+    // The helper runs with LaunchMate's rights; in a protected folder such as Program Files
+    // the swap would fail after LaunchMate had already exited.
     bool CanReplaceExecutable(const std::filesystem::path& executable)
     {
         const auto probe = executable.parent_path() /
@@ -394,6 +411,24 @@ namespace
         CloseHandle(file);
         return true;
     }
+
+    void StartProgram(const std::filesystem::path& target)
+    {
+        std::wstring command = L"\"" + target.wstring() + L"\"";
+        STARTUPINFOW startup{sizeof(startup)};
+        PROCESS_INFORMATION process{};
+        if (CreateProcessW(target.c_str(), command.data(), nullptr, nullptr, FALSE,
+            NORMAL_PRIORITY_CLASS, nullptr, target.parent_path().c_str(), &startup, &process))
+        {
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+        }
+    }
+}
+
+bool UpdateChecker::IsNewerVersion(std::wstring_view candidate, std::wstring_view current)
+{
+    return NewerVersion(candidate, current);
 }
 
 std::wstring UpdateChecker::CurrentVersion()
@@ -411,15 +446,27 @@ UpdateCheckResult UpdateChecker::CheckForUpdate()
         return result;
     }
 
+    if (statusCode == 404)
+    {
+        result.state = UpdateCheckState::UpToDate;
+        result.message = L"No published release is available yet.";
+        return result;
+    }
     if (statusCode != 200)
     {
         result.message = L"GitHub returned HTTP " + std::to_wstring(statusCode) + L" while checking for updates.";
         return result;
     }
 
+    return ParseReleaseMetadata(std::string(responseBody.begin(), responseBody.end()));
+}
+
+UpdateCheckResult UpdateChecker::ParseReleaseMetadata(const std::string& metadata)
+{
+    UpdateCheckResult result;
     try
     {
-        const auto root = jsonlite::Parse(std::string(responseBody.begin(), responseBody.end()));
+        const auto root = jsonlite::Parse(metadata);
         if (!root.IsObject())
         {
             result.message = L"The GitHub release response was invalid.";
@@ -431,7 +478,12 @@ UpdateCheckResult UpdateChecker::CheckForUpdate()
         result.release.versionTag = tagName;
         result.release.versionDisplay = NormalizeVersion(tagName);
         result.release.releasePageUrl = ReadWideString(object, "html_url");
-        if (!IsNewerVersion(tagName, CurrentVersion()))
+        if (ParseVersion(tagName).numbers.empty())
+        {
+            result.message = L"The GitHub release has an invalid version tag.";
+            return result;
+        }
+        if (!NewerVersion(tagName, CurrentVersion()))
         {
             result.state = UpdateCheckState::UpToDate;
             result.message = L"No update available.";
@@ -482,17 +534,17 @@ bool UpdateChecker::DownloadReleaseAsset(const UpdateReleaseInfo& release, std::
         return false;
     }
 
-    const auto executable = CurrentExecutablePath();
-    if (executable.empty() || !CanReplaceExecutable(executable))
+    const auto currentExecutable = CurrentExecutablePath();
+    if (currentExecutable.empty() || !CanReplaceExecutable(currentExecutable))
     {
-        errorMessage = L"LaunchMate cannot replace itself in \"" + executable.parent_path().wstring() +
+        errorMessage = L"LaunchMate cannot replace itself in \"" + currentExecutable.parent_path().wstring() +
             L"\" without administrator rights. Please download the new version from the release page.";
         return false;
     }
 
-    const auto updateDirectory = std::filesystem::temp_directory_path() / L"LaunchMate-updates";
+    const auto updateDirectory = std::filesystem::temp_directory_path() / L"LaunchMate-updates" / std::to_wstring(GetCurrentProcessId());
     std::filesystem::create_directories(updateDirectory);
-    downloadedPath = updateDirectory / (L"pending-" + (release.assetName.empty() ? std::wstring(L"LaunchMate-update.exe") : release.assetName));
+    downloadedPath = updateDirectory / L"pending-update.exe";
 
     DWORD statusCode = 0;
     if (!HttpDownloadToFile(release.assetDownloadUrl, downloadedPath, statusCode, errorMessage))
@@ -505,6 +557,21 @@ bool UpdateChecker::DownloadReleaseAsset(const UpdateReleaseInfo& release, std::
         std::error_code removeError;
         std::filesystem::remove(downloadedPath, removeError);
         errorMessage = L"GitHub returned HTTP " + std::to_wstring(statusCode) + L" while downloading the update.";
+        return false;
+    }
+
+    // Never hand anything but a Windows executable to the self-updater.
+    char signature[2]{};
+    DWORD read = 0;
+    HANDLE file = CreateFileW(downloadedPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const bool executable = file != INVALID_HANDLE_VALUE && ReadFile(file, signature, sizeof(signature), &read, nullptr) &&
+        read == sizeof(signature) && signature[0] == 'M' && signature[1] == 'Z';
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    if (!executable)
+    {
+        std::error_code removeError;
+        std::filesystem::remove(downloadedPath, removeError);
+        errorMessage = L"The downloaded update is not a valid Windows executable.";
         return false;
     }
 
@@ -528,70 +595,6 @@ bool UpdateChecker::DownloadReleaseAsset(const UpdateReleaseInfo& release, std::
     return true;
 }
 
-bool UpdateChecker::LaunchSelfUpdater(const std::filesystem::path& downloadedPath, DWORD processId, std::wstring& errorMessage)
-{
-    const auto currentExecutablePath = CurrentExecutablePath();
-    if (currentExecutablePath.empty())
-    {
-        errorMessage = L"Could not determine the current LaunchMate executable path.";
-        return false;
-    }
-
-    // The script itself stays ASCII; paths arrive as arguments, because cmd reads
-    // batch files in the OEM code page and would garble e.g. umlauts in user names.
-    const auto scriptPath = downloadedPath.parent_path() / L"launchmate-self-update.cmd";
-    std::ofstream script(scriptPath, std::ios::binary | std::ios::trunc);
-    if (!script)
-    {
-        errorMessage = L"Could not create the temporary update helper.";
-        return false;
-    }
-
-    script << "@echo off\r\n";
-    script << "setlocal\r\n";
-    script << "set \"TARGET=%~1\"\r\n";
-    script << "set \"UPDATE=%~2\"\r\n";
-    script << "set \"PID=%~3\"\r\n";
-    script << ":wait\r\n";
-    script << "tasklist /FI \"PID eq %PID%\" | find \"%PID%\" >nul\r\n";
-    script << "if not errorlevel 1 (\r\n";
-    script << "    timeout /t 1 /nobreak >nul\r\n";
-    script << "    goto wait\r\n";
-    script << ")\r\n";
-    script << "copy /Y \"%UPDATE%\" \"%TARGET%\" >nul\r\n";
-    script << "rem Start LaunchMate even if the copy failed, so the previous version keeps running.\r\n";
-    script << "start \"\" \"%TARGET%\"\r\n";
-    script << "del /Q \"%UPDATE%\" >nul 2>nul\r\n";
-    script << "del /Q \"%~f0\" >nul 2>nul\r\n";
-    script << "endlocal\r\n";
-
-    script.close(); // The helper must be complete and unlocked before it is launched.
-    if (!script.good())
-    {
-        errorMessage = L"Could not finalize the temporary update helper.";
-        return false;
-    }
-
-    // The outer quotes keep cmd /c from stripping the quotes of the first argument.
-    const std::wstring commandLine = L"\"C:\\Windows\\System32\\cmd.exe\" /c \"\"" + scriptPath.wstring() + L"\" \"" +
-        currentExecutablePath.wstring() + L"\" \"" + downloadedPath.wstring() + L"\" " + std::to_wstring(processId) + L"\"";
-    std::vector<wchar_t> commandBuffer(commandLine.begin(), commandLine.end());
-    commandBuffer.push_back(L'\0');
-
-    STARTUPINFOW startupInfo{};
-    startupInfo.cb = sizeof(startupInfo);
-    PROCESS_INFORMATION processInformation{};
-    if (!CreateProcessW(nullptr, commandBuffer.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | NORMAL_PRIORITY_CLASS, nullptr, nullptr, &startupInfo, &processInformation))
-    {
-        errorMessage = L"Could not launch the temporary update helper.";
-        return false;
-    }
-
-    CloseHandle(processInformation.hThread);
-    CloseHandle(processInformation.hProcess);
-    return true;
-}
-
 bool UpdateChecker::OpenReleasePage(const std::wstring& releasePageUrl)
 {
     if (releasePageUrl.empty())
@@ -600,4 +603,102 @@ bool UpdateChecker::OpenReleasePage(const std::wstring& releasePageUrl)
     }
 
     return reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", releasePageUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+}
+
+bool UpdateChecker::LaunchSelfUpdater(const std::filesystem::path& downloadedPath, DWORD processId, std::wstring& errorMessage)
+{
+    wchar_t executable[32768]{};
+    const DWORD length = GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)));
+    if (!length || length >= std::size(executable))
+    {
+        errorMessage = L"Could not determine the LaunchMate executable path.";
+        return false;
+    }
+    const auto helper = downloadedPath.parent_path() / L"update-helper.exe";
+    if (!CopyFileW(executable, helper.c_str(), FALSE))
+    {
+        errorMessage = L"Could not prepare the update helper.";
+        return false;
+    }
+    std::wstring command = L"\"" + helper.wstring() + L"\" --apply-update " + std::to_wstring(processId) +
+        L" \"" + executable + L"\" \"" + downloadedPath.wstring() + L"\"";
+    STARTUPINFOW startup{sizeof(startup)};
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(helper.c_str(), command.data(), nullptr, nullptr, FALSE,
+        CREATE_NO_WINDOW | NORMAL_PRIORITY_CLASS, nullptr, nullptr, &startup, &process))
+    {
+        errorMessage = L"Could not launch the update helper.";
+        return false;
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return true;
+}
+
+bool UpdateChecker::ApplyUpdate(DWORD processId, const std::filesystem::path& target, const std::filesystem::path& download,
+    std::wstring& errorMessage, int attempts)
+{
+    HANDLE previous = OpenProcess(SYNCHRONIZE, FALSE, processId);
+    if (previous)
+    {
+        const DWORD waitResult = WaitForSingleObject(previous, 120000);
+        CloseHandle(previous);
+        if (waitResult != WAIT_OBJECT_0)
+        {
+            errorMessage = L"The running LaunchMate did not exit, so it was not updated.";
+            return false;
+        }
+    }
+    else if (GetLastError() != ERROR_INVALID_PARAMETER)
+    {
+        errorMessage = L"Could not wait for the running LaunchMate to exit.";
+        return false;
+    }
+
+    // Stage alongside the target, then replace it in one step: the old executable stays
+    // whole until the new one is complete. A virus scanner may hold either file briefly.
+    const auto staged = target.parent_path() / (target.filename().wstring() + L".update-" + std::to_wstring(processId));
+    for (int attempt = 0; attempt < attempts; ++attempt)
+    {
+        if (attempt > 0) Sleep(500);
+        if (CopyFileW(download.c_str(), staged.c_str(), FALSE) &&
+            MoveFileExW(staged.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            return true;
+    }
+    DeleteFileW(staged.c_str());
+    errorMessage = L"The update could not replace LaunchMate. The existing version was kept.\n"
+        L"The downloaded update is still in the temporary LaunchMate-updates folder.";
+    return false;
+}
+
+int UpdateChecker::HandleSelfUpdateCommandLine()
+{
+    int count = 0;
+    wchar_t** arguments = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (!arguments) return -1;
+    if (count < 2 || std::wstring_view(arguments[1]) != L"--apply-update")
+    {
+        LocalFree(arguments);
+        return -1;
+    }
+    if (count != 5) { LocalFree(arguments); return 1; }
+    wchar_t* end = nullptr;
+    const DWORD processId = wcstoul(arguments[2], &end, 10);
+    const bool valid = processId != 0 && end && *end == L'\0';
+    const std::filesystem::path target(arguments[3]);
+    const std::filesystem::path download(arguments[4]);
+    LocalFree(arguments);
+    if (!valid) return 1;
+
+    std::wstring errorMessage;
+    if (!ApplyUpdate(processId, target, download, errorMessage))
+    {
+        MessageBoxW(nullptr, errorMessage.c_str(), L"LaunchMate Update", MB_OK | MB_ICONERROR);
+        // Keep LaunchMate running: start the version that is still in place.
+        StartProgram(target);
+        return 1;
+    }
+    StartProgram(target);
+    DeleteFileW(download.c_str());
+    return 0;
 }

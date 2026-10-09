@@ -3,6 +3,7 @@
 #include "IRacingServices.h"
 #include "MainWindow.h"
 #include "StartupRegistration.h"
+#include "UpdateChecker.h"
 
 #include <algorithm>
 #include <commctrl.h>
@@ -173,6 +174,9 @@ namespace
 int WINAPI wWinMain(HINSTANCE instanceHandle, HINSTANCE, PWSTR, int showCommand)
 {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    // A copy of LaunchMate started by the updater swaps in the new version and exits.
+    const int updateResult = UpdateChecker::HandleSelfUpdateCommandLine();
+    if (updateResult >= 0) return updateResult;
     const int elevatedCommandResult = RunElevatedCommand();
     if (elevatedCommandResult >= 0) return elevatedCommandResult;
 

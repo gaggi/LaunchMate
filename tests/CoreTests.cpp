@@ -133,7 +133,7 @@ struct ProcessMonitorTestAccess
         const auto windowed = SpawnChild(executable, L"--idle-child-pump");
         Require(WaitForTopLevelWindow(GetProcessId(windowed.get())), "Windowed test child did not create its window");
         FILETIME launchTime{};
-        GetSystemTimeAsFileTime(&launchTime);
+        GetSystemTimePreciseAsFileTime(&launchTime);
         const auto unrelated = SpawnChild(executable, L"--idle-child");
 
         ProcessMonitor monitor([](const auto&) {});

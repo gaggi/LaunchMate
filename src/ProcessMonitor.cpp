@@ -1685,7 +1685,7 @@ void ProcessMonitor::StartProgramsForRule(const RuntimeRule& rule)
         const auto beforeSnapshot = CaptureProcessSnapshot(false);
         auto existing = FindMatchingProcesses(beforeSnapshot, program.filePath, normalizedPath);
         FILETIME launchTime{};
-        GetSystemTimeAsFileTime(&launchTime);
+        GetSystemTimePreciseAsFileTime(&launchTime);
         std::shared_ptr<void> rootProcess;
         const auto launch = LaunchProgramProcess(program, &rootProcess);
         const DWORD launchedRootProcessId = launch.processId;
@@ -1807,7 +1807,9 @@ void ProcessMonitor::StopProgramsForRule(const RuntimeRule& rule)
         std::unordered_set<DWORD> ownedIds;
         for (const auto& process : owned) ownedIds.insert(GetProcessId(process.get()));
         FILETIME captureTime{};
-        GetSystemTimeAsFileTime(&captureTime);
+        // Precise: the coarse clock can lag a process creation time by up to a timer
+        // tick (about 15.6 ms), which would hide a process that has just started.
+        GetSystemTimePreciseAsFileTime(&captureTime);
         const std::unordered_set<std::wstring> names{
             NormalizeProcessKey(std::filesystem::path(record.executablePath).filename().wstring())};
         const auto snapshot = CaptureProcessSnapshot(true, &names);

@@ -45,6 +45,8 @@ bool TrayIcon::Create(HWND windowHandle, UINT callbackMessage, HICON icon, std::
     AppendMenuW(menu_, MF_STRING, kMenuToggleMonitoring, L"Start monitoring");
     AppendMenuW(menu_, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu_, MF_STRING, kMenuExit, L"Exit");
+    // Bold, like the default item of other tray menus: a click on the icon opens the window.
+    SetMenuDefaultItem(menu_, kMenuOpen, FALSE);
 
     return Shell_NotifyIconW(NIM_ADD, &notifyIcon) == TRUE;
 }
@@ -107,6 +109,8 @@ void TrayIcon::ShowContextMenu(bool isMonitoring, const std::vector<std::wstring
     }
     AppendMenuW(menu_, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu_, MF_STRING, kMenuExit, L"Exit");
+    // Bold, like the default item of other tray menus: a click on the icon opens the window.
+    SetMenuDefaultItem(menu_, kMenuOpen, FALSE);
 
     POINT cursor{};
     GetCursorPos(&cursor);

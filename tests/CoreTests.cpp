@@ -649,10 +649,13 @@ struct ProcessMonitorTestAccess
             throw std::runtime_error("Program did not launch: " + ToUtf8(lastStatus));
         const auto owned = records[0].startedProcessHandles.front();
         Require(GetPriorityClass(owned.get()) == NORMAL_PRIORITY_CLASS, "Launched app inherited parent low priority");
-        PROCESS_POWER_THROTTLING_STATE childThrottling{PROCESS_POWER_THROTTLING_CURRENT_VERSION};
-        Require(GetProcessInformation(owned.get(), ProcessPowerThrottling, &childThrottling, sizeof(childThrottling)) != FALSE &&
-            (childThrottling.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) == 0,
-            "Launched app inherited parent efficiency mode");
+        if (ReportsEfficiencyMode())
+        {
+            PROCESS_POWER_THROTTLING_STATE childThrottling{PROCESS_POWER_THROTTLING_CURRENT_VERSION};
+            Require(GetProcessInformation(owned.get(), ProcessPowerThrottling, &childThrottling, sizeof(childThrottling)) != FALSE &&
+                (childThrottling.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) == 0,
+                "Launched app inherited parent efficiency mode");
+        }
         if (WaitForSingleObject(owned.get(), 0) != WAIT_TIMEOUT)
         {
             DWORD exitCode = 0;

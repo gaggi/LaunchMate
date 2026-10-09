@@ -36,11 +36,31 @@ jobs:
       - name: Run tests x64
         shell: pwsh
         run: |
-          & .\build\vs2022-x64\Release\LaunchMateCoreTests.exe; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & .\build\vs2022-x64\Release\LaunchMateUpdateTests.exe; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($test in 'LaunchMateCoreTests', 'LaunchMateUpdateTests') {
+            $output = & ".\build\vs2022-x64\Release\$test.exe" 2>&1
+            $code = $LASTEXITCODE
+            $output | ForEach-Object { Write-Host $_ }
+            if ($code -ne 0) {
+              # Failed checks go to stderr; as annotations they show on the run page.
+              $errors = $output | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }
+              if (-not $errors) { $errors = @("exit code $code") }
+              $errors | ForEach-Object { Write-Host "::error title=$test (x64)::$_" }
+              exit $code
+            }
+          }
 
       - name: Run tests x86
         shell: pwsh
         run: |
-          & .\build\vs2022-x86\Release\LaunchMateCoreTests.exe; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & .\build\vs2022-x86\Release\LaunchMateUpdateTests.exe; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($test in 'LaunchMateCoreTests', 'LaunchMateUpdateTests') {
+            $output = & ".\build\vs2022-x86\Release\$test.exe" 2>&1
+            $code = $LASTEXITCODE
+            $output | ForEach-Object { Write-Host $_ }
+            if ($code -ne 0) {
+              # Failed checks go to stderr; as annotations they show on the run page.
+              $errors = $output | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }
+              if (-not $errors) { $errors = @("exit code $code") }
+              $errors | ForEach-Object { Write-Host "::error title=$test (x86)::$_" }
+              exit $code
+            }
+          }

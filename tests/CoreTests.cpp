@@ -758,10 +758,33 @@ struct ProcessMonitorTestAccess
         Require(GetProcessTimes(children[1].get(), &late.launchTime, &exited, &kernel, &user) != FALSE,
             "Cannot read late-launch creation time");
         for (size_t i = 2; i < children.size(); ++i) late.existingProcessIds.insert(GetProcessId(children[i].get()));
+        const auto lateLaunchTime = late.launchTime;
         monitor.startedPrograms_[rule.processKey].push_back(std::move(late));
         monitor.StopProgramsForRule(rule);
-        Require(WaitForSingleObject(children[1].get(), 0) == WAIT_OBJECT_0,
-            "Exit-time lookup failed to close a late/unreported process");
+        if (WaitForSingleObject(children[1].get(), 0) != WAIT_OBJECT_0)
+        {
+            // Explain what the lookup saw; the GitHub runner is hard to debug otherwise.
+            const auto toTicks = [](const FILETIME& time) { return (static_cast<unsigned long long>(time.dwHighDateTime) << 32) | time.dwLowDateTime; };
+            const DWORD lateId = GetProcessId(children[1].get());
+            auto key = std::filesystem::path(executable).filename().wstring();
+            std::transform(key.begin(), key.end(), key.begin(), towlower);
+            const std::unordered_set<std::wstring> names{key};
+            const auto snapshot = monitor.CaptureProcessSnapshot(true, &names);
+            const auto matches = monitor.FindMatchingProcesses(snapshot, executable, executable);
+            wchar_t image[1024]{};
+            DWORD imageSize = static_cast<DWORD>(std::size(image));
+            QueryFullProcessImageNameW(children[1].get(), 0, image, &imageSize);
+            FILETIME created{}, exitedTime{}, kernelTime{}, userTime{};
+            GetProcessTimes(children[1].get(), &created, &exitedTime, &kernelTime, &userTime);
+            std::string detail = "Exit-time lookup failed to close a late/unreported process. snapshot valid=" +
+                std::to_string(snapshot.valid) + ", pids for " + ToUtf8(key) + "=";
+            if (const auto found = snapshot.processIdsByName.find(key); found != snapshot.processIdsByName.end())
+                for (const auto id : found->second) detail += std::to_string(id) + (id == lateId ? "(late) " : " ");
+            detail += ", path matches=" + std::to_string(matches.size()) + (matches.contains(lateId) ? " incl. late" : " without late") +
+                ", module=" + ToUtf8(executable) + ", image=" + ToUtf8(image) +
+                ", created=" + std::to_string(toTicks(created)) + ", launch=" + std::to_string(toTicks(lateLaunchTime));
+            throw std::runtime_error(detail);
+        }
         for (size_t i = 2; i < children.size(); ++i)
             Require(WaitForSingleObject(children[i].get(), 0) == WAIT_TIMEOUT,
                 "Exit-time lookup stopped a pre-existing process");

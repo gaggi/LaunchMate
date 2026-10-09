@@ -214,7 +214,7 @@ bool MainWindow::Create(int showCommand)
     windowHandle_ = CreateWindowExW(
         0,
         windowClass.lpszClassName,
-        (L"LaunchMate " + UpdateChecker::CurrentVersion()).c_str(),
+        L"LaunchMate",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
@@ -248,7 +248,7 @@ bool MainWindow::Create(int showCommand)
         windowHandle_,
         kTrayCallbackMessage,
         appSmallIcon ? appSmallIcon : windowClass.hIcon,
-        (L"LaunchMate " + UpdateChecker::CurrentVersion()).c_str(),
+        L"LaunchMate",
         [this](UINT command)
     {
         HandleTrayCommand(command);
